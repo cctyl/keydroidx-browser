@@ -22,8 +22,6 @@ import acr.browser.lightning.resources.NumberFormatter
 import acr.browser.lightning.resources.ResourceProvider
 import acr.browser.lightning.settings.adblock.DefaultHostsFileUpdater
 import acr.browser.lightning.settings.adblock.HostsFileUpdater
-import acr.browser.lightning.settings.licenses.DefaultDependenciesRepository
-import acr.browser.lightning.settings.licenses.DependenciesRepository
 import acr.browser.lightning.settings.navigation.DefaultSettingsNavigator
 import acr.browser.lightning.settings.navigation.SettingsNavigator
 import acr.browser.lightning.ssl.SessionSslWarningPreferences
@@ -80,7 +78,4 @@ interface AppBindsModule {
 
     @Binds
     fun bindsSettingsNavigator(defaultSettingsNavigator: DefaultSettingsNavigator): SettingsNavigator
-
-    @Binds
-    fun bindsDependenciesRepository(defaultDependenciesRepository: DefaultDependenciesRepository): DependenciesRepository
 }

@@ -29,8 +29,12 @@ plugins {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        // KeydroidX 生态 SDK 的本地发布产物（keydroidx-core publishToMavenLocal）
+        mavenLocal()
         google()
         mavenCentral()
+        // keydroidx-common 传递依赖 com.github.getActivity:XXPermissions:20.0 发布在 JitPack
+        maven("https://jitpack.io")
         // 兜底镜像，顺序理由见文件顶部注释
         maven("https://mirrors.cloud.tencent.com/nexus/repository/maven-public/")
         maven("https://maven.aliyun.com/repository/public/")

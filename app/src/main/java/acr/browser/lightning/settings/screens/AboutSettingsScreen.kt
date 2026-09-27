@@ -26,10 +26,6 @@ class AboutSettingsScreen @Inject constructor(
                 onClick = ClickableOnClick.Action {}
             ),
             ClickableState(
-                title = resourceProvider.stringResource(R.string.licenses),
-                onClick = ClickableOnClick.Navigate(SettingsNavigation.LICENSES)
-            ),
-            ClickableState(
                 title = resourceProvider.stringResource(R.string.app_name),
                 summary = { resourceProvider.stringResource(R.string.mpl_license) },
                 onClick = ClickableOnClick.WebLink("http://www.mozilla.org/MPL/2.0/")

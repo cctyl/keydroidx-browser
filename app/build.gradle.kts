@@ -1,4 +1,3 @@
-import app.cash.licensee.SpdxId
 import java.io.File
 import java.util.Properties
 
@@ -28,7 +27,6 @@ plugins {
     id("com.squareup.sort-dependencies") version "0.21.0"
     id("org.jetbrains.kotlin.plugin.compose") version "2.4.20"
     id("com.anthonycr.plugins.mockingbird") version "3.4.0"
-    id("app.cash.licensee") version "1.14.1"
     id("org.jetbrains.kotlin.plugin.serialization") version "2.4.20"
 }
 
@@ -192,6 +190,7 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences-core:$datastore")
     implementation("androidx.fragment:fragment:1.9.1")
     implementation("androidx.lifecycle:lifecycle-common:$lifecycle")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:$lifecycle")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:$lifecycle")
     implementation("androidx.palette:palette:1.0.0")
     implementation("androidx.webkit:webkit:1.17.1")
@@ -205,6 +204,11 @@ dependencies {
     implementation("io.coil-kt.coil3:coil-compose-core:${coil}")
     implementation("io.coil-kt.coil3:coil-core:$coil")
     implementation("io.coil-kt.coil3:coil-network-okhttp:$coil")
+    // KeydroidX 生态按键机 SDK（从 keydroidx-core publishToMavenLocal 发布，AGP 版本与本项目
+    // 不同（core=8.5.1 / 本项目=9.4.1），不能用 includeBuild composite build，只能走 mavenLocal）。
+    // 更新 core 后需在 core 目录执行：
+    //   gradlew.bat :keydroidx-common:publishToMavenLocal :keydroidx-key-core:publishToMavenLocal
+    implementation("io.github.cctyl.nokia:keydroidx-key-core:1.0.0")
     implementation("javax.inject:javax.inject:1")
     implementation("org.jetbrains.kotlin:kotlin-stdlib:$kotlin")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutines")
@@ -241,15 +245,6 @@ mezzanine {
         "src/main/js/TextReflow.js",
         "src/main/js/ThemeColor.js"
     )
-}
-
-licensee {
-    bundleAndroidAsset = true
-    androidAssetReportPath = "licensee/artifacts.json"
-
-    allow(SpdxId.Apache_20)
-    allow(SpdxId.BSD_3_Clause)
-    allowUrl("https://jsoup.org/license")
 }
 
 kotlin {

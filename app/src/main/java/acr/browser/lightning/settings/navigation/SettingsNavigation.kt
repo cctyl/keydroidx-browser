@@ -12,6 +12,5 @@ enum class SettingsNavigation(val parent: SettingsNavigation?) {
     PRIVACY(ROOT),
     ADVANCED(ROOT),
     ABOUT(ROOT),
-    LICENSES(ABOUT),
     DEBUG(ROOT)
 }
