@@ -29,6 +29,9 @@ interface AppComponent {
 
     fun inject(app: BrowserApp)
 
+    /** 按键机首页（keyphone 适配层）注入书签/历史仓库 */
+    fun inject(activity: acr.browser.lightning.keyphone.BrowserHomeActivity)
+
     fun browserComponentBuilder(): BrowserComponent.Builder
 
     fun settingsComponentBuilder(): SettingsComponent.Builder

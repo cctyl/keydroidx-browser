@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    按键机列表页通用内容布局（首页 / 全屏选项页共用）。
+    红线 #8：外层 ScrollView 禁焦（focusable=false），焦点由列表行自身持有，防止首键被吞。
+    行视图由代码动态构建（KeyphoneViews），高度 WRAP_CONTENT + setMinimumHeight（红线 #15）。
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/keyphone_scroll"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    android:focusable="false"
+    android:focusableInTouchMode="false"
+    android:scrollbars="none">
+
+    <LinearLayout
+        android:id="@+id/keyphone_rows"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingTop="4dp"
+        android:paddingBottom="4dp" />
+
+</ScrollView>

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    按键机（Keyphone）适配专用字符串，与上游英文 strings.xml 分文件管理。
+    本文件为按键机定制界面的中文文案，刻意不参与上游 19 种语言翻译，
+    故整体豁免 MissingTranslation（否则 Lint 会对每条字符串报 error）。
+-->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+
+    <!-- 首页 -->
+    <string name="keyphone_home_title">浏览器</string>
+    <string name="keyphone_search_hint">搜索或输入网址</string>
+    <string name="keyphone_section_bookmarks">书签</string>
+    <string name="keyphone_section_history">历史记录</string>
+
+    <!-- 软键栏 -->
+    <string name="keyphone_soft_options">选项</string>
+    <string name="keyphone_soft_back">返回</string>
+    <string name="keyphone_soft_confirm">确定</string>
+    <string name="keyphone_soft_cancel">取消</string>
+
+    <!-- 全屏选项页（等价原浏览器右上角 ⋮ 溢出菜单全集） -->
+    <string name="keyphone_options_title">选项</string>
+    <string name="keyphone_section_tabs">标签</string>
+    <string name="keyphone_section_page">页面</string>
+    <string name="keyphone_section_records">收藏与记录</string>
+    <string name="keyphone_section_system">系统</string>
+    <string name="keyphone_opt_new_tab">新建标签页</string>
+    <string name="keyphone_opt_incognito">新建无痕标签页</string>
+    <string name="keyphone_opt_refresh">刷新页面</string>
+    <string name="keyphone_opt_stop">停止加载</string>
+    <string name="keyphone_opt_find">在页面中查找</string>
+    <string name="keyphone_opt_share">分享</string>
+    <string name="keyphone_opt_copy_link">复制链接</string>
+    <string name="keyphone_opt_add_home">添加到主屏</string>
+    <string name="keyphone_opt_bookmarks">书签</string>
+    <string name="keyphone_opt_add_bookmark">添加书签</string>
+    <string name="keyphone_opt_history">历史记录</string>
+    <string name="keyphone_opt_downloads">下载</string>
+    <string name="keyphone_opt_settings">设置</string>
+    <string name="keyphone_opt_exit">退出浏览器</string>
+
+    <!-- 退出确认 -->
+    <string name="keyphone_exit_title">退出浏览器</string>
+    <string name="keyphone_exit_message">将关闭全部标签页，确定退出吗？</string>
+    <string name="keyphone_exit_positive">退出</string>
+
+    <!-- 全屏编辑页 -->
+    <string name="keyphone_edit_title">搜索或输入网址</string>
+    <string name="keyphone_edit_hint">输入网址或搜索词，按左软键打开</string>
+
+    <!-- 提示 -->
+    <string name="keyphone_todo">该功能即将支持</string>
+    <string name="keyphone_need_page">请先打开网页后再使用</string>
+    <string name="keyphone_open_failed">无法打开链接</string>
+
+</resources>
