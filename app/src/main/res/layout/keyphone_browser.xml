@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    按键机浏览页内容布局（四区骨架的中间内容区）。
+
+    顶部为 2dp 加载进度线（按百分比横向拉伸，idle 时 INVISIBLE），其下为 WebView 宿主容器。
+    WebView 由上游 WebViewFactory + pool 池化产出，经 TabPager 挂进 R.id.keyphone_browser_frame_host，
+    这里只提供宿主 FrameLayout 与占位（不直接 new WebView）。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/keyphone_browser_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <!--
+        纯 View（无文字）必须显式给高度：WRAP_CONTENT 在 AT_MOST 测量下会被 getDefaultSize()
+        撑满父容器剩余空间（本项目踩过）。宽度用 match_parent + scaleX 表达进度，避免逐帧改布局。
+    -->
+    <View
+        android:id="@+id/keyphone_progress"
+        android:layout_width="match_parent"
+        android:layout_height="2dp"
+        android:background="@color/keydroidx_bottom_text"
+        android:visibility="invisible" />
+
+    <!-- 禁焦：焦点由基类锚定在 midPanel，方向键在浏览页由 Activity 主动驱动 WebView 翻页 -->
+    <FrameLayout
+        android:id="@+id/keyphone_browser_frame_host"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:focusable="false"
+        android:focusableInTouchMode="false" />
+
+</LinearLayout>

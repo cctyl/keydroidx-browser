@@ -4,11 +4,15 @@ import acr.browser.lightning.graphics.LetterImagePainter
 import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.text.InputType
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
@@ -195,6 +199,133 @@ object KeyphoneViews {
         row.addView(hint, lp)
         return row
     }
+
+    /**
+     * 浏览页顶栏地址输入框（普通浏览器地址栏语义，可直接输入/编辑网址）。
+     *
+     * 与首页搜索框同一视觉（半透明圆角 + accent 描边），但本体是 [EditText]：
+     * 单行、URI 输入类型（不触发联想/纠错）、不叠默认下划线背景，字号走 `keydroidx_font_body` Token。
+     * 高度由调用方通过 LayoutParams 决定（顶栏高度有限，故用 WRAP_CONTENT 而非 MATCH_PARENT）。
+     */
+    fun addressBar(context: Context, hintText: CharSequence): EditText {
+        val theme = KeydroidxTheme.getCurrentTheme(context)
+        val input = EditText(context)
+        input.hint = hintText
+        input.setTextColor(theme.textColor)
+        input.setHintTextColor(theme.subTextColor)
+        input.includeFontPadding = false
+        input.isSingleLine = true
+        input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        input.imeOptions = EditorInfo.IME_ACTION_GO
+        applyFontSize(input, R.dimen.keydroidx_font_body)
+        input.setPadding(dp(context, 6f), dp(context, 2f), dp(context, 6f), dp(context, 2f))
+
+        val bg = GradientDrawable()
+        bg.cornerRadius = dp(context, 6f).toFloat()
+        bg.setColor(0x14E8EEF5)
+        bg.setStroke(dp(context, 1f), 0x80000000.toInt() or (theme.accentColor and 0x00FFFFFF))
+        input.background = bg
+
+        // 触屏场景：点击即可进入编辑（物理按键的选中方式暂不在本页处理）
+        input.isFocusable = true
+        input.isFocusableInTouchMode = true
+        return input
+    }
+
+    /**
+     * 标签页列表行（长方形卡片）：左侧页面预览缩略图 + 右侧标题。
+     *
+     * 注意卡片背景只能放在**行内的子 View** 上：`KeydroidxListPageFragment` 用行根 View 承载焦点高亮，
+     * 失焦时会 `setBackgroundResource(0)` 把背景清掉，背景放在行根会被清没。
+     *
+     * @return [TabRow.preview] 由调用方异步解码预览图后 `setImageBitmap`。
+     */
+    fun tabRow(context: Context, title: CharSequence, isCurrent: Boolean): TabRow {
+        // title 由调用方给出最终展示文案（「当前 · 」前缀在调用方拼，这里不依赖 app 的 R）
+        val theme = KeydroidxTheme.getCurrentTheme(context)
+        val row = LinearLayout(context)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.minimumHeight = dp(context, 54f)
+        // 红线 #8：行根必须可聚焦，防首键被吞
+        row.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        row.isFocusable = true
+        row.isFocusableInTouchMode = true
+        row.isClickable = true
+
+        val card = LinearLayout(context)
+        card.orientation = LinearLayout.HORIZONTAL
+        card.gravity = Gravity.CENTER_VERTICAL
+        card.minimumHeight = dp(context, 46f)
+        card.setPadding(dp(context, 4f), dp(context, 4f), dp(context, 6f), dp(context, 4f))
+        val cardBg = GradientDrawable()
+        cardBg.cornerRadius = dp(context, 4f).toFloat()
+        cardBg.setColor(0x14E8EEF5)
+        cardBg.setStroke(
+            dp(context, if (isCurrent) 2f else 1f),
+            if (isCurrent) theme.accentColor else 0x80000000.toInt() or (theme.subTextColor and 0x00FFFFFF)
+        )
+        card.background = cardBg
+        row.addView(
+            card,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(context, 2f)
+                bottomMargin = dp(context, 2f)
+            }
+        )
+
+        // 页面预览缩略图（竖版页面截图，按顶部裁切显示）
+        val preview = ImageView(context)
+        preview.scaleType = ImageView.ScaleType.CENTER_CROP
+        preview.setBackgroundColor(0x33000000)
+        card.addView(
+            preview,
+            LinearLayout.LayoutParams(dp(context, 40f), dp(context, 38f))
+        )
+
+        val label = TextView(context)
+        label.text = title
+        label.setTextColor(if (isCurrent) theme.accentColor else theme.textColor)
+        applyFontSize(label, R.dimen.keydroidx_font_body)
+        label.includeFontPadding = false
+        label.isSingleLine = true
+        label.ellipsize = TextUtils.TruncateAt.END
+        card.addView(
+            label,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(context, 6f)
+            }
+        )
+
+        // 删除按钮：默认收起（GONE），由列表页在「待删态」下露出（方向左键）。
+        // 图标走 KeydroidxIcons 字体图标（红线 #13），配色取自主题（红线 #11）。
+        val delete = buildIconView(context, KeydroidxIcons.ICON_DELETE)
+        delete.setTextColor(theme.darkColor)
+        val deleteBg = GradientDrawable()
+        deleteBg.cornerRadius = dp(context, 4f).toFloat()
+        deleteBg.setColor(theme.accentColor)
+        delete.background = deleteBg
+        delete.visibility = View.GONE
+        card.addView(
+            delete,
+            LinearLayout.LayoutParams(dp(context, 26f), dp(context, 26f)).apply {
+                marginStart = dp(context, 4f)
+            }
+        )
+
+        return TabRow(row, preview, label, delete)
+    }
+
+    /** [tabRow] 的产物：行根（焦点项）+ 预览图 + 标题 + 删除按钮（默认 GONE，待删态露出）。 */
+    class TabRow internal constructor(
+        val root: LinearLayout,
+        val preview: ImageView,
+        val label: TextView,
+        val delete: TextView
+    )
 
     /** 分组标签（书签 / 历史记录），非焦点项。字号按规范 §3 分组小标题栏 = small_title (11sp)。 */
     fun sectionLabel(context: Context, text: CharSequence): TextView {

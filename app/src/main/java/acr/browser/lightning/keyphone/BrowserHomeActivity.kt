@@ -1,9 +1,6 @@
 package acr.browser.lightning.keyphone
 
 import acr.browser.lightning.R
-import acr.browser.lightning.DefaultBrowserActivity
-import acr.browser.lightning.constant.HTTPS
-import acr.browser.lightning.constant.SCHEME_HOMEPAGE
 import acr.browser.lightning.database.Bookmark
 import acr.browser.lightning.database.HistoryEntry
 import acr.browser.lightning.database.bookmark.BookmarkRepository
@@ -30,7 +27,8 @@ import javax.inject.Inject
  * 按键机浏览器首页（进入浏览器后的第一屏，三段式）。
  *
  * - 上：可聚焦的搜索框（焦点列表第 0 项），CENTER 进入全屏编辑页（KeydroidxTextInputFragment）；
- * - 中：书签 / 历史记录快捷区，焦点 UP/DOWN 首尾循环，CENTER 直接打开对应页面；
+ * - 中：书签宫格（3 列，显示全部书签，随 ScrollView 滚动）+ 历史记录；
+ *   宫格内左右换列、上下换行，上下走到边界后**纵向**离开宫格，不会横向跑；CENTER 直接打开对应页面；
  * - 下：软键栏 选项 | 空 | 返回 —— LSK 进入全屏选项页（等价原浏览器右上角 ⋮ 菜单）。
  *
  * 红线：继承 keycore KeydroidxBaseActivity（#1）、禁写 keyCode（#4）、
@@ -88,7 +86,8 @@ class BrowserHomeActivity : KeydroidxBaseActivity() {
     private fun loadData() {
         lifecycleScope.launch {
             try {
-                val newBookmarks = bookmarkRepository.getAllBookmarksSorted().take(MAX_BOOKMARK_CELLS)
+                // 不截断：宫格在 ScrollView 里，书签多时整体变高，由方向键驱动滚动
+                val newBookmarks = bookmarkRepository.getAllBookmarksSorted()
                 val newHistory =
                     historyRepository.lastHundredVisitedHistoryEntries().take(MAX_HISTORY_ROWS)
                 val changed = newBookmarks != bookmarks || newHistory != history
@@ -177,7 +176,7 @@ class BrowserHomeActivity : KeydroidxBaseActivity() {
         )
         fragment.setOnConfirmListener { text ->
             if (!text.isNullOrBlank()) {
-                launchUrl(normalizeInput(text))
+                launchUrl(KeyphoneUrls.normalize(text))
             }
         }
         openFragment(fragment)
@@ -191,7 +190,7 @@ class BrowserHomeActivity : KeydroidxBaseActivity() {
 
     private fun launchUrl(url: String) {
         try {
-            val intent = Intent(this, DefaultBrowserActivity::class.java)
+            val intent = Intent(this, KeyphoneBrowserActivity::class.java)
             intent.data = Uri.parse(url)
             startActivity(intent)
         } catch (t: Throwable) {
@@ -222,8 +221,11 @@ class BrowserHomeActivity : KeydroidxBaseActivity() {
     }
 
     /**
-     * 焦点导航：书签宫格内按二维走（左右换列、上下换行），
-     * 走到宫格边界后交回 [KeydroidxListFocusHelper] 的线性循环导航（红线 #6）。
+     * 焦点导航：书签宫格内按二维走（左右换列、上下换行）。
+     *
+     * 上下键**始终纵向**：走到宫格首/末行后直接离开宫格（首行 → 宫格上方的搜索框，
+     * 末行 → 宫格下方的历史记录），**不会**横向跑到行尾再跳出去 —— 这正是
+     * 「按下键应该往下走，而不是横着走」的要求。左右键只在宫格内换列，到行首/行尾保持不动。
      */
     private fun moveFocus(action: Int): Boolean {
         val helper = focusHelper ?: return false
@@ -245,49 +247,42 @@ class BrowserHomeActivity : KeydroidxBaseActivity() {
                 KeydroidxKeyAction.UP -> {
                     if (position - GRID_COLUMNS >= 0) {
                         helper.setFocusIndex(index - GRID_COLUMNS)
-                        return true
+                    } else {
+                        moveOutOfGrid(helper, gridStart - 1)
                     }
+                    return true
                 }
                 KeydroidxKeyAction.DOWN -> {
                     if (position + GRID_COLUMNS < gridCount) {
                         helper.setFocusIndex(index + GRID_COLUMNS)
-                        return true
+                    } else {
+                        moveOutOfGrid(helper, gridStart + gridCount)
                     }
-                    // 目标格不存在时先贴到末行最后一格，再按一次才跳出书签区
-                    val lastRowStart = (gridCount - 1) / GRID_COLUMNS * GRID_COLUMNS
-                    if (position < lastRowStart) {
-                        helper.setFocusIndex(gridStart + gridCount - 1)
-                        return true
-                    }
+                    return true
                 }
             }
         }
         return when (action) {
             KeydroidxKeyAction.UP, KeydroidxKeyAction.DOWN -> helper.onDirection(action)
+            // 宫格外（搜索框 / 历史记录）不响应左右键，消费掉避免穿透
+            KeydroidxKeyAction.LEFT, KeydroidxKeyAction.RIGHT -> true
             else -> false
         }
     }
 
-    private fun normalizeInput(raw: String): String {
-        val text = raw.trim()
-        if (text.isEmpty()) {
-            return SCHEME_HOMEPAGE
+    /** 离开书签宫格：把焦点移到 [target]（越界则保持不动）。 */
+    private fun moveOutOfGrid(helper: KeydroidxListFocusHelper, target: Int) {
+        if (target >= 0 && target < helper.itemCount) {
+            helper.setFocusIndex(target)
         }
-        if (text.contains("://")) {
-            return text
-        }
-        val looksLikeUrl = !text.contains(' ') && text.contains('.')
-        return if (looksLikeUrl) HTTPS + text else SEARCH_URL + Uri.encode(text)
     }
 
     companion object {
         private const val TAG = "KeyphoneHome"
         /** 书签宫格列数（240dp 基准宽度下每格约 74dp，图标 28dp + caption 名称） */
         private const val GRID_COLUMNS = 3
-        private const val MAX_BOOKMARK_CELLS = 6
-        private const val MAX_HISTORY_ROWS = 3
+        private const val MAX_HISTORY_ROWS = 10
         private const val MAX_INPUT_CHARS = 100
-        private const val SEARCH_URL = "https://www.google.com/search?q="
         private val PAYLOAD_SEARCH = Any()
     }
 }

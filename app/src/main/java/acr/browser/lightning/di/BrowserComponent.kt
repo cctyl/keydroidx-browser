@@ -1,6 +1,7 @@
 package acr.browser.lightning.di
 
 import acr.browser.lightning.browser.BrowserActivity
+import acr.browser.lightning.keyphone.KeyphoneBrowserActivity
 import android.content.Intent
 import android.widget.FrameLayout
 import androidx.fragment.app.FragmentActivity
@@ -38,6 +39,12 @@ interface BrowserComponent {
     }
 
     fun inject(browserActivity: BrowserActivity)
+
+    /**
+     * 按键机浏览页（`keyphone` 适配层）复用同一套浏览内核：
+     * 注入口与 [BrowserActivity] 平行，注入 `BrowserPresenter` / `TabPager` / `IntentExtractor`。
+     */
+    fun inject(keyphoneBrowserActivity: KeyphoneBrowserActivity)
 
 }
 

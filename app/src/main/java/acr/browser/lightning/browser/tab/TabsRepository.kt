@@ -5,6 +5,9 @@ import acr.browser.lightning.browser.tab.bundle.BundleStore
 import acr.browser.lightning.browser.tab.settings.TabSettings
 import acr.browser.lightning.concurrency.AppCoroutineScope
 import acr.browser.lightning.concurrency.CoroutineDispatchers
+import acr.browser.lightning.constant.SCHEME_BOOKMARKS
+import acr.browser.lightning.constant.SCHEME_HISTORY
+import acr.browser.lightning.constant.SCHEME_HOMEPAGE
 import acr.browser.lightning.di.InitialAction
 import acr.browser.lightning.extensions.activeTabLimit
 import acr.browser.lightning.ids.ViewIdGenerator
@@ -44,6 +47,9 @@ class TabsRepository @Inject constructor(
     private val searchEngineProvider: SearchEngineProvider,
     private val viewIdGenerator: ViewIdGenerator,
     private val activityManager: ActivityManager,
+    private val homePageInitializer: HomePageInitializer,
+    private val bookmarkPageInitializer: BookmarkPageInitializer,
+    private val historyPageInitializer: HistoryPageInitializer,
     appCoroutineScope: AppCoroutineScope,
 ) : BrowserContract.Model {
 
@@ -171,12 +177,17 @@ class TabsRepository @Inject constructor(
 
                 else -> null
             }
-            val newTabInitializer = if (initialUrl != null && initialUrl.isFileUrl()) {
-                permissionInitializerFactory.create(initialUrl)
-            } else if (initialUrl != null) {
-                UrlInitializer(initialUrl)
-            } else {
-                null
+            val newTabInitializer = when {
+                initialUrl == null -> null
+                // `about:home` / `about:bookmarks` 是「主页」偏好的哨兵值（对外也声明为 about scheme 的
+                // VIEW 入口），必须翻译成对应 Initializer 去生成 HTML 页面；当成 URL 直接 loadUrl
+                // 只会得到 `chrome://home/` 之类的加载失败页。
+                initialUrl == SCHEME_HOMEPAGE -> homePageInitializer
+                initialUrl == SCHEME_BOOKMARKS -> bookmarkPageInitializer
+                initialUrl == SCHEME_HISTORY -> historyPageInitializer
+                // 本地文件必须先走权限确认（安全闸门），不能直接加载
+                initialUrl.isFileUrl() -> permissionInitializerFactory.create(initialUrl)
+                else -> UrlInitializer(initialUrl)
             }
 
             // Wait until old tabs are loaded before creating new tab
