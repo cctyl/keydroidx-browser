@@ -16,17 +16,25 @@
     <string name="keyphone_soft_options">选项</string>
     <string name="keyphone_soft_menu">菜单</string>
     <string name="keyphone_soft_back">返回</string>
+    <string name="keyphone_soft_exit">退出</string>
     <string name="keyphone_soft_confirm">确定</string>
     <string name="keyphone_soft_cancel">取消</string>
+    <string name="keyphone_soft_delete">删除</string>
+    <string name="keyphone_soft_clear">清空</string>
 
     <!-- 按键机浏览页（顶栏=地址栏，底栏=菜单栏；地址为空时的兜底标题） -->
     <string name="keyphone_browser_title">浏览器</string>
+    <string name="keyphone_tab_home">主页</string>
+    <string name="keyphone_tab_untitled">新标签页</string>
 
     <!-- 标签页列表页（竖向一行一个，显示标题 + 页面预览） -->
     <string name="keyphone_tabs_title">标签页</string>
 
     <string name="keyphone_tabs_current">当前 · %1$s</string>
     <string name="keyphone_tabs_empty">没有打开的标签页</string>
+    <string name="keyphone_clear_tabs_title">清空标签页</string>
+    <string name="keyphone_clear_tabs_message">确定要清空全部标签页吗？</string>
+    <string name="keyphone_tabs_cleared">已清空标签页</string>
 
     <!-- 浏览页选项：标签页列表入口（直接放选项里，不再藏进设置页） -->
     <string name="keyphone_opt_tabs">标签页列表</string>
@@ -69,5 +77,7 @@
     <string name="keyphone_added_home">已添加到首页</string>
     <string name="keyphone_already_home">该网页已在首页中</string>
     <string name="keyphone_add_home_failed">该页面无法添加到首页</string>
+    <string name="keyphone_bookmark_deleted">已删除书签</string>
+    <string name="keyphone_bookmark_delete_failed">删除书签失败</string>
 
 </resources>

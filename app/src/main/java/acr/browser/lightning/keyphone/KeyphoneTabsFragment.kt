@@ -13,6 +13,7 @@ import androidx.lifecycle.lifecycleScope
 import io.github.cctyl.nokia.common.log.KeydroidxLog
 import io.github.cctyl.nokia.common.model.KeydroidxKeyAction
 import io.github.cctyl.nokia.common.ui.KeydroidxTheme
+import io.github.cctyl.nokia.common.ui.dialog.KeydroidxConfirmDialog
 import io.github.cctyl.nokia.common.ui.page.KeydroidxListPageFragment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
@@ -52,6 +53,8 @@ class KeyphoneTabsFragment : KeydroidxListPageFragment() {
     override fun getLayoutRes(): Int = R.layout.keyphone_list
 
     override fun getPageTitle(): CharSequence = getString(R.string.keyphone_tabs_title)
+
+    override fun getSoftLeftText(): CharSequence = getString(R.string.keyphone_soft_clear)
 
     override fun getSoftRightText(): CharSequence = getString(R.string.keyphone_soft_back)
 
@@ -140,6 +143,26 @@ class KeyphoneTabsFragment : KeydroidxListPageFragment() {
     override fun onBack(): Boolean {
         (activity as? KeyphoneBrowserActivity)?.closeTabsPage()
         return true
+    }
+
+    override fun onSoftLeft(): Boolean {
+        confirmClearAllTabs()
+        return true
+    }
+
+    private fun confirmClearAllTabs() {
+        val host = activity as? KeyphoneBrowserActivity ?: return
+        if (rows.isEmpty()) return
+        KeydroidxConfirmDialog(
+            requireContext(),
+            getString(R.string.keyphone_clear_tabs_title),
+            getString(R.string.keyphone_clear_tabs_message)
+        )
+            .setPositiveButton(getString(R.string.keyphone_soft_clear)) {
+                host.clearAllTabs()
+            }
+            .setNegativeButton(getString(R.string.keyphone_soft_cancel), null)
+            .show()
     }
 
     /**

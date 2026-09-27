@@ -157,18 +157,24 @@ class TabsRepository @Inject constructor(
 
     override suspend fun initializeTabs(): List<TabModel> =
         withContext(coroutineDispatchers.default) {
-            val oldTabsDeferred = bundleStore.retrieve()
-                .also { initializers -> viewIdGenerator.claimViewIds(initializers.map { it.id }) }
-                .map {
-                    async {
-                        createTabUnsafe(
-                            tabInitializer = it,
-                            tabType = TabModel.Type.NORMAL,
-                            foreground = false,
-                            emitUpdate = false
-                        )
+            val shouldRestore = userPreferencesDataStore.restoreLostTabsEnabled.get()
+            val oldTabsDeferred = if (shouldRestore) {
+                bundleStore.retrieve()
+                    .also { initializers -> viewIdGenerator.claimViewIds(initializers.map { it.id }) }
+                    .map {
+                        async {
+                            createTabUnsafe(
+                                tabInitializer = it,
+                                tabType = TabModel.Type.NORMAL,
+                                foreground = false,
+                                emitUpdate = false
+                            )
+                        }
                     }
-                }
+            } else {
+                bundleStore.deleteAll()
+                emptyList()
+            }
 
             val initialUrl = when (initialAction) {
                 is BrowserContract.Action.LoadUrl -> initialAction.url

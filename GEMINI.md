@@ -1,0 +1,141 @@
+# GEMINI.md
+
+本文件为 Antigravity / Gemini CLI 在此代码仓库（`keydroidx-lightning-browser`）中工作的核心指导上下文。
+
+---
+
+## 1. 项目定位与架构概述
+
+### 1.1 项目定位
+- **项目名称**：Lightning Browser（KeydroidX 适配版）
+- **包名**：`acr.browser.lightning`（Plus 变体） / `acr.browser.barebones`（Lite 变体）
+- **生态背景**：本仓库是经典开源轻量浏览器 Lightning Browser 的上游 Fork，隶属于 **KeydroidX 生态**（`d:/project/keydroidx_ecosystem/`）。
+- **目标设备**：诺基亚智能按键手机 / 物理键盘低分辨率 Android 设备（典型分辨率 240×320、320×480，minSdk 24，targetSdk 37）。
+
+### 1.2 核心技术栈
+- **语言与平台**：Kotlin 2.4.20、Java 21 Toolchain、Android Gradle Plugin (AGP) 9.4.1、minSdk 24、compileSdk/targetSdk 37。
+- **UI 架构**：
+  - **上游触屏 UI**：MVP + Jetpack Compose（`BrowserActivity`、`BrowserScreen`、`BrowserPresenter`、Material3 `BrowserTheme`）。
+  - **按键机专用 UI**（`acr.browser.lightning.keyphone`）：基于 `io.github.cctyl.nokia:keydroidx-key-core` SDK，采用四区规范（状态/标题栏、内容区、2dp 进度线、三段式软键栏），包含 `BrowserHomeActivity`（首页书签宫格/搜索）、`KeyphoneBrowserActivity`（按键浏览页）、`KeyphoneOptionsActivity`（全屏选项菜单）、`KeyphoneTabsFragment`（卡片式标签页列表）。
+- **依赖注入**：Dagger 2.60.1（`AppComponent` 全局单例、`BrowserComponent` 每 Activity 独立 Scope、`SettingsComponent`）。
+- **数据存储**：
+  - 手写 `SQLiteOpenHelper` + `DatabaseDelegate`（书签 Bookmark、历史 History、下载 Downloads、广告拦截 Hosts、白名单 AllowList），非 Room。
+  - Jetpack DataStore Preferences（`UserPreferencesDataStore`、`PreferenceStore<T>` 类型安全封装）。
+- **网络与资源**：OkHttp 5.5、Okio 3.18、Coil 3.6.3（图标/图片加载）、jsoup 1.23.2、Mezzanine 2.5.0（编译期将 `src/main/html/*.html` 和 `src/main/js/*.js` 转为 Kotlin Reader）。
+- **测试框架**：JUnit 4、Robolectric 4.17、AssertJ、Turbine（Flow 测试）、Mockingbird（`com.anthonycr.mockingbird` 编译期 Fake 生成，非 Mockito）。
+
+---
+
+## 2. 常用构建、测试与运行命令
+
+所有命令均在项目根目录下通过 Windows PowerShell 或 CMD 执行。
+
+### 2.1 构建命令
+- **Debug 构建（推荐 Plus 变体）**：
+  ```powershell
+  .\gradlew.bat assembleLightningPlusDebug
+  ```
+- **Debug 构建（Lite 变体）**：
+  ```powershell
+  .\gradlew.bat assembleLightningLiteDebug
+  ```
+- **Release 打包（必须走全量 Lint，严禁加 `-x lint`）**：
+  ```powershell
+  .\gradlew.bat :app:lintLightningPlusRelease :app:assembleLightningPlusRelease
+  ```
+- **全量构建（包含测试与 Lint）**：
+  ```powershell
+  .\gradlew.bat build
+  ```
+
+### 2.2 质量检查与依赖工具
+- **单跑 Lint 检查**：
+  ```powershell
+  .\gradlew.bat :app:lintLightningPlusDebug
+  ```
+- **许可证白名单检查（Licensee）**：
+  ```powershell
+  .\gradlew.bat :app:licenseeAndroidLightningPlusDebug
+  ```
+- **依赖健康检查（Dependency Analysis）**：
+  ```powershell
+  .\gradlew.bat buildHealth
+  ```
+- **依赖块字母序自动排版**：
+  ```powershell
+  .\gradlew.bat sortDependencies
+  ```
+- **更新依赖锁文件**（新增/升级依赖后必跑）：
+  ```powershell
+  .\gradlew.bat --write-locks
+  ```
+
+### 2.3 单元测试（Robolectric）
+- **运行全部单测**：
+  ```powershell
+  .\gradlew.bat :app:testLightningPlusDebugUnitTest
+  ```
+- **单跑指定测试类**：
+  ```powershell
+  .\gradlew.bat :app:testLightningPlusDebugUnitTest --tests "acr.browser.lightning.adblock.HostsFileParserTest"
+  ```
+- **单跑指定测试方法**：
+  ```powershell
+  .\gradlew.bat :app:testLightningPlusDebugUnitTest --tests "acr.browser.lightning.search.suggestions.GoogleSuggestionsModelTest.fetchSuggestions_returnsExpectedList"
+  ```
+
+### 2.4 一键脚本（移植自 KeydroidX 生态）
+- `build_debug.bat`：构建 Plus Debug APK，输出至 `app\build\outputs\apk\lightningPlus\debug\`。
+- `build_install_debug.bat [serial]`：构建并通过 ADB 安装运行至已连接设备（支持多设备并行）。
+- `build_release.bat`：全量 Lint + Release 混淆打包并打开输出文件夹。
+- `install_debug.bat [serial]`：只安装已有 Debug APK，不重新编译。
+
+---
+
+## 3. 按键机（KeydroidX）开发规范与红线
+
+在 `acr.browser.lightning.keyphone` 模块及任何按键机适配代码中，必须严格遵守以下生态规则：
+
+1. **基类继承**：
+   - 所有按键机 Activity 必须继承 `io.github.cctyl.nokia.keycore.ui.KeydroidxBaseActivity`。
+   - 所有列表 Fragment 必须继承 `io.github.cctyl.nokia.common.ui.page.KeydroidxListPageFragment` 或 `KeydroidxPageFragment`。
+2. **按键处理规范（严禁硬编码 KeyCode）**：
+   - 必须通过 `KeydroidxKeyAction` 枚举匹配按键（如 `KeydroidxKeyAction.CONFIRM`、`NAV_LEFT`、`SOFT_LEFT` 等），绝对禁止手写 `KeyEvent.KEYCODE_*`。
+   - 如果消费了 KeyDown，必须保证同按键的 KeyUp / Repeat 事件得到一致处理。
+   - 对于非长按的执行类动作，必须过滤 key repeat 事件（防止按键连击）。
+3. **焦点与滚动**：
+   - 列表焦点导航必须使用 `KeydroidxListFocusHelper` 管理首尾循环与高亮。
+   - 动态构建包含 `TextView` 的列表项时，高度必须使用 `WRAP_CONTENT` 配合 `setMinimumHeight()`，禁止写死固定 `dp`（防大字号裁字）。
+4. **弹窗规范**：
+   - 确认/取消类对话框统一走 `KeydroidxConfirmDialog`，避免原生触屏 Dialog 导致的物理按键失焦。
+5. **设计 Token 与资源**：
+   - 字体/字号统一走 `KeydroidxTheme` 和 `keydroidx_font_*` 语义 Token。
+   - 图标统一使用 `KeydroidxIcons`（Material 矢量图标）。
+6. **异常日志**：
+   - 所有的 `catch` 分支必须显式调用 `KeydroidxLog.e(...)` 记录日志，严禁空 catch。
+
+---
+
+## 4. Gradle 与环境避坑指南
+
+1. **`.bat` 脚本纯 ASCII 原则**：
+   - Windows cmd.exe 解析 `.bat` 默认走 OEM 代码页（GBK/936），UTF-8 中文字符会导致行尾截断或语法解析崩溃。所有 `.bat` 文件严禁包含非 ASCII 字符，中文说明应写在文档中。
+2. **依赖仓库顺序**：
+   - 仓库配置在 `settings.gradle.kts` 中。必须保持 **官方源在前（google, mavenCentral）、国内镜像在后兜底**，防止部分镜像元数据残缺（只有 POM 无 jar）导致的依赖解析死锁。
+3. **项目隔离与路径访问**：
+   - 开启了 `org.gradle.unsafe.isolated-projects=true`，构建脚本中禁止跨 Project 调用（如 `rootProject.file(...)`），应使用 `File(layout.projectDirectory.asFile.parentFile, "...")` 相对路径。
+4. **HTML / JS 静态资源修改**：
+   - `src/main/html/` 和 `src/main/js/` 由 Mezzanine KSP 插件编译处理，修改后必须执行 clean 或重新 Gradle 编译生成新的 Reader 类。
+5. **WebView 创建约束**：
+   - 所有 `WebView` 实例必须通过 `WebViewFactory` 和 `pool/` 对象池获取，禁止直接 `WebView(context)` 实例化。
+6. **签名凭证安全**：
+   - Release 凭证只读取环境变量或本地未提交的 `local.properties`，严禁提交任何 keystore 口令到版本库。
+
+---
+
+## 5. 协作与 Git 规范
+
+- **自动部署要求**：每次完成功能开发或 Bug 修复并通过编译构建后，**必须自动执行安装脚本**（如 `python install_debug.py`）将最新 Debug APK 部署至已连接的手机设备上。
+- **交互语言**：始终以 **中文** 回答用户。
+- **Git Commit 规范**：Commit Message 使用 **英文**，遵循 Conventional Commits（如 `feat: ...`, `fix: ...`, `refactor: ...`）。
+- **提交权限**：除非用户明确指令（如 "Commit the change"），切勿擅自执行 `git commit` 或 `git push`。

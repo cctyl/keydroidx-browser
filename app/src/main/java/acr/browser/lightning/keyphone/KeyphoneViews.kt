@@ -12,6 +12,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -384,7 +385,7 @@ object KeyphoneViews {
         container.orientation = LinearLayout.VERTICAL
         container.setPadding(dp(context, 4f), 0, dp(context, 4f), 0)
 
-        val cells = ArrayList<View>(titles.size)
+        val cells = ArrayList<BookmarkCell>(titles.size)
         titles.chunked(columns).forEach { chunk ->
             val row = LinearLayout(context)
             row.orientation = LinearLayout.HORIZONTAL
@@ -415,10 +416,10 @@ object KeyphoneViews {
         return BookmarkGrid(container, cells)
     }
 
-    /** 单个书签图标格：圆角方形字母图标 + 名称（名称单行截断）。 */
-    private fun buildBookmarkCell(context: Context, title: CharSequence): LinearLayout {
+    /** 单个书签图标格：圆角方形字母图标 + 名称（名称单行截断）+ 右上角删除角标（编辑态显示）。 */
+    private fun buildBookmarkCell(context: Context, title: CharSequence): BookmarkCell {
         val theme = KeydroidxTheme.getCurrentTheme(context)
-        val cell = LinearLayout(context)
+        val cell = BookmarkCell(context)
         cell.orientation = LinearLayout.VERTICAL
         cell.gravity = Gravity.CENTER_HORIZONTAL
         cell.minimumHeight = dp(context, 46f)
@@ -428,8 +429,12 @@ object KeyphoneViews {
         cell.isFocusable = true
         cell.isFocusableInTouchMode = true
         cell.isClickable = true
+        cell.isLongClickable = true
 
         val letter = title.firstOrNull { !it.isWhitespace() } ?: '?'
+
+        val iconWrapper = FrameLayout(context)
+
         val avatar = TextView(context)
         avatar.text = letter.uppercaseChar().toString()
         avatar.gravity = Gravity.CENTER
@@ -443,7 +448,30 @@ object KeyphoneViews {
         )
         avatar.background = avatarBg
         val avatarSize = dp(context, 28f)
-        cell.addView(avatar, LinearLayout.LayoutParams(avatarSize, avatarSize))
+        iconWrapper.addView(
+            avatar,
+            FrameLayout.LayoutParams(avatarSize, avatarSize, Gravity.CENTER)
+        )
+
+        val closeBadge = TextView(context)
+        KeydroidxIcons.setIcon(closeBadge, KeydroidxIcons.ICON_CLOSE)
+        closeBadge.gravity = Gravity.CENTER
+        closeBadge.setTextColor(Color.WHITE)
+        closeBadge.setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(context, 9f).toFloat())
+        closeBadge.includeFontPadding = false
+        val badgeBg = GradientDrawable()
+        badgeBg.shape = GradientDrawable.OVAL
+        badgeBg.setColor(0xFFE53935.toInt())
+        closeBadge.background = badgeBg
+        val badgeSize = dp(context, 13f)
+        closeBadge.visibility = View.GONE
+        iconWrapper.addView(
+            closeBadge,
+            FrameLayout.LayoutParams(badgeSize, badgeSize, Gravity.TOP or Gravity.END)
+        )
+
+        val wrapperSize = dp(context, 32f)
+        cell.addView(iconWrapper, LinearLayout.LayoutParams(wrapperSize, wrapperSize))
 
         val name = TextView(context)
         name.text = title
@@ -461,12 +489,92 @@ object KeyphoneViews {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
         )
+        cell.closeBadge = closeBadge
         return cell
+    }
+
+    /** 书签格子 View，支持编辑模式下显隐右上角删除角标 */
+    class BookmarkCell(context: Context) : LinearLayout(context) {
+        lateinit var closeBadge: TextView internal set
+
+        fun setEditMode(editMode: Boolean) {
+            closeBadge.visibility = if (editMode) View.VISIBLE else View.GONE
+        }
     }
 
     /** [bookmarkGrid] 的产物：容器 + 按顺序排列的图标格（与书签列表一一对应）。 */
     class BookmarkGrid internal constructor(
         val container: LinearLayout,
-        val cells: List<View>
+        val cells: List<BookmarkCell>
+    ) {
+        fun setEditMode(editMode: Boolean) {
+            cells.forEach { it.setEditMode(editMode) }
+        }
+    }
+
+    /** UC 风格顶部标签栏项数据 */
+    data class UcTabItem(
+        val id: Int,
+        val title: String,
+        val isSelected: Boolean
     )
+
+    /**
+     * UC 风格顶部标签栏单个标签 View：
+     * 选中状态高亮天蓝底色 + 白色粗体字；未选中状态深蓝底色 + 边框 + 浅灰蓝字。
+     */
+    fun ucTabCell(
+        context: Context,
+        item: UcTabItem,
+        onTabClicked: (UcTabItem) -> Unit
+    ): View {
+        val cell = LinearLayout(context)
+        cell.orientation = LinearLayout.HORIZONTAL
+        cell.gravity = Gravity.CENTER
+        cell.minimumHeight = dp(context, 24f)
+        cell.setPadding(dp(context, 6f), dp(context, 2f), dp(context, 6f), dp(context, 2f))
+        cell.isFocusable = false
+        cell.isFocusableInTouchMode = false
+        cell.isClickable = true
+
+        val textView = TextView(context)
+        textView.text = item.title
+        textView.includeFontPadding = false
+        textView.isSingleLine = true
+        textView.ellipsize = TextUtils.TruncateAt.END
+        textView.gravity = Gravity.CENTER
+        applyFontSize(textView, R.dimen.keydroidx_font_caption)
+
+        val bg = GradientDrawable()
+        bg.cornerRadius = dp(context, 3f).toFloat()
+
+        if (item.isSelected) {
+            bg.setColor(0xFF4A90E2.toInt())
+            textView.setTextColor(Color.WHITE)
+            textView.paint.isFakeBoldText = true
+        } else {
+            bg.setColor(0xFF203248.toInt())
+            bg.setStroke(dp(context, 1f), 0xFF354B66.toInt())
+            textView.setTextColor(0xFFB0C4DE.toInt())
+            textView.paint.isFakeBoldText = false
+        }
+        cell.background = bg
+
+        val lp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+        val minW = dp(context, 48f)
+        val maxW = dp(context, 86f)
+        cell.minimumWidth = minW
+        textView.maxWidth = maxW - dp(context, 12f)
+
+        lp.marginStart = dp(context, 2f)
+        lp.marginEnd = dp(context, 2f)
+        cell.layoutParams = lp
+
+        cell.addView(textView)
+        cell.setOnClickListener { onTabClicked(item) }
+        return cell
+    }
 }

@@ -19,6 +19,7 @@ import io.github.cctyl.nokia.common.ui.KeydroidxIcons
 import io.github.cctyl.nokia.common.ui.dialog.KeydroidxConfirmDialog
 import io.github.cctyl.nokia.common.ui.page.KeydroidxListFocusHelper
 import io.github.cctyl.nokia.keycore.ui.KeydroidxBaseActivity
+import java.io.File
 
 /**
  * 按键机全屏选项页（首页按 LSK 进入）。
@@ -50,8 +51,7 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         pageMode = intent?.getBooleanExtra(EXTRA_PAGE_MODE, false) == true
         setPageTitle(getString(R.string.keyphone_options_title))
         setTitleIcon(KeydroidxIcons.MORE_VERT)
-        setStatusBarVisible(true)
-        registerBatteryReceiver()
+        setStatusBarVisible(false)
         setSoftKeys(
             getString(R.string.keyphone_soft_confirm),
             null,
@@ -165,6 +165,7 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         OptionEntry.Option(KeydroidxIcons.ICON_ADD, R.string.keyphone_opt_new_tab) { goHome() },
         OptionEntry.Option(KeydroidxIcons.ICON_LOCK, R.string.keyphone_opt_incognito) { launchIncognito() },
         OptionEntry.Option(KeydroidxIcons.VIEW_LIST, R.string.keyphone_opt_tabs) { launchTabsList() },
+        OptionEntry.Option(KeydroidxIcons.ICON_DELETE, R.string.keyphone_opt_clear_tabs) { confirmClearTabsFromHome() },
 
         OptionEntry.Divider,
         OptionEntry.Section(R.string.keyphone_section_page),
@@ -265,6 +266,27 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
 
     private fun todo() {
         Toast.makeText(this, R.string.keyphone_todo, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun confirmClearTabsFromHome() {
+        KeydroidxConfirmDialog(
+            this,
+            getString(R.string.keyphone_clear_tabs_title),
+            getString(R.string.keyphone_clear_tabs_message)
+        )
+            .setPositiveButton(getString(R.string.keyphone_soft_clear)) {
+                try {
+                    val file = File(filesDir, "SAVED_TABS.parcel")
+                    if (file.exists()) {
+                        file.delete()
+                    }
+                    Toast.makeText(this, R.string.keyphone_tabs_cleared, Toast.LENGTH_SHORT).show()
+                } catch (t: Throwable) {
+                    KeydroidxLog.e(TAG, "清空标签页失败", t)
+                }
+            }
+            .setNegativeButton(getString(R.string.keyphone_soft_cancel), null)
+            .show()
     }
 
     /** 破坏性操作确认：core 唯一确认组件，左软键=肯定、右软键=否定（红线 #9）。 */

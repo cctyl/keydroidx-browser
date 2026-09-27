@@ -226,7 +226,7 @@ class UserPreferencesDataStore @Inject constructor(
     val restoreLostTabsEnabled: NonNullPreferenceStore<Boolean> = NonNullPreferenceStore(
         key = booleanPreferencesKey(RESTORE_LOST_TABS),
         dataStore = dataStore,
-        defaultValue = true
+        defaultValue = false
     )
 
     /**
