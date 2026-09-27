@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lightning Browser × KeydroidX — 按键机首页原型 v3</title>
+<style>
+/* ============================================================
+   Lightning Browser 按键机化原型 · v3
+   首页三段式：顶部搜索框（可聚焦，CENTER→编辑页）
+              中部书签/历史快捷区（焦点循环）
+              底部软键栏 选项 | 返回（LSK→全屏选项界面）
+   骨架: activity_keydroidx_base.xml（7 / 85 / 30dp）
+   主题: KeydroidxTheme.THEME_CLASSIC_BLUE
+   ============================================================ */
+:root{
+  --primary:#1A3A6B; --dark:#0D1B3E; --accent:#64B5F6;
+  --focus:rgba(33,150,243,.4);
+  --text:#E8EEF5; --sub:#90CAF9; --card:rgba(13,27,62,.84); --status:#CBD5E1;
+  --sk-center:#FDE047;
+  --desk:#14171B; --desk-line:#262B31; --ink:#E8ECF1; --ink-dim:#8A94A0; --gold:#E5B567;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:
+    radial-gradient(1100px 460px at 75% -10%, rgba(26,58,107,.35), transparent 60%),
+    radial-gradient(800px 380px at 8% 110%, rgba(229,181,103,.06), transparent 60%),
+    var(--desk);
+  color:var(--ink);
+  font-family:Roboto,"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  min-height:100vh;
+}
+.topbar-page{
+  position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:20px;flex-wrap:wrap;
+  padding:14px 28px;background:rgba(20,23,27,.85);backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--desk-line);
+}
+.brand h1{font-size:18px;font-weight:700;letter-spacing:.4px}
+.brand h1 em{font-style:normal;color:var(--gold)}
+.brand p{font-size:11px;color:var(--ink-dim);margin-top:3px}
+.facts{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
+.fchip{font-size:10.5px;color:var(--ink-dim);border:1px solid var(--desk-line);border-radius:8px;
+  padding:5px 10px;background:rgba(255,255,255,.03)}
+.fchip b{color:var(--ink);font-weight:600}
+.viewctl{display:flex;gap:8px}
+.vbtn{cursor:pointer;user-select:none;font-size:12px;color:var(--ink);background:#242A31;
+  border:1px solid #333B44;border-radius:8px;padding:6px 12px;transition:all .15s}
+.vbtn:hover{background:#2E3640}
+.vbtn.on{background:#1A3A6B;border-color:#2C559C;color:#fff}
+
+.gallery{display:flex;flex-wrap:wrap;gap:38px 30px;padding:34px 30px 80px;justify-content:center;
+  transform-origin:top center;transition:transform .25s ease}
+.board{display:flex;flex-direction:column;align-items:center;width:262px}
+.board.first .phone{outline:2px solid var(--gold);outline-offset:4px;border-radius:24px}
+.phone{background:linear-gradient(160deg,#2B323B,#171B20 60%);border:1px solid #3A434E;
+  border-radius:24px;padding:14px 11px 10px;
+  box-shadow:0 24px 50px -18px rgba(0,0,0,.75), inset 0 1px 0 rgba(255,255,255,.08);
+  transition:transform .2s ease}
+.board:hover .phone{transform:translateY(-4px)}
+.keyhints{display:flex;justify-content:space-between;align-items:center;
+  padding:8px 6px 0;color:#525D69;font-size:9px;letter-spacing:1px}
+.keyhints i{width:14px;height:14px;border:1px solid #3E4854;border-radius:50%;display:inline-block}
+
+/* ---------- 240×320 骨架 ---------- */
+.screen{
+  position:relative;width:240px;height:320px;overflow:hidden;
+  background:linear-gradient(180deg,var(--dark) 0%,var(--primary) 50%,var(--dark) 100%);
+  border-radius:3px;display:flex;flex-direction:column;text-align:left;
+  font-family:'ArkPixel','FusionPixel',Roboto,"Noto Sans SC",sans-serif;
+}
+.topbar-s{height:22px;flex:0 0 22px;background:linear-gradient(180deg,var(--primary),var(--dark));
+  display:flex;align-items:center;padding:0 6px;color:var(--status)}
+.topbar-s .tic{font-size:13px;margin-right:4px;color:var(--text)}
+.topbar-s .tt{flex:1;font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-right:4px}
+.topbar-s .st{display:flex;align-items:center;gap:4px;font-size:9px}
+.sig{display:inline-flex;align-items:flex-end;gap:1px;height:9px}
+.sig i{width:2px;background:var(--status);border-radius:.5px;display:block}
+.sig i:nth-child(1){height:3px}.sig i:nth-child(2){height:5px}
+.sig i:nth-child(3){height:7px}.sig i:nth-child(4){height:9px}
+.batt{display:inline-flex;align-items:center;gap:2px}
+.batt .case{width:12px;height:7px;border:1px solid var(--status);border-radius:1.5px;position:relative}
+.batt .case::after{content:"";position:absolute;right:-2.5px;top:1.5px;width:1.5px;height:2.5px;background:var(--status)}
+.batt .fill{position:absolute;left:.5px;top:.5px;bottom:.5px;width:8.5px;background:#4ADE80}
+
+.content{flex:1 1 auto;position:relative;overflow:hidden}
+
+.softkeys{flex:0 0 30px;min-height:30px;background:linear-gradient(180deg,var(--primary),var(--dark));
+  display:flex;align-items:center;font-size:11px;color:var(--text)}
+.softkeys .lsk,.softkeys .rsk{flex:1;padding:0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.softkeys .rsk{text-align:right}
+.softkeys .csk{flex:1;text-align:center;color:var(--sk-center)}
+
+/* ---------- 焦点行 ---------- */
+.focused{background:var(--focus)}
+.focused .p1,.focused .ic{color:#fff !important}
+.focused .p2{color:#D6E9FF !important}
+
+/* ---------- 首页：顶部搜索框 ---------- */
+.searchwrap{padding:7px 6px 3px}
+.searchbox{
+  min-height:40px;display:flex;align-items:center;gap:8px;
+  background:rgba(232,238,245,.08);border:1px solid rgba(100,181,246,.5);border-radius:5px;
+  padding:0 9px;transition:background .1s;
+}
+.searchbox .ic{font-size:15px;color:var(--accent);flex:0 0 16px;text-align:center}
+.searchbox .ph{font-size:12px;color:var(--sub)}
+.searchbox.focused{background:var(--focus);border-color:rgba(255,255,255,.75)}
+.searchbox.focused .ph{color:#fff}
+.searchbox.focused .ic{color:#fff}
+
+/* ---------- 首页：中部快捷区 ---------- */
+.seclabel{font-size:9px;color:var(--sub);letter-spacing:1px;padding:4px 10px 2px;opacity:.85}
+.row{
+  min-height:36px;display:flex;flex-direction:column;justify-content:center;
+  margin:1px 5px;padding:0 7px;border-radius:4px;transition:background .1s linear;
+}
+.row.single{flex-direction:row;justify-content:flex-start;align-items:center;gap:8px}
+.row .ic{flex:0 0 18px;text-align:center;font-size:13px;color:var(--accent)}
+.row .tag{flex:0 0 18px;height:18px;border-radius:3px;background:rgba(144,202,249,.22);
+  color:var(--sub);font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.row .tag.row2{background:rgba(229,181,103,.25);color:var(--gold)}
+.row .p1{flex:1;min-width:0;font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .p2{font-size:9px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.row .tail{margin-left:auto;font-size:9px;color:var(--sub);flex:0 0 auto;padding-left:6px}
+.divider{height:6px;position:relative;margin:0 5px}
+.divider::before{content:"";position:absolute;left:0;right:0;top:2.5px;height:1px;
+  background:repeating-linear-gradient(90deg,rgba(144,202,249,.4) 0 4px,transparent 4px 7px)}
+
+/* ---------- 全屏选项界面 ---------- */
+.list-full{padding-top:2px}
+.optrow{min-height:40px}
+
+/* ---------- 全屏编辑页 ---------- */
+.editwrap{display:flex;flex-direction:column;height:100%;padding:8px 8px 0}
+.editbox{
+  background:rgba(232,238,245,.07);border:1px solid rgba(100,181,246,.55);border-radius:4px;
+  padding:7px 8px;font-size:12px;color:var(--text);
+  display:flex;align-items:center;white-space:nowrap;overflow:hidden;
+}
+.editbox .caret{width:1px;height:14px;background:var(--accent);margin:0 .5px;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+.edithint{padding:6px 2px 0;font-size:9px;color:var(--sub);line-height:1.6}
+.editcount{margin-top:auto;padding:0 2px 6px;font-size:9px;color:var(--sub);text-align:right}
+
+/* ---------- 参考屏：底部确认框 ---------- */
+.dim{position:absolute;inset:0;background:rgba(0,0,0,.55)}
+.sheet{position:absolute;left:0;right:0;bottom:0;background:var(--card);border-radius:6px 6px 0 0;
+  overflow:hidden;display:flex;flex-direction:column;box-shadow:0 -6px 18px rgba(0,0,0,.45)}
+.sheet .shead{flex:0 0 20px;background:linear-gradient(180deg,var(--primary),var(--dark));
+  display:flex;align-items:center;padding:0 8px;font-size:11px;color:var(--text);font-weight:600}
+.sheet .shead::before{content:"≡";margin-right:5px;color:var(--accent)}
+.sheet .dbody{padding:8px 10px 10px;font-size:11px;line-height:1.6;color:var(--text)}
+.sheet .ssk{flex:0 0 24px;display:flex;align-items:center;font-size:10px;color:var(--text);
+  border-top:1px solid rgba(144,202,249,.18)}
+.sheet .ssk .l,.sheet .ssk .r{flex:1;padding:0 8px}
+.sheet .ssk .r{text-align:right}
+.sheet .ssk .c{flex:1;text-align:center;color:var(--sk-center)}
+
+/* ---------- 标注卡 ---------- */
+.spec-card{margin-top:12px;width:262px;background:#181C21;border:1px solid var(--desk-line);
+  border-radius:10px;padding:10px 12px;font-size:10.5px;line-height:1.6}
+.spec-card h4{font-size:12px;color:var(--ink);font-weight:700;margin-bottom:6px}
+.spec-card h4 .sid{font-family:Consolas,monospace;font-weight:400;font-size:9.5px;color:var(--gold);display:block;margin-top:2px}
+.spec-card .kv{display:flex;gap:8px;margin-top:3px}
+.spec-card .kv b{flex:0 0 62px;color:var(--ink-dim);font-weight:600;font-size:9.5px;letter-spacing:.5px;padding-top:1px}
+.spec-card .kv span{color:#B9C2CC;flex:1}
+.spec-card .kv span code{font-family:Consolas,monospace;font-size:9.5px;color:#7FB0E8}
+.spec-card .rule{margin-top:6px;padding-top:5px;border-top:1px dashed #2C333B;font-size:9.5px;color:#C8A15A}
+body.hide-notes .spec-card{display:none}
+
+footer{padding:0 30px 50px;text-align:center;color:#525D69;font-size:11px;line-height:1.8}
+</style>
+</head>
+<body>
+
+<header class="topbar-page">
+  <div class="brand">
+    <h1>Lightning Browser <em>×</em> KeydroidX</h1>
+    <p>首页三段式原型 v3 · 搜索框 / 快捷区 / 软键栏 · 主题 classic_blue · 240×320</p>
+  </div>
+  <div class="facts">
+    <span class="fchip"><b>焦点顺序</b> 搜索框 → 书签 → 历史（首尾循环）</span>
+    <span class="fchip"><b>CENTER</b> 搜索框 → 全屏编辑页</span>
+    <span class="fchip"><b>LSK 选项</b> → 全屏选项界面（原右上角 ⋮）</span>
+  </div>
+  <div class="viewctl">
+    <span class="vbtn" id="zoomOut">－</span>
+    <span class="vbtn" id="zoomIn">＋</span>
+    <span class="vbtn on" id="noteToggle">标注</span>
+  </div>
+</header>
+
+<main class="gallery" id="gallery">
+
+  <!-- ══════════════ ⓪ 浏览器首页（三段式） ══════════════ -->
+  <section class="board first">
+    <div class="phone">
+      <div class="screen">
+        <div class="topbar-s">
+          <span class="tic">◉</span><span class="tt">浏览器</span>
+          <span class="st"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"><span class="case"><span class="fill"></span></span>100%</span></span>
+        </div>
+        <div class="content">
+          <!-- 上：搜索框（焦点态，UP/DOWN 可聚焦） -->
+          <div class="searchwrap">
+            <div class="searchbox focused">
+              <span class="ic">⌕</span><span class="ph">搜索或输入网址</span>
+            </div>
+          </div>
+          <!-- 中：书签 / 历史记录 快捷区 -->
+          <div class="seclabel">书签</div>
+          <div class="row single"><span class="tag">例</span><span class="p1">例示站点</span></div>
+          <div class="row single"><span class="tag">G</span><span class="p1">GitHub — Lightning</span></div>
+          <div class="row single"><span class="tag">规</span><span class="p1">规范文档</span></div>
+          <div class="seclabel">历史记录</div>
+          <div class="row single"><span class="tag row2">H</span><span class="p1">Hacker News</span><span class="tail">14:32</span></div>
+          <div class="row single"><span class="tag row2">例</span><span class="p1">Example Domain</span><span class="tail">昨天</span></div>
+        </div>
+        <div class="softkeys"><span class="lsk">选项</span><span class="csk"></span><span class="rsk">返回</span></div>
+      </div>
+      <div class="keyhints"><span>LSK</span><i></i><span>OK</span><i></i><span>RSK</span></div>
+    </div>
+    <div class="spec-card">
+      <h4>⓪ 浏览器首页（三段式）
+        <span class="sid">KeydroidxBaseActivity + KeydroidxListPageFragment</span></h4>
+      <div class="kv"><b>上</b><span>搜索框 = 焦点列表第 0 项，<b>可被光标选中</b>；CENTER → 全屏编辑页（屏 ②）</span></div>
+      <div class="kv"><b>中</b><span>书签 / 历史记录快捷区（分组标签 + 字母头行），焦点 UP/DOWN <b>首尾循环</b>，CENTER 打开对应项</span></div>
+      <div class="kv"><b>下</b><span>软键栏 <code>选项 | 空 | 返回</code>，声明式 getter，无高亮（红线 §二.1）</span></div>
+      <div class="kv"><b>LSK</b><span>选项 → <b>全屏选项界面</b>（屏 ①），等价原右上角 ⋮ 溢出菜单</span></div>
+      <div class="kv"><b>RSK</b><span>返回：菜单/二级页回首页；首页为根时停留（onBack 拦截不退出，退出走选项菜单）</span></div>
+    </div>
+  </section>
+
+  <!-- ══════════════ ① 全屏选项界面（LSK 进入） ══════════════ -->
+  <section class="board">
+    <div class="phone">
+      <div class="screen">
+        <div class="topbar-s">
+          <span class="tic">≡</span><span class="tt">选项</span>
+          <span class="st"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"><span class="case"><span class="fill"></span></span>100%</span></span>
+        </div>
+        <div class="content">
+          <div class="list-full">
+            <div class="row single optrow focused"><span class="ic">✚</span><span class="p1">新建标签页</span></div>
+            <div class="row single optrow"><span class="ic">⟳</span><span class="p1">刷新页面</span></div>
+            <div class="row single optrow"><span class="ic">✕</span><span class="p1">停止加载</span></div>
+            <div class="divider"></div>
+            <div class="row single optrow"><span class="ic">★</span><span class="p1">书签</span></div>
+            <div class="row single optrow"><span class="ic">↺</span><span class="p1">历史记录</span></div>
+            <div class="row single optrow"><span class="ic">↓</span><span class="p1">下载管理</span></div>
+            <div class="row single optrow"><span class="ic">✦</span><span class="p1">页面工具</span></div>
+            <div class="divider"></div>
+            <div class="row single optrow"><span class="ic">⚙</span><span class="p1">设置</span></div>
+            <div class="row single optrow"><span class="ic">⏏</span><span class="p1">退出浏览器</span></div>
+          </div>
+        </div>
+        <div class="softkeys"><span class="lsk">确定</span><span class="csk"></span><span class="rsk">返回</span></div>
+      </div>
+      <div class="keyhints"><span>LSK</span><i></i><span>OK</span><i></i><span>RSK</span></div>
+    </div>
+    <div class="spec-card">
+      <h4>① 全屏选项界面（首页按 LSK 进入）
+        <span class="sid">KeydroidxListPageFragment 子类（替代 BrowserOverflowMenu）</span></h4>
+      <div class="kv"><b>来源</b><span>内容 = 原浏览器右上角 ⋮ 溢出菜单全集（新建/刷新/停止/书签/历史/下载/页面工具/设置/退出）</span></div>
+      <div class="kv"><b>形态</b><span><b>完整全屏列表页</b>而非底部小弹窗：信息密度高、可承载更多项与滚动</span></div>
+      <div class="kv"><b>按键</b><span>UP/DOWN 首尾循环 · CENTER/LSK=执行 · RSK/BACK=返回首页</span></div>
+      <div class="kv"><b>危险项</b><span>「退出浏览器」CENTER → KeydroidxConfirmDialog（屏 ③）</span></div>
+    </div>
+  </section>
+
+  <!-- ══════════════ ② 全屏编辑页（搜索框 CENTER 进入） ══════════════ -->
+  <section class="board">
+    <div class="phone">
+      <div class="screen">
+        <div class="topbar-s">
+          <span class="tic">⌕</span><span class="tt">搜索或输入网址</span>
+          <span class="st"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"><span class="case"><span class="fill"></span></span>100%</span></span>
+        </div>
+        <div class="content">
+          <div class="editwrap">
+            <div class="editbox">www.example.c<span class="caret"></span></div>
+            <div class="edithint">输入网址或搜索词，按左软键打开</div>
+            <div class="editcount">13/100</div>
+          </div>
+        </div>
+        <div class="softkeys"><span class="lsk">确定</span><span class="csk"></span><span class="rsk">取消</span></div>
+      </div>
+      <div class="keyhints"><span>LSK</span><i></i><span>OK</span><i></i><span>RSK</span></div>
+    </div>
+    <div class="spec-card">
+      <h4>② 全屏编辑页（首页搜索框按 CENTER 进入）
+        <span class="sid">KeydroidxTextInputFragment（replace 进 midPanel）</span></h4>
+      <div class="kv"><b>形态</b><span>全屏编辑页：输入区占满内容区，骨架顶栏/软键栏固定两端，<b>软键条恒定可见</b></span></div>
+      <div class="kv"><b>按键</b><span>物理键直接输入，进页光标置尾 · 左软键=确认出栈 · 右软键/BACK=放弃出栈 · 单行 CENTER 亦可确认</span></div>
+      <div class="kv"><b>辅助</b><span>底部 hint + 字数统计 <code>n/max</code>；打开历史联想可后续扩展</span></div>
+    </div>
+  </section>
+
+  <!-- ══════════════ ③ 确认框（退出时） ══════════════ -->
+  <section class="board">
+    <div class="phone">
+      <div class="screen">
+        <div class="topbar-s">
+          <span class="tic">≡</span><span class="tt">选项</span>
+          <span class="st"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"><span class="case"><span class="fill"></span></span>100%</span></span>
+        </div>
+        <div class="content" style="opacity:.35">
+          <div class="row single"><span class="ic">⚙</span><span class="p1">设置</span></div>
+          <div class="row single"><span class="ic">⏏</span><span class="p1">退出浏览器</span></div>
+        </div>
+        <div class="dim"></div>
+        <div class="sheet">
+          <div class="shead">退出浏览器</div>
+          <div class="dbody">将关闭全部标签页，确定退出吗？</div>
+          <div class="ssk"><span class="l">退出</span><span class="c"></span><span class="r">取消</span></div>
+        </div>
+      </div>
+      <div class="keyhints"><span>LSK</span><i></i><span>OK</span><i></i><span>RSK</span></div>
+    </div>
+    <div class="spec-card">
+      <h4>③ 确认框（选项 → 退出浏览器）
+        <span class="sid">KeydroidxConfirmDialog</span></h4>
+      <div class="kv"><b>形态</b><span>底部弹出卡片：迷你标题栏 + 正文 + 迷你软键栏（core 唯一确认组件，禁原生 AlertDialog）</span></div>
+      <div class="kv"><b>按键</b><span>左软键=肯定按钮 <code>setPositiveButton("退出")</code> · 右软键=否定 · SELECT 等效确认 · 先 dismiss 再回调</span></div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  Lightning Browser 按键机化原型 v3 · 首页三段式（搜索框 / 快捷区 / 软键栏）<br>
+  骨架与组件对照 keydroidx-core：activity_keydroidx_base.xml · KeydroidxListPageFragment · KeydroidxTextInputFragment · KeydroidxConfirmDialog<br>
+  图标字形为示意，正式实现统一走 KeydroidxIcons；真机文字为 ArkPixel 12px 点阵字体
+</footer>
+
+<script>
+/* 仅保留视图控件：缩放 / 标注开关 */
+(function(){
+  var scale = 1, g = document.getElementById('gallery');
+  function apply(){ g.style.transform = 'scale('+scale+')'; g.style.marginBottom = scale>1 ? ((scale-1)*760)+'px' : ''; }
+  document.getElementById('zoomIn').addEventListener('click', function(){ scale = Math.min(1.75, scale+0.25); apply(); });
+  document.getElementById('zoomOut').addEventListener('click', function(){ scale = Math.max(0.75, scale-0.25); apply(); });
+  document.getElementById('noteToggle').addEventListener('click', function(){
+    document.body.classList.toggle('hide-notes');
+    this.classList.toggle('on', !document.body.classList.contains('hide-notes'));
+  });
+})();
+</script>
+</body>
+</html>
