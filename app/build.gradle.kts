@@ -1,4 +1,24 @@
 import app.cash.licensee.SpdxId
+import java.io.File
+import java.util.Properties
+
+/**
+ * Release 签名凭据（RELEASE_STORE_FILE / RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD）。
+ *
+ * 只从不进入版本库的位置读取，优先级：环境变量 > 根目录 local.properties（已被 .gitignore 忽略）。
+ * 严禁把口令写死在本文件或任何会被 git 跟踪的文件里。
+ *
+ * 注意：这里刻意不用 rootProject.file(...)，因为本项目开启了
+ * org.gradle.unsafe.isolated-projects，跨工程访问 Project API 会直接构建失败。
+ */
+val localProperties = Properties().apply {
+    val localPropertiesFile = File(layout.projectDirectory.asFile.parentFile, "local.properties")
+    if (localPropertiesFile.exists()) {
+        localPropertiesFile.inputStream().use { load(it) }
+    }
+}
+
+fun signingProperty(name: String): String? = System.getenv(name) ?: localProperties.getProperty(name)
 
 plugins {
     id("com.android.application")
@@ -41,6 +61,18 @@ android {
         compose = true
     }
 
+    signingConfigs {
+        create("release") {
+            // test.jks 位于 app/ 目录，已被 .gitignore 的 *.jks 规则排除，不要提交
+            storeFile = file(signingProperty("RELEASE_STORE_FILE") ?: "test.jks")
+            storePassword = signingProperty("RELEASE_STORE_PASSWORD")
+            keyAlias = signingProperty("RELEASE_KEY_ALIAS") ?: "key0"
+            keyPassword = signingProperty("RELEASE_KEY_PASSWORD")
+            enableV1Signing = true // 兼容旧版本
+            enableV2Signing = true // 推荐开启
+        }
+    }
+
     buildTypes {
         named("debug") {
             multiDexEnabled = true
@@ -58,6 +90,9 @@ android {
             setProguardFiles(listOf("proguard-project.txt"))
             enableUnitTestCoverage = false
             enableAndroidTestCoverage = false
+
+            // 使用上面的测试打包密钥签名，否则 release 产物是未签名的
+            signingConfig = signingConfigs.getByName("release")
 
             ndk {
                 abiFilters.add("arm64-v8a")
