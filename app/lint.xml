@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- PropertyEscape 误报豁免（仅针对 gradle.properties 这一个文件，不是全局关闭）。
+
+         背景：gradle.properties 里的 org.gradle.java.home 是本机 JDK 绝对路径
+         （Windows 必然同时含 \ 和 :），由 Gradle 自身的 Properties 解析器读取，
+         不参与应用运行时，也没有任何 \ 被吃掉的风险。
+         该检查要求把 \ 与 : 全部转义，但对 Windows 绝对路径二者不可同时满足：
+         实测把源码行写成它建议的 F\:\\soft\\...\\jdk-21.0.11+10 后，报告里的
+         「当前内容」与「建议内容」完全一致却仍然报错（上游已知问题）。
+         依据 NOKIA_DEVELOPMENT_RULES「误报逐处豁免并写明理由」，此处按文件豁免。
+         注意：不要顺手在这个文件里豁免 NewApi / 任何 API 级别相关检查。 -->
+    <issue id="PropertyEscape">
+        <ignore path="**/gradle.properties" />
+    </issue>
+</lint>
