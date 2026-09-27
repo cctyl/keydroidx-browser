@@ -19,11 +19,19 @@ Windows PowerShell，在包含 `gradlew.bat` 的项目根目录执行。
 
 - `.\gradlew.bat assembleLightningPlusDebug` — Debug APK，Plus 变体（`acr.browser.lightning`）。Lite 为 `assembleLightningLiteDebug`（`acr.browser.barebones`）。`assembleDebug` 不会触发 Lint。
 - `.\gradlew.bat :app:lintLightningPlusDebug` — 只跑 Lint。改完涉及 API 调用的代码后必跑。
-- `.\gradlew.bat :app:lintRelease assembleRelease` — Release 打包（先全量 Lint）。**禁止加 `-x lint`**：生态内 minSdk 低（本项目 minSdk=24），越级 API 在旧机上是运行时闪退，Lint 的 `NewApi` 是唯一静态防线。
+- `.\gradlew.bat :app:lintLightningPlusRelease :app:assembleLightningPlusRelease` — Release 打包（先全量 Lint，再 R8 混淆 + 资源压缩 + test.jks 签名）。**禁止加 `-x lint`**：生态内 minSdk 低（本项目 minSdk=24），越级 API 在旧机上是运行时闪退，Lint 的 `NewApi` 是唯一静态防线。注意**不存在**不带变体的 `lintRelease` / `assembleRelease`（两个 flavor 会让任务名歧义，Gradle 直接报 ambiguous）。
 - `.\gradlew.bat build` — 全量构建 + 单测 + Lint（首次构建 / 提交前建议跑）。
 - `.\gradlew.bat buildHealth` — dependency-analysis 插件的依赖健康检查（冗余/未声明依赖）。
 - `.\gradlew.bat sortDependencies` — square sort-dependencies 插件，按字母序重排依赖块。
-- `.\gradlew.bat :app:licensee` — licensee 校验依赖许可证白名单（Apache-2.0 / BSD-3-Clause / jsoup），产物 `app/licensee/artifacts.json`。
+- `.\gradlew.bat :app:licenseeAndroidLightningPlusDebug` — licensee 校验依赖许可证白名单（Apache-2.0 / BSD-3-Clause / jsoup）。没有不带变体的 `licensee` 任务；每次 assemble 也会自动跑它，报告随后拷进 APK assets。
+
+一键脚本（从 `../keydroidx-foucs` 移植，双击或 `.\xxx.bat`；都以 `pause` 收尾，脚本/CI 调用时记得喂 stdin）。通用模板已抽到 `../android-build-scripts/`（一套脚本 + `_config.bat` 一个配置文件），本项目若要迁移，删除根目录这 5 个脚本、把模板整个文件夹复制进来、确认 `_config.bat` 的 5 个值即可：
+
+- `build_debug.bat` — 构建 Debug APK（lightningPlus），输出 `app\build\outputs\apk\lightningPlus\debug\`。
+- `build_install_debug.bat` [serial] — 构建 + adb 安装 + 启动。无参 = 对所有已连接设备并行安装；`install_debug.py` 自动挑 `app\build\outputs\apk\<flavor>\debug\` 下最新的 APK。
+- `build_release.bat` — `:app:lintLightningPlusRelease` + `:app:assembleLightningPlusRelease`，成功后打开输出目录。
+- `install_debug.bat` [serial] — 只安装不构建。
+- 切 Lite 变体：把脚本里的任务名、输出目录、启动组件（`acr.browser.barebones` / `DefaultBrowserActivityBlue`）一起改。
 
 打包与签名（已按 `../android-gradle-build/SKILL.md` 配好）：
 
@@ -102,6 +110,9 @@ Manifest 的 activity-alias → `DefaultBrowserActivity` → `BrowserActivity.on
 
 ## 关键约定与坑
 
+- `.bat` 脚本必须**纯 ASCII**：cmd.exe 按 OEM 代码页（中文系统 936/GBK）逐字节解析 .bat，UTF-8 中文注释会被误解码、行尾被当成命令执行（实测 `build_release.bat` 踩过；`../keydroidx-foucs/build_release.bat` 也带同样的坑）。中文说明写进本文件，不要写进 .bat。
+- `gradle.properties` / `local.properties` / `~/.gradle/gradle.properties` 里的 Windows 绝对路径（`org.gradle.java.home` 等）会触发 Lint `PropertyEscape`，且该规则对 Windows 绝对路径**不可满足**（源码行与其建议写法完全一致仍报错，`\` 与 `:` 不可能同时满足）。已用 `app/lint.xml` 对 `gradle.properties` 做按文件豁免并写明理由；不要顺手放开其它检查，更不要在 `app/build.gradle.kts` 里全局 disable。
+- Lint 的分析结果会因 `org.gradle.caching=true` 从构建缓存恢复，且 `lintAnalyze` 的输入不含 `gradle.properties` 内容 —— 改了 gradle.properties 后 Lint 仍报旧错时，先删 `app\build\intermediates\lint*`、`app\build\reports\lint*` 再跑（必要时加 `--no-build-cache`）。
 - WebView 必须经 `WebViewFactory` + `pool/` 池化获取；新 UI 优先写 Compose，需要嵌 View 时才用 `AndroidView`。
 - 诺基亚适配时：`catch` 分支必须落日志；菜单/弹窗按键必须接入 `KeydroidxKeyBinding`（禁止硬编码 keyCode）；消费了 DOWN 就必须消费同键 UP/REPEAT；执行类动作要过滤 key repeat；字号只能用 `keydroidx_font_*` 语义 Token；Java 动态构建的含 TextView 列表行用 `WRAP_CONTENT` + `setMinimumHeight()` 而非固定行高（大字号会裁字）。
 - 上游无 CI；`.github` 已被删除。不要重新引入 `-x lint` 的构建方式。
