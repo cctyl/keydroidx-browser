@@ -117,24 +117,6 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         },
 
         OptionEntry.Divider,
-        OptionEntry.Section(R.string.keyphone_section_page),
-        OptionEntry.Option(KeydroidxIcons.ICON_REFRESH, R.string.keyphone_opt_refresh) {
-            relay(ACTION_REFRESH)
-        },
-        OptionEntry.Option(KeydroidxIcons.ICON_CLOSE, R.string.keyphone_opt_stop) {
-            relay(ACTION_STOP)
-        },
-        OptionEntry.Option(KeydroidxIcons.SHARE, R.string.keyphone_opt_share) {
-            relay(ACTION_SHARE)
-        },
-        OptionEntry.Option(KeydroidxIcons.ICON_URL, R.string.keyphone_opt_copy_link) {
-            relay(ACTION_COPY_LINK)
-        },
-        OptionEntry.Option(KeydroidxIcons.ICON_SHORTCUTS, R.string.keyphone_opt_add_home) {
-            relay(ACTION_ADD_HOME)
-        },
-
-        OptionEntry.Divider,
         OptionEntry.Section(R.string.keyphone_section_records),
         OptionEntry.Option(KeydroidxIcons.ICON_HISTORY, R.string.keyphone_opt_history) {
             relay(ACTION_HISTORY)
@@ -159,7 +141,7 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         finish()
     }
 
-    /** 首页模式全集（无当前网页，「页面」组提示先打开网页）。 */
+    /** 首页模式全集。 */
     private fun buildHomeOptions(): List<OptionEntry> = listOf(
         OptionEntry.Section(R.string.keyphone_section_tabs),
         OptionEntry.Option(KeydroidxIcons.ICON_ADD, R.string.keyphone_opt_new_tab) { goHome() },
@@ -168,19 +150,7 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         OptionEntry.Option(KeydroidxIcons.ICON_DELETE, R.string.keyphone_opt_clear_tabs) { confirmClearTabsFromHome() },
 
         OptionEntry.Divider,
-        OptionEntry.Section(R.string.keyphone_section_page),
-        OptionEntry.Option(KeydroidxIcons.ICON_REFRESH, R.string.keyphone_opt_refresh) { requirePage() },
-        OptionEntry.Option(KeydroidxIcons.ICON_CLOSE, R.string.keyphone_opt_stop) { requirePage() },
-        OptionEntry.Option(KeydroidxIcons.ICON_SEARCH, R.string.keyphone_opt_find) { requirePage() },
-        OptionEntry.Option(KeydroidxIcons.FAVORITE_BORDER, R.string.keyphone_opt_add_bookmark) { requirePage() },
-        OptionEntry.Option(KeydroidxIcons.SHARE, R.string.keyphone_opt_share) { requirePage() },
-        OptionEntry.Option(KeydroidxIcons.ICON_URL, R.string.keyphone_opt_copy_link) { requirePage() },
-        OptionEntry.Option(KeydroidxIcons.ICON_SHORTCUTS, R.string.keyphone_opt_add_home) { requirePage() },
-
-        OptionEntry.Divider,
         OptionEntry.Section(R.string.keyphone_section_records),
-        OptionEntry.Option(KeydroidxIcons.ICON_FAVORITE, R.string.keyphone_opt_bookmarks) { launchBookmarks() },
-        // 历史页：`SCHEME_HISTORY` 哨兵值由 `TabsRepository` 翻译成 `HistoryPageInitializer`（与书签页同套路）
         OptionEntry.Option(KeydroidxIcons.ICON_HISTORY, R.string.keyphone_opt_history) {
             launchBrowser(SCHEME_HISTORY, "打开历史记录失败")
         },

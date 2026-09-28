@@ -105,7 +105,6 @@
                 android:layout_gravity="center"
                 android:minWidth="110dp"
                 android:orientation="vertical"
-                android:background="#222C38"
                 android:padding="2dp" />
         </FrameLayout>
     </FrameLayout>

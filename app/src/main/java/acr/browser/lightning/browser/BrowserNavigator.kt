@@ -7,6 +7,7 @@ import acr.browser.lightning.di.IncognitoMode
 import acr.browser.lightning.download.FileDownloader
 import acr.browser.lightning.download.PendingDownload
 import acr.browser.lightning.extensions.copyToClipboard
+import acr.browser.lightning.keyphone.KeyphoneBrowserActivity
 import acr.browser.lightning.log.Logger
 import acr.browser.lightning.settings.activity.SettingsActivity
 import acr.browser.lightning.shortcuts.ShortcutGenerator
@@ -48,6 +49,12 @@ class BrowserNavigator @Inject constructor(
     }
 
     override suspend fun closeBrowser() {
+        if (activity is KeyphoneBrowserActivity) {
+            activity.runOnUiThread {
+                activity.onAllTabsClosed()
+            }
+            return
+        }
         exitCleanup.cleanUp()
         if (incognitoMode) {
             activityManager.appTasks

@@ -150,11 +150,7 @@ class BrowserPresenter @Inject constructor(
             }
 
             val tabs = model.initializeTabs()
-            val lastTab = if (tabs.isEmpty()) {
-                model.createTab(homePageInitializer)
-            } else {
-                tabs.last()
-            }
+            val lastTab = tabs.lastOrNull()
             currentBookmarks = bookmarks.await()
             val bookmarkListItems = currentBookmarks.asListItems()
             state.updateSelf {
@@ -163,7 +159,7 @@ class BrowserPresenter @Inject constructor(
                     isRootFolder = true
                 )
             }
-            selectTab(model.selectTab(lastTab.id))
+            selectTab(lastTab?.let { model.selectTab(it.id) })
         }
 
         browserCoroutineScope.launch {
