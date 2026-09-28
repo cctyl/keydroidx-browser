@@ -25,9 +25,11 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.SystemClock
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
@@ -113,6 +115,13 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     /** Web 宿主容器 */
     private var browserFrameHost: FrameLayout? = null
     private lateinit var browserFrame: FrameLayout
+
+    /** 鼠标模式（仅网页态）：光标绘制层与移动引擎（数值照抄 keydroidx-foucs） */
+    private var mouseCursorView: KeyphoneCursorView? = null
+    private var mouseController: KeyphoneMouseController? = null
+
+    /** 确认键已向 WebView 派发 DOWN 尚未派发 UP（防止触摸序列悬挂） */
+    private var mouseTouchDown = false
 
     /** UC 风格数字快捷菜单 */
     private enum class QuickMenuType {
@@ -262,6 +271,22 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             )
         )
 
+        // 鼠标光标层：盖在 WebView 宿主之上、快捷菜单浮层之下，随网页态显隐
+        val cursorView = KeyphoneCursorView(this).apply { visibility = View.GONE }
+        browserFrameHost?.addView(
+            cursorView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        mouseCursorView = cursorView
+        mouseController = KeyphoneMouseController(
+            host = browserFrameHost!!,
+            cursorView = cursorView,
+            webViewProvider = { currentWebView() }
+        )
+
         quickMenuOverlay = findViewById(R.id.keyphone_quick_menu_overlay)
         quickMenuCard = findViewById(R.id.keyphone_quick_menu_card)
         val cardBg = GradientDrawable().apply {
@@ -287,6 +312,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     override fun onPause() {
         super.onPause()
         selectLongPressJob?.cancel()
+        if (mouseTouchDown) {
+            dispatchCursorTouch(MotionEvent.ACTION_UP)
+        }
+        mouseController?.stopRepeat()
         presenter.onViewHidden()
     }
 
@@ -375,6 +404,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
 
         renderTabBar()
+        updateMouseCursorVisibility()
     }
 
     /** 渲染顶部标签栏：所有打开的标签页（主页 / 各网页） */
@@ -548,6 +578,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private fun showMenu(type: QuickMenuType) {
         if (activeMenuType == type) return
         activeMenuType = type
+        updateMouseCursorVisibility()
         cachedMenuItems = when (type) {
             QuickMenuType.PAGE_MENU -> buildPageMenuItems()
             QuickMenuType.GLOBAL_MENU -> buildGlobalMenuItems()
@@ -585,6 +616,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (isFullScreenMode) {
             findViewById<View>(CommonR.id.bottomPanel)?.visibility = View.GONE
         }
+        updateMouseCursorVisibility()
     }
 
     private fun renderQuickMenu() {
@@ -679,6 +711,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         isFindMode = true
         currentFindQuery = query
         backPressedCallback.isEnabled = true
+        updateMouseCursorVisibility()
 
         addressBarContainer?.visibility = View.GONE
         findBarContainer?.visibility = View.VISIBLE
@@ -759,6 +792,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         isFreeCopyMode = true
         isCopySelecting = false
         backPressedCallback.isEnabled = true
+        updateMouseCursorVisibility()
 
         addressBarContainer?.visibility = View.GONE
         findBarContainer?.visibility = View.VISIBLE
@@ -1827,6 +1861,43 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
         }
 
+        // 网页态鼠标模式：方向键驱动光标移动（数值与连发节奏照抄 keydroidx-foucs）；
+        // 消费了 DOWN 就必须消费同键 UP，防止抬起事件穿透
+        if (isMouseModeActive()) {
+            val dir = when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> KeyphoneCursorView.DIR_UP
+                KeyEvent.KEYCODE_DPAD_DOWN -> KeyphoneCursorView.DIR_DOWN
+                KeyEvent.KEYCODE_DPAD_LEFT -> KeyphoneCursorView.DIR_LEFT
+                KeyEvent.KEYCODE_DPAD_RIGHT -> KeyphoneCursorView.DIR_RIGHT
+                else -> KeyphoneCursorView.DIR_NONE
+            }
+            if (dir != KeyphoneCursorView.DIR_NONE) {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    mouseController?.onDirectionDown(dir)
+                } else if (event.action == KeyEvent.ACTION_UP) {
+                    mouseController?.onDirectionUp(dir)
+                }
+                return true
+            }
+
+            // 确认键：点击光标所在位置（所见即所点，同 foucs）。DOWN/UP 转为原生
+            // 触摸事件派发给 WebView，由 WebView 自行识别单击/长按；过滤 repeat
+            val isConfirmKey = event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                event.keyCode == KeyEvent.KEYCODE_ENTER ||
+                event.keyCode == KeyEvent.KEYCODE_NUMPAD_5 ||
+                event.keyCode == KeyEvent.KEYCODE_BUTTON_A
+            if (isConfirmKey) {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    if (event.repeatCount == 0) {
+                        dispatchCursorTouch(MotionEvent.ACTION_DOWN)
+                    }
+                } else if (event.action == KeyEvent.ACTION_UP) {
+                    dispatchCursorTouch(MotionEvent.ACTION_UP)
+                }
+                return true
+            }
+        }
+
         // UC 经典快捷键 0：回到主页
         val isKey0 = event.keyCode == KeyEvent.KEYCODE_0 || event.keyCode == KeyEvent.KEYCODE_NUMPAD_0
         if (isKey0) {
@@ -2151,6 +2222,80 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             KeydroidxKeyAction.UP, KeydroidxKeyAction.DOWN -> helper.onDirection(action)
             KeydroidxKeyAction.LEFT, KeydroidxKeyAction.RIGHT -> true
             else -> false
+        }
+    }
+
+    /** 鼠标模式是否生效：网页态且无快捷菜单/页内查找/自由复制等模态覆盖 */
+    private fun isMouseModeActive(): Boolean {
+        return !isHomeSelected &&
+            activeMenuType == QuickMenuType.NONE &&
+            !isFindMode &&
+            !isFreeCopyMode
+    }
+
+    /** 刷新鼠标光标可见性：仅网页态显示，回主页/弹菜单/进查找复制态时隐藏并停连发 */
+    private fun updateMouseCursorVisibility() {
+        val cursor = mouseCursorView ?: return
+        if (isMouseModeActive()) {
+            mouseController?.ensurePositionValid()
+            if (cursor.visibility != View.VISIBLE) {
+                cursor.visibility = View.VISIBLE
+            }
+        } else {
+            if (mouseTouchDown) {
+                dispatchCursorTouch(MotionEvent.ACTION_UP)
+            }
+            mouseController?.stopRepeat()
+            if (cursor.visibility != View.GONE) {
+                cursor.visibility = View.GONE
+            }
+        }
+    }
+
+    /**
+     * 把确认键转换为光标位置的原生触摸事件派发给 WebView：
+     * DOWN/UP 配对（坐标即所见），由 WebView 自行识别单击/长按。
+     */
+    private fun dispatchCursorTouch(action: Int) {
+        val controller = mouseController ?: return
+        val webView = currentWebView() ?: return
+        try {
+            when (action) {
+                MotionEvent.ACTION_DOWN -> {
+                    if (mouseTouchDown) return
+                    val x = controller.posX
+                    val y = controller.posY
+                    if (x < 0 || y < 0) return
+                    val now = SystemClock.uptimeMillis()
+                    val down = MotionEvent.obtain(
+                        now, now, MotionEvent.ACTION_DOWN,
+                        x.toFloat(), y.toFloat(), 0
+                    )
+                    try {
+                        webView.dispatchTouchEvent(down)
+                    } finally {
+                        down.recycle()
+                    }
+                    mouseTouchDown = true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!mouseTouchDown) return
+                    val now = SystemClock.uptimeMillis()
+                    val up = MotionEvent.obtain(
+                        now, now, MotionEvent.ACTION_UP,
+                        controller.posX.toFloat(), controller.posY.toFloat(), 0
+                    )
+                    try {
+                        webView.dispatchTouchEvent(up)
+                    } finally {
+                        up.recycle()
+                    }
+                    mouseTouchDown = false
+                }
+            }
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "光标触摸派发失败 action=$action", t)
+            mouseTouchDown = false
         }
     }
 

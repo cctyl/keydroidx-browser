@@ -13,4 +13,18 @@
     <issue id="PropertyEscape">
         <ignore path="**/gradle.properties" />
     </issue>
+
+    <!-- GestureBackNavigation 豁免（仅针对 keyphone/KeyphoneBrowserActivity.kt 这一个文件）。
+
+         背景：按键机（诺基亚功能机）的返回键以物理 KEYCODE_BACK 键事件送达，
+         快捷菜单 / 页内查找 / 自由复制三个模态必须在 dispatchKeyEvent 内全模态
+         拦截返回键（否则穿透到底层 WebView / 书签宫格），这是按键机交互的硬需求；
+         同时三个模式均已按 Predictive Back 规范注册 onBackPressedDispatcher 的
+         backPressedCallback，返回语义并未绕开系统回调。
+         该检查面向手势导航（Android 触屏预测性返回），对物理按键机型不适用，
+         属于平台形态差异导致的误报，按文件豁免。
+         注意：不要顺手在这里豁免 NewApi / 任何 API 级别相关检查。 -->
+    <issue id="GestureBackNavigation">
+        <ignore path="**/keyphone/KeyphoneBrowserActivity.kt" />
+    </issue>
 </lint>
