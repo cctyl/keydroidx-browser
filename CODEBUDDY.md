@@ -4,7 +4,7 @@
 
 Lightning Browser（`acr.browser.lightning`）的上游 fork，位于 keydroidx 生态（`d:/project/keydroidx_ecosystem/`）内，目标平台是诺基亚功能机 / 低分辨率 Android（240×320、320×480）。
 
-当前工作区是**上游代码的干净检出**（`origin` = github.com/anthonycr/Lightning-Browser，基线 commit `a30ebe09`）：全仓搜索 `keydroidx` 无任何命中，即尚未接入生态适配层。一旦开始做诺基亚适配（Material Icons 矢量图标、物理软键映射、统一日志、字号 Token 等），必须遵守：
+当前工作区在上游基础上已接入按键机适配层（`acr.browser.lightning.keyphone` 包）：复用上游 MVP 内核（`BrowserPresenter` / `BrowserUiEvent`），但完全绕过 Compose 的 `BrowserScreen`，改用原生 View + keydroidx SDK UI。所有 `keyphone/` 及相关改动必须遵守：
 
 - `../keydroidx-core/docs/NOKIA_DEVELOPMENT_RULES.md`（按键处理、catch 必打日志、图标规范、排版硬规则）
 - `../keydroidx-core/docs/spec/typography-and-font-spec.md`、`../keydroidx-core/docs/spec/responsive-layout-spec.md`（字号 / 分辨率唯一事实源）
@@ -52,7 +52,17 @@ Windows PowerShell，在包含 `gradlew.bat` 的项目根目录执行。
 
 ## 架构
 
-### 整体：MVP + Compose 混合（迁移已基本完成）
+### 按键机适配层（`keyphone/`，实际生效的入口）
+
+入口链：activity-alias（LAUNCHER，Orange/Blue 换图标双别名）→ `keyphone.BrowserHomeActivity`（立即转发后 `finish()`）→ `keyphone.KeyphoneBrowserActivity`（`singleTop`，实际浏览主页）。上游 `DefaultBrowserActivity` 只保留 VIEW/WEB_SEARCH intent-filter，作为外部链接处理器，不再是启动入口。
+
+- `KeyphoneBrowserActivity`：**不继承**上游 `BrowserActivity`，而是继承 SDK 的 `io.github.cctyl.nokia.keycore.ui.KeydroidxBaseActivity`，但仍实现 `BrowserContract.View` 并注入同一个 `BrowserPresenter` —— 即「绕过 Compose 渲染层，保留 MVP Presenter + `BrowserUiEvent` 事件通道」（keyphone 代码大量直接派发 `SearchConfirmed` / `TabClose` / `BackClick` 等 UiEvent 给 presenter）。UI 为原生 View（`res/layout/keyphone_browser.xml`）：UC 风格顶部横向标签栏 + 地址栏 + 原生九宫格书签主页 + WebView 宿主 + 数字快捷菜单浮层（1 键页面菜单 / # 键全局菜单，弹出期间 `dispatchKeyEvent` 全模态消费按键并拦截 UP 防穿透）。
+- **主页红线**：主页是纯原生 View（搜索栏 + 九宫格书签 + 历史），严禁让 WebView `loadUrl("about:home")` 之类伪协议（会被 Chromium 重定向为 chrome:// 报错）；主页窗口下底层 WebView 保持空白。
+- 其余文件：`KeyphoneOptionsActivity`（LSK 弹出的全屏选项页，经 `setResult` 回传动作）、`KeyphoneTabsFragment`（继承 SDK `KeydroidxListPageFragment`，push 在浏览页内而非独立 Activity）、`KeyphoneViews.kt`（列表行/宫格卡片 View 工厂，统一 KeydroidxTheme/Icons/FontManager）、`KeyphoneUrls.kt`（地址栏归一化与搜索引擎识别）。
+- SDK 依赖：`io.github.cctyl.nokia:keydroidx-key-core:1.0.0`（`app/build.gradle.kts`），来自 `../keydroidx-core` 的 `publishToMavenLocal` —— 必须同时发布 `:keydroidx-common` 和 `:keydroidx-key-core` 两个模块；core 的 AGP 版本与本项目不同，不能用 composite build。`settings.gradle.kts` 仓库第一位是 `mavenLocal()`，另有 JitPack 供传递依赖 `com.github.getActivity:XXPermissions`。
+- 代码注释以规范条目编号引用 keydroidx-core 规范（如「红线 #8/#9/#13」「规范 §6.3」），文档本体在 `../keydroidx-core/docs/`。
+
+### 整体：MVP + Compose 混合（上游触屏 UI，keyphone 模式下被绕过）
 
 `browser/BrowserActivity.kt` 是抽象基类，实现 `BrowserContract.View`。`onCreate` 里先 new 出两个 `FrameLayout`（browserFrame / customFrame），用 `injector.browserComponentBuilder()` 构建**每个 Activity 独立的 Dagger 子组件**并 `inject(this)`，然后 `setContent {}` 全量 Compose 渲染。
 
@@ -106,7 +116,7 @@ flavor 维度 `capabilities` 有两个，且**只覆盖 `AndroidManifest.xml`**�
 
 ### 启动流程
 
-Manifest 的 activity-alias → `DefaultBrowserActivity` → `BrowserActivity.onCreate`。`BrowserApp.onCreate` 顺序：StrictMode（debug）→ 判定 `:incognito` 进程并 `setDataDirectorySuffix("incognito")` → 安装全局异常处理器（debug 写崩栈）→ 构建 `DaggerAppComponent` → `injector.inject(this)` → 协程跑 `Cleanup` 与首次书签导入 → debug 下装 LeakCanary 与 WebView 调试。
+Manifest 的 activity-alias → `keyphone.BrowserHomeActivity` → 转发 → `keyphone.KeyphoneBrowserActivity`（见上文按键机适配层）；上游 Compose 版 `BrowserActivity.onCreate` 仅在触屏入口（`DefaultBrowserActivity` 处理外部链接）时走到。`BrowserApp.onCreate` 顺序：StrictMode（debug）→ 判定 `:incognito` 进程并 `setDataDirectorySuffix("incognito")` → 安装全局异常处理器（debug 写崩栈）→ 构建 `DaggerAppComponent` → `injector.inject(this)` → 协程跑 `Cleanup` 与首次书签导入 → debug 下装 LeakCanary 与 WebView 调试。
 
 ## 关键约定与坑
 
@@ -114,6 +124,6 @@ Manifest 的 activity-alias → `DefaultBrowserActivity` → `BrowserActivity.on
 - `gradle.properties` / `local.properties` / `~/.gradle/gradle.properties` 里的 Windows 绝对路径（`org.gradle.java.home` 等）会触发 Lint `PropertyEscape`，且该规则对 Windows 绝对路径**不可满足**（源码行与其建议写法完全一致仍报错，`\` 与 `:` 不可能同时满足）。已用 `app/lint.xml` 对 `gradle.properties` 做按文件豁免并写明理由；不要顺手放开其它检查，更不要在 `app/build.gradle.kts` 里全局 disable。
 - Lint 的分析结果会因 `org.gradle.caching=true` 从构建缓存恢复，且 `lintAnalyze` 的输入不含 `gradle.properties` 内容 —— 改了 gradle.properties 后 Lint 仍报旧错时，先删 `app\build\intermediates\lint*`、`app\build\reports\lint*` 再跑（必要时加 `--no-build-cache`）。
 - WebView 必须经 `WebViewFactory` + `pool/` 池化获取；新 UI 优先写 Compose，需要嵌 View 时才用 `AndroidView`。
-- 诺基亚适配时：`catch` 分支必须落日志；菜单/弹窗按键必须接入 `KeydroidxKeyBinding`（禁止硬编码 keyCode）；消费了 DOWN 就必须消费同键 UP/REPEAT；执行类动作要过滤 key repeat；字号只能用 `keydroidx_font_*` 语义 Token；Java 动态构建的含 TextView 列表行用 `WRAP_CONTENT` + `setMinimumHeight()` 而非固定行高（大字号会裁字）。
+- 改 `keyphone/` 适配代码时：`catch` 分支必须落日志（`KeydroidxLog.e`，严禁空 catch）；菜单/弹窗按键必须用 `KeydroidxKeyAction` 枚举匹配（禁止硬编码 keyCode）；消费了 DOWN 就必须消费同键 UP/REPEAT；执行类动作要过滤 key repeat；字号只能用 `keydroidx_font_*` 语义 Token；Java 动态构建的含 TextView 列表行用 `WRAP_CONTENT` + `setMinimumHeight()` 而非固定行高（大字号会裁字）；确认/取消弹窗统一走 `KeydroidxConfirmDialog`；列表焦点导航用 `KeydroidxListFocusHelper`。
 - 上游无 CI；`.github` 已被删除。不要重新引入 `-x lint` 的构建方式。
 - 未经用户明确许可，不要执行 `git commit`。
