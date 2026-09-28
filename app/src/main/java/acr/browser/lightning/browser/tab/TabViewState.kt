@@ -14,5 +14,6 @@ data class TabViewState(
     val icon: TabModel.Favicon,
     val title: String,
     val isSelected: Boolean,
-    val preview: TabModel.Preview
+    val preview: TabModel.Preview,
+    val url: String = ""
 )

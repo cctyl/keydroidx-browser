@@ -24,8 +24,8 @@
     <string name="keyphone_soft_clear">清空</string>
 
     <!-- 按键 1 数字快捷菜单（UC 经典页面/窗口上下文菜单） -->
-    <string name="keyphone_qm_new_tab">1.新建窗口</string>
-    <string name="keyphone_qm_close_tab">2.关闭窗口</string>
+    <string name="keyphone_qm_close_tab">1.关闭窗口</string>
+    <string name="keyphone_qm_new_tab">2.新建窗口</string>
     <string name="keyphone_qm_refresh">3.刷新/停止</string>
     <string name="keyphone_qm_add_bookmark">4.加入书签</string>
     <string name="keyphone_qm_copy_link">5.复制链接</string>
@@ -46,6 +46,11 @@
     <!-- 页内查找 -->
     <string name="keyphone_find_title">页内查找</string>
     <string name="keyphone_find_hint">输入查找内容</string>
+    <string name="keyphone_find_prev">上一个</string>
+    <string name="keyphone_find_next">下一个</string>
+    <string name="keyphone_find_exit">退出</string>
+    <string name="keyphone_find_no_matches">未找到匹配</string>
+    <string name="keyphone_find_format">%1$d/%2$d</string>
 
     <!-- 快捷动作提示 -->
     <string name="keyphone_images_blocked">已开启无图模式</string>

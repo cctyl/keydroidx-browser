@@ -77,6 +77,12 @@ class BrowserNavigator @Inject constructor(
     }
 
     override fun backgroundBrowser() {
+        if (activity is KeyphoneBrowserActivity) {
+            activity.runOnUiThread {
+                activity.onAllTabsClosed()
+            }
+            return
+        }
         if (incognitoMode) {
             appCoroutineScope.launch {
                 exitCleanup.cleanUp()

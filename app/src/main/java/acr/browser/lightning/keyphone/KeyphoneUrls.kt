@@ -1,14 +1,11 @@
 package acr.browser.lightning.keyphone
 
-import acr.browser.lightning.constant.HTTPS
 import acr.browser.lightning.constant.SCHEME_HOMEPAGE
-import android.net.Uri
+import acr.browser.lightning.search.SearchEngineProvider
+import acr.browser.lightning.search.engine.search
 
 /**
- * 按键机地址栏 / 搜索框的输入归一化（首页与浏览页共用，避免两处逻辑漂移）。
- *
- * ⚠ 已知待办（`HANDOVER.md` §7.3）：搜索 URL 目前硬编码 Google，
- * 后续应改走上游 `SearchEngineProvider`。
+ * 按键机地址栏 / 搜索框的输入归一化。
  */
 internal object KeyphoneUrls {
 
@@ -18,21 +15,14 @@ internal object KeyphoneUrls {
 
     /**
      * 把用户输入归一化成可加载的 URL：
-     * - 含 `://` → 原样；
-     * - 「无空格且含点」→ 当域名，补 `https://`；
-     * - 其余（含空串）→ 走搜索。
+     * - 空串 → 回主页；
+     * - 其余 → 交由当前偏好的搜索引擎及 smartUrlFilter 进行智能识别（支持直开网址与关键词搜索）。
      */
-    fun normalize(raw: String): String {
+    suspend fun normalize(raw: String, searchEngineProvider: SearchEngineProvider): String {
         val text = raw.trim()
         if (text.isEmpty()) {
             return SCHEME_HOMEPAGE
         }
-        if (text.contains("://")) {
-            return text
-        }
-        val looksLikeUrl = !text.contains(' ') && text.contains('.')
-        return if (looksLikeUrl) HTTPS + text else SEARCH_URL + Uri.encode(text)
+        return searchEngineProvider.provideSearchEngine().search(text)
     }
-
-    private const val SEARCH_URL = "https://www.google.com/search?q="
 }

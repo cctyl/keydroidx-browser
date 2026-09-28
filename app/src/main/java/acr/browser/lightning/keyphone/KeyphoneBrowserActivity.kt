@@ -9,12 +9,15 @@ import acr.browser.lightning.browser.menu.MenuSelection
 import acr.browser.lightning.browser.search.IntentExtractor
 import acr.browser.lightning.browser.tab.TabPager
 import acr.browser.lightning.browser.tab.TabViewState
+import acr.browser.lightning.constant.SCHEME_BLANK
+import acr.browser.lightning.constant.SCHEME_HOMEPAGE
 import acr.browser.lightning.database.Bookmark
 import acr.browser.lightning.database.HistoryEntry
 import acr.browser.lightning.database.bookmark.BookmarkRepository
 import acr.browser.lightning.database.history.HistoryRepository
 import acr.browser.lightning.di.injector
 import acr.browser.lightning.preference.UserPreferencesDataStore
+import acr.browser.lightning.search.SearchEngineProvider
 import acr.browser.lightning.utils.isSpecialUrl
 import android.content.Intent
 import android.graphics.drawable.GradientDrawable
@@ -87,6 +90,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     @Inject
     internal lateinit var userPreferencesDataStore: UserPreferencesDataStore
 
+    @Inject
+    internal lateinit var searchEngineProvider: SearchEngineProvider
+
     /** 顶部标签栏 */
     private var tabBarScroll: HorizontalScrollView? = null
     private var tabBarContainer: LinearLayout? = null
@@ -116,10 +122,18 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private var quickMenuOverlay: FrameLayout? = null
     private var quickMenuCard: LinearLayout? = null
     private var quickMenuFocusIndex = 0
+    private var lastConsumedDownKeyCode: Int = KeyEvent.KEYCODE_UNKNOWN
 
     /** 全屏与滚动切换状态 */
     private var isFullScreenMode = false
     private var isScrolledToBottom = false
+
+    /** 页内查找控制条与状态 */
+    private var findBarContainer: LinearLayout? = null
+    private var findQueryText: TextView? = null
+    private var findCountText: TextView? = null
+    private var isFindMode = false
+    private var currentFindQuery = ""
 
     /** 当前是否停留在「主页」标签 */
     private var isHomeSelected = true
@@ -146,6 +160,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         override fun handleOnBackPressed() {
             if (activeMenuType != QuickMenuType.NONE) {
                 hideQuickMenu()
+                return
+            }
+            if (isFindMode) {
+                exitFindMode()
                 return
             }
             if (isBookmarkEditMode) {
@@ -214,6 +232,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         addressBarContainer = findViewById(R.id.keyphone_address_bar_container)
         setUpAddressBar()
 
+        findBarContainer = findViewById(R.id.keyphone_find_bar_container)
+        findQueryText = findViewById(R.id.keyphone_find_query_text)
+        findCountText = findViewById(R.id.keyphone_find_count_text)
+
         progressBar = findViewById<View>(R.id.keyphone_progress)?.apply { pivotX = 0f }
 
         homeScroll = findViewById(R.id.keyphone_home_scroll)
@@ -276,18 +298,27 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     // region 顶部标签栏与模式切换
 
+    /** 判断指定标签页是否处于主页空白状态 */
+    private fun isTabHome(tab: TabViewState?): Boolean {
+        if (tab == null) return true
+        val url = tab.url.trim()
+        return url.isBlank() || url.isSpecialUrl() || url.startsWith("about:") || url.startsWith("chrome://")
+    }
+
     /** 刷新 UC 风格顶部标签栏与主内容区可见性 */
     private fun updateTabMode() {
-        val webTabs = presenter.state.value.tabs
-        if (webTabs.isEmpty()) {
-            isHomeSelected = true
-        }
+        val currentTab = presenter.state.value.tabs.firstOrNull { it.isSelected }
+        isHomeSelected = (currentTab == null || isTabHome(currentTab))
 
         // 内容区切换
         if (isHomeSelected) {
+            if (isFindMode) {
+                exitFindMode()
+            }
             homeScroll?.visibility = View.VISIBLE
             browserFrameHost?.visibility = View.GONE
             addressBarContainer?.visibility = View.GONE
+            findBarContainer?.visibility = View.GONE
             progressBar?.visibility = View.INVISIBLE
             if (activeMenuType == QuickMenuType.NONE) {
                 updateHomeSoftKeys()
@@ -295,11 +326,20 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         } else {
             homeScroll?.visibility = View.GONE
             browserFrameHost?.visibility = View.VISIBLE
-            if (!isFullScreenMode) {
-                addressBarContainer?.visibility = View.VISIBLE
-            }
-            if (activeMenuType == QuickMenuType.NONE) {
-                updateWebSoftKeys()
+            if (isFindMode) {
+                addressBarContainer?.visibility = View.GONE
+                findBarContainer?.visibility = View.VISIBLE
+                if (activeMenuType == QuickMenuType.NONE) {
+                    updateFindSoftKeys()
+                }
+            } else {
+                findBarContainer?.visibility = View.GONE
+                if (!isFullScreenMode) {
+                    addressBarContainer?.visibility = View.VISIBLE
+                }
+                if (activeMenuType == QuickMenuType.NONE) {
+                    updateWebSoftKeys()
+                }
             }
             applyAddressBar()
         }
@@ -307,6 +347,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (isFullScreenMode) {
             tabBarScroll?.visibility = View.GONE
             addressBarContainer?.visibility = View.GONE
+            findBarContainer?.visibility = View.GONE
             findViewById<View>(CommonR.id.bottomPanel)?.visibility = View.GONE
         } else {
             tabBarScroll?.visibility = View.VISIBLE
@@ -316,46 +357,34 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         renderTabBar()
     }
 
-    /** 渲染顶部标签栏：主页 + 打开的 Web 标签页 */
+    /** 渲染顶部标签栏：所有打开的标签页（主页 / 各网页） */
     private fun renderTabBar() {
         val container = tabBarContainer ?: return
         container.removeAllViews()
 
-        val webTabs = presenter.state.value.tabs
-        val items = ArrayList<KeyphoneViews.UcTabItem>()
-
-        // 主页标签
-        items.add(
-            KeyphoneViews.UcTabItem(
-                id = -1,
-                title = getString(R.string.keyphone_tab_home),
-                isSelected = isHomeSelected
-            )
-        )
-
-        // Web 标签页
-        webTabs.forEach { tab ->
-            val title = tab.title.ifBlank { getString(R.string.keyphone_tab_untitled) }
-            items.add(
-                KeyphoneViews.UcTabItem(
-                    id = tab.id,
-                    title = title,
-                    isSelected = (!isHomeSelected && tab.isSelected)
-                )
-            )
-        }
+        val tabs = presenter.state.value.tabs
+        if (tabs.isEmpty()) return
 
         var selectedChildView: View? = null
 
-        items.forEachIndexed { _, item ->
+        tabs.forEachIndexed { index, tab ->
+            val isHome = isTabHome(tab)
+            val title = if (isHome) {
+                getString(R.string.keyphone_tab_home)
+            } else {
+                tab.title.ifBlank { getString(R.string.keyphone_tab_untitled) }
+            }
+
+            val item = KeyphoneViews.UcTabItem(
+                id = tab.id,
+                title = title,
+                isSelected = tab.isSelected
+            )
+
             val cell = KeyphoneViews.ucTabCell(this, item) { clickedItem ->
-                if (clickedItem.id == -1) {
-                    switchToHome()
-                } else {
-                    val targetIndex = webTabs.indexOfFirst { it.id == clickedItem.id }
-                    if (targetIndex >= 0) {
-                        switchToTab(targetIndex)
-                    }
+                val targetIndex = tabs.indexOfFirst { it.id == clickedItem.id }
+                if (targetIndex >= 0) {
+                    switchToTab(targetIndex)
                 }
             }
             if (item.isSelected) {
@@ -373,53 +402,76 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
     }
 
-    /** 切换到主页 */
+    /** 切换到主页标签页（若当前未处于主页标签，切到现存主页或新建主页） */
     private fun switchToHome() {
-        isHomeSelected = true
         isScrolledToBottom = false
-        updateTabMode()
+        val tabs = presenter.state.value.tabs
+        val currentTab = tabs.firstOrNull { it.isSelected }
+        if (currentTab != null && isTabHome(currentTab)) {
+            loadHomeData()
+            return
+        }
+        val homeIndex = tabs.indexOfFirst { isTabHome(it) }
+        if (homeIndex >= 0) {
+            switchToTab(homeIndex)
+        } else {
+            createNewWindow()
+        }
+    }
+
+    /** 新建一个主页窗口（在顶栏新建一个标签页，底层 WebView 保持空白静止不发起网络请求） */
+    private fun createNewWindow() {
+        isScrolledToBottom = false
+        presenter.onEvent(BrowserUiEvent.NewAction(BrowserContract.Action.LoadUrl("")))
         loadHomeData()
     }
 
     /** 切换到指定 Web 标签页 */
     internal fun switchToTab(index: Int) {
-        val webTabs = presenter.state.value.tabs
-        if (index in webTabs.indices) {
-            isHomeSelected = false
+        val tabs = presenter.state.value.tabs
+        if (index in tabs.indices) {
+            if (isFindMode) {
+                exitFindMode()
+            }
             isScrolledToBottom = false
             presenter.onEvent(BrowserUiEvent.TabClick(index))
             updateTabMode()
         }
     }
 
-    /** 按键 3：循环切换下一个标签（主页 -> 标签 1 -> 标签 2 -> 主页） */
+    /** 按键 3：循环切换下一个标签页 */
     private fun cycleNextTab() {
-        val webTabs = presenter.state.value.tabs
-        if (webTabs.isEmpty()) {
-            return
-        }
-        if (isHomeSelected) {
-            switchToTab(0)
-        } else {
-            val currentIndex = webTabs.indexOfFirst { it.isSelected }
-            if (currentIndex < 0 || currentIndex >= webTabs.size - 1) {
-                switchToHome()
-            } else {
-                switchToTab(currentIndex + 1)
-            }
-        }
+        val tabs = presenter.state.value.tabs
+        if (tabs.size <= 1) return
+        val currentIndex = tabs.indexOfFirst { it.isSelected }
+        val nextIndex = if (currentIndex < 0 || currentIndex >= tabs.size - 1) 0 else currentIndex + 1
+        switchToTab(nextIndex)
     }
 
-    /** 打开网址并自动转入 Web 模式 */
+    /** 打开网址：若当前标签是主页空白页直接在当前标签加载，否则新建标签页加载 */
     private fun openUrlInNewTab(url: String) {
-        isHomeSelected = false
-        isScrolledToBottom = false
-        presenter.onEvent(
-            BrowserUiEvent.NewAction(
-                BrowserContract.Action.LoadUrl(KeyphoneUrls.normalize(url))
-            )
-        )
-        updateTabMode()
+        if (isFindMode) {
+            exitFindMode()
+        }
+        lifecycleScope.launch {
+            try {
+                val normalizedUrl = KeyphoneUrls.normalize(url, searchEngineProvider)
+                isScrolledToBottom = false
+                val currentTab = presenter.state.value.tabs.firstOrNull { it.isSelected }
+                if (currentTab != null && isTabHome(currentTab)) {
+                    presenter.onEvent(BrowserUiEvent.SearchConfirmed(normalizedUrl))
+                } else {
+                    presenter.onEvent(
+                        BrowserUiEvent.NewAction(
+                            BrowserContract.Action.LoadUrl(normalizedUrl)
+                        )
+                    )
+                }
+                updateTabMode()
+            } catch (t: Throwable) {
+                KeydroidxLog.e(TAG, "打开网址失败: $url", t)
+            }
+        }
     }
 
     // endregion
@@ -431,8 +483,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     /** 按键 1 页面/窗口上下文菜单条目（1~9 项） */
     private fun buildPageMenuItems(): List<KeyphoneViews.QuickMenuItem> {
         return listOf(
-            KeyphoneViews.QuickMenuItem("1", getString(R.string.keyphone_qm_new_tab)) { switchToHome() },
-            KeyphoneViews.QuickMenuItem("2", getString(R.string.keyphone_qm_close_tab)) { closeCurrentTabOrExit() },
+            KeyphoneViews.QuickMenuItem("1", getString(R.string.keyphone_qm_close_tab)) { closeCurrentTabOrExit() },
+            KeyphoneViews.QuickMenuItem("2", getString(R.string.keyphone_qm_new_tab)) { createNewWindow() },
             KeyphoneViews.QuickMenuItem("3", getString(R.string.keyphone_qm_refresh)) { refreshCurrentPage() },
             KeyphoneViews.QuickMenuItem("4", getString(R.string.keyphone_qm_add_bookmark)) { addCurrentPageToHome() },
             KeyphoneViews.QuickMenuItem("5", getString(R.string.keyphone_qm_copy_link)) { copyCurrentPageLink() },
@@ -492,10 +544,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (activeMenuType == QuickMenuType.NONE) return
         activeMenuType = QuickMenuType.NONE
         cachedMenuItems = emptyList()
-        backPressedCallback.isEnabled = isBookmarkEditMode
+        backPressedCallback.isEnabled = (isBookmarkEditMode || isFindMode)
         quickMenuOverlay?.visibility = View.GONE
         if (isHomeSelected) {
             updateHomeSoftKeys()
+        } else if (isFindMode) {
+            updateFindSoftKeys()
         } else {
             updateWebSoftKeys()
         }
@@ -525,16 +579,16 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     private fun closeCurrentTabOrExit() {
-        if (isHomeSelected) {
-            confirmExit()
-            return
+        if (isFindMode) {
+            exitFindMode()
         }
-        val webTabs = presenter.state.value.tabs
-        val currentIndex = webTabs.indexOfFirst { it.isSelected }
-        if (currentIndex >= 0) {
+        val tabs = presenter.state.value.tabs
+        val currentIndex = tabs.indexOfFirst { it.isSelected }
+
+        if (tabs.size > 1 && currentIndex >= 0) {
             closeTab(currentIndex)
         } else {
-            switchToHome()
+            confirmExit()
         }
     }
 
@@ -569,27 +623,97 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
         val fragment = KeydroidxTextInputFragment.newInstance(
             getString(R.string.keyphone_find_title),
-            null,
+            currentFindQuery.ifBlank { null },
             getString(R.string.keyphone_find_hint),
             false,
             MAX_INPUT_CHARS
         )
         fragment.setOnConfirmListener { text ->
             if (!text.isNullOrBlank()) {
-                presenter.onEvent(BrowserUiEvent.FindInPage(text))
+                startFindInPage(text.trim())
             }
         }
         openFragment(fragment)
     }
 
+    private fun startFindInPage(query: String) {
+        if (isHomeSelected || query.isBlank()) return
+        val webView = currentWebView()
+        if (webView == null) {
+            Toast.makeText(this, R.string.keyphone_need_page, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        isFindMode = true
+        currentFindQuery = query
+        backPressedCallback.isEnabled = true
+
+        addressBarContainer?.visibility = View.GONE
+        findBarContainer?.visibility = View.VISIBLE
+        findQueryText?.text = "\"$query\""
+        findCountText?.text = "..."
+        updateFindSoftKeys()
+
+        webView.setFindListener { activeMatchOrdinal, numberOfMatches, isDoneCounting ->
+            runOnUiThread {
+                if (!isFindMode) return@runOnUiThread
+                if (numberOfMatches == 0) {
+                    findCountText?.text = getString(R.string.keyphone_find_no_matches)
+                } else {
+                    findCountText?.text = getString(
+                        R.string.keyphone_find_format,
+                        activeMatchOrdinal + 1,
+                        numberOfMatches
+                    )
+                }
+            }
+        }
+
+        presenter.onEvent(BrowserUiEvent.FindInPage(query))
+    }
+
+    private fun findNextMatch() {
+        if (!isFindMode) return
+        presenter.onEvent(BrowserUiEvent.FindInPageNext)
+    }
+
+    private fun findPreviousMatch() {
+        if (!isFindMode) return
+        presenter.onEvent(BrowserUiEvent.FindInPagePrevious)
+    }
+
+    private fun exitFindMode() {
+        if (!isFindMode) return
+        isFindMode = false
+        backPressedCallback.isEnabled = (activeMenuType != QuickMenuType.NONE || isBookmarkEditMode)
+
+        findBarContainer?.visibility = View.GONE
+        val webView = currentWebView()
+        webView?.clearMatches()
+        webView?.setFindListener(null)
+        presenter.onEvent(BrowserUiEvent.FindInPageDismissed)
+
+        updateTabMode()
+    }
+
+    private fun updateFindSoftKeys() {
+        setSoftKeys(
+            getString(R.string.keyphone_find_prev),
+            getString(R.string.keyphone_find_next),
+            getString(R.string.keyphone_find_exit)
+        )
+        if (isFullScreenMode && activeMenuType == QuickMenuType.NONE) {
+            findViewById<View>(CommonR.id.bottomPanel)?.visibility = View.VISIBLE
+        }
+    }
+
     private fun toggleFullScreen() {
         isFullScreenMode = !isFullScreenMode
+        updateTabMode()
         if (isFullScreenMode) {
-            tabBarScroll?.visibility = View.GONE
-            addressBarContainer?.visibility = View.GONE
+            findViewById<View>(CommonR.id.bottomPanel)?.visibility = View.GONE
             Toast.makeText(this, R.string.keyphone_fullscreen_on, Toast.LENGTH_SHORT).show()
         } else {
-            updateTabMode()
             Toast.makeText(this, R.string.keyphone_fullscreen_off, Toast.LENGTH_SHORT).show()
         }
     }
@@ -778,6 +902,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 getString(R.string.keyphone_soft_exit)
             )
         }
+        if (isFullScreenMode && activeMenuType == QuickMenuType.NONE) {
+            findViewById<View>(CommonR.id.bottomPanel)?.visibility = View.GONE
+        }
     }
 
     private fun updateWebSoftKeys() {
@@ -786,6 +913,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             null,
             getString(R.string.keyphone_soft_back)
         )
+        if (isFullScreenMode && activeMenuType == QuickMenuType.NONE) {
+            findViewById<View>(CommonR.id.bottomPanel)?.visibility = View.GONE
+        }
     }
 
     private fun deleteBookmark(bookmark: Bookmark.Entry) {
@@ -917,11 +1047,14 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         lifecycleScope.launch {
             presenter.state.collectLatest { state ->
                 addressText = state.displayUrl
+                if (state.tabs.isEmpty()) {
+                    isHomeSelected = true
+                }
+                updateTabMode()
                 if (!isHomeSelected) {
                     applyAddressBar()
                     applyProgress(state.progress)
                 }
-                renderTabBar()
             }
         }
     }
@@ -963,7 +1096,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     internal fun closeTab(index: Int) {
         presenter.onEvent(BrowserUiEvent.TabClose(index))
         if (presenter.state.value.tabs.isEmpty()) {
-            switchToHome()
+            createNewWindow()
         }
     }
 
@@ -982,7 +1115,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             BrowserUiEvent.CloseBrowser(currentId, BrowserContract.CloseTabEvent.CLOSE_ALL)
         )
         Toast.makeText(this, R.string.keyphone_tabs_cleared, Toast.LENGTH_SHORT).show()
-        switchToHome()
+        createNewWindow()
     }
 
     internal fun confirmClearAllTabs() {
@@ -998,9 +1131,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     internal fun onAllTabsClosed() {
         if (isFinishing || isDestroyed) return
-        isHomeSelected = true
-        updateTabMode()
-        loadHomeData()
+        createNewWindow()
     }
 
     internal fun goHomeFromTabs() {
@@ -1051,6 +1182,14 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     // region 按键分发
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // 如果该按键的 DOWN 事件已经被快捷菜单/快捷键消费，则必须拦截并消费对应的 UP 事件，防止穿透到底层视图
+        if (event.action == KeyEvent.ACTION_UP && lastConsumedDownKeyCode != KeyEvent.KEYCODE_UNKNOWN) {
+            if (event.keyCode == lastConsumedDownKeyCode) {
+                lastConsumedDownKeyCode = KeyEvent.KEYCODE_UNKNOWN
+                return true
+            }
+        }
+
         // 编辑页 / 选项页等 Fragment 打开时交给基类分发
         if (getCurrentPage() != null) {
             return super.dispatchKeyEvent(event)
@@ -1062,8 +1201,16 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             return super.dispatchKeyEvent(event)
         }
 
-        // 快捷菜单展示态：匹配 0~9、*、# 键直达触发
+        // 快捷菜单展示态：全模态接管所有按键，严禁任何按键事件穿透至背景视图、书签或网页
         if (activeMenuType != QuickMenuType.NONE) {
+            val isDown = event.action == KeyEvent.ACTION_DOWN
+            val isFirstDown = isDown && event.repeatCount == 0
+
+            if (isDown) {
+                lastConsumedDownKeyCode = event.keyCode
+            }
+
+            // 1. 匹配 0~9、*、# 键直达触发
             val keyLabel = when (event.keyCode) {
                 KeyEvent.KEYCODE_0, KeyEvent.KEYCODE_NUMPAD_0 -> "0"
                 KeyEvent.KEYCODE_1, KeyEvent.KEYCODE_NUMPAD_1 -> "1"
@@ -1081,7 +1228,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
 
             if (keyLabel != null) {
-                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                if (isFirstDown) {
                     val items = getActiveMenuItems()
                     val matchedItem = items.firstOrNull { it.keyLabel == keyLabel }
                     if (matchedItem != null) {
@@ -1091,21 +1238,75 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                         // 在 1 键菜单打开时按 # 直接切到全局 # 菜单
                         showGlobalMenu()
                     } else if (keyLabel == "1" && activeMenuType == QuickMenuType.GLOBAL_MENU) {
-                        // 在 # 键菜单中若未匹配 1（当前 1 为输入网址）
+                        // 在 # 键菜单中按 1 直接切到页面 1 菜单
+                        showPageMenu()
                     }
                 }
                 return true
             }
 
-            // 其余导航键（方向键、确认键、软键、返回键）统一交给基类分发到 onAction 与 onBackPressedDispatcher
-            return super.dispatchKeyEvent(event)
+            // 2. 菜单内导航与操作（全在 dispatchKeyEvent 内闭环，严禁 super.dispatchKeyEvent 穿透至底层 View）
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> {
+                    if (isFirstDown) {
+                        val items = getActiveMenuItems()
+                        if (items.isNotEmpty()) {
+                            quickMenuFocusIndex = (quickMenuFocusIndex - 1 + items.size) % items.size
+                            renderQuickMenu()
+                        }
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    if (isFirstDown) {
+                        val items = getActiveMenuItems()
+                        if (items.isNotEmpty()) {
+                            quickMenuFocusIndex = (quickMenuFocusIndex + 1) % items.size
+                            renderQuickMenu()
+                        }
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_NUMPAD_5,
+                KeyEvent.KEYCODE_BUTTON_A,
+                KeyEvent.KEYCODE_SOFT_LEFT -> {
+                    if (isFirstDown) {
+                        val items = getActiveMenuItems()
+                        if (quickMenuFocusIndex in items.indices) {
+                            val action = items[quickMenuFocusIndex].action
+                            hideQuickMenu()
+                            action()
+                        }
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_BACK,
+                KeyEvent.KEYCODE_ESCAPE,
+                KeyEvent.KEYCODE_SOFT_RIGHT,
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    if (isFirstDown) {
+                        hideQuickMenu()
+                    }
+                    return true
+                }
+                else -> {
+                    // 菜单打开期间消费其余全部按键，防止底层视图误响应
+                    return true
+                }
+            }
         }
 
         // UC 经典快捷键 0：回到主页
         val isKey0 = event.keyCode == KeyEvent.KEYCODE_0 || event.keyCode == KeyEvent.KEYCODE_NUMPAD_0
         if (isKey0) {
-            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                switchToHome()
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                lastConsumedDownKeyCode = event.keyCode
+                if (event.repeatCount == 0) {
+                    switchToHome()
+                }
             }
             return true
         }
@@ -1113,8 +1314,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         // UC 经典快捷键 *：刷新当前页面
         val isKeyStar = event.keyCode == KeyEvent.KEYCODE_STAR || event.keyCode == KeyEvent.KEYCODE_NUMPAD_MULTIPLY
         if (isKeyStar) {
-            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                refreshCurrentPage()
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                lastConsumedDownKeyCode = event.keyCode
+                if (event.repeatCount == 0) {
+                    refreshCurrentPage()
+                }
             }
             return true
         }
@@ -1122,8 +1326,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         // UC 经典快捷键 1：弹出页面/窗口操作菜单
         val isKey1 = event.keyCode == KeyEvent.KEYCODE_1 || event.keyCode == KeyEvent.KEYCODE_NUMPAD_1
         if (isKey1) {
-            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                showPageMenu()
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                lastConsumedDownKeyCode = event.keyCode
+                if (event.repeatCount == 0) {
+                    showPageMenu()
+                }
             }
             return true
         }
@@ -1131,8 +1338,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         // UC 经典快捷键 #：弹出全局工具/常用动作菜单（全屏模式下同样弹出菜单）
         val isKeyPound = event.keyCode == KeyEvent.KEYCODE_POUND
         if (isKeyPound) {
-            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                showGlobalMenu()
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                lastConsumedDownKeyCode = event.keyCode
+                if (event.repeatCount == 0) {
+                    showGlobalMenu()
+                }
             }
             return true
         }
@@ -1140,8 +1350,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         // UC 经典快捷键 3：循环切换标签页
         val isKey3 = event.keyCode == KeyEvent.KEYCODE_3 || event.keyCode == KeyEvent.KEYCODE_NUMPAD_3
         if (isKey3) {
-            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                cycleNextTab()
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                lastConsumedDownKeyCode = event.keyCode
+                if (event.repeatCount == 0) {
+                    cycleNextTab()
+                }
             }
             return true
         }
@@ -1252,6 +1465,24 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     true
                 }
                 else -> false
+            }
+        }
+
+        if (isFindMode) {
+            return when (action) {
+                KeydroidxKeyAction.UP, KeydroidxKeyAction.LEFT, KeydroidxKeyAction.SOFT_LEFT -> {
+                    findPreviousMatch()
+                    true
+                }
+                KeydroidxKeyAction.DOWN, KeydroidxKeyAction.RIGHT, KeydroidxKeyAction.SELECT -> {
+                    findNextMatch()
+                    true
+                }
+                KeydroidxKeyAction.SOFT_RIGHT -> {
+                    exitFindMode()
+                    true
+                }
+                else -> super.onAction(action)
             }
         }
 
@@ -1367,6 +1598,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     private fun handleBack() {
+        if (isFindMode) {
+            exitFindMode()
+            return
+        }
         if (presenter.state.value.isBackEnabled) {
             presenter.onEvent(BrowserUiEvent.BackClick)
         } else {
@@ -1410,6 +1645,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     private fun menuClick(selection: MenuSelection) {
+        if (selection == MenuSelection.HISTORY || selection == MenuSelection.DOWNLOADS) {
+            isHomeSelected = false
+            isScrolledToBottom = false
+            updateTabMode()
+        }
         presenter.onEvent(BrowserUiEvent.MenuClick(selection))
     }
 

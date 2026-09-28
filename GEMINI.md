@@ -12,11 +12,21 @@
 - **生态背景**：本仓库是经典开源轻量浏览器 Lightning Browser 的上游 Fork，隶属于 **KeydroidX 生态**（`d:/project/keydroidx_ecosystem/`）。
 - **目标设备**：诺基亚智能按键手机 / 物理键盘低分辨率 Android 设备（典型分辨率 240×320、320×480，minSdk 24，targetSdk 37）。
 
-### 1.2 核心技术栈
+### 1.2 核心技术栈与按键机 UI 架构
 - **语言与平台**：Kotlin 2.4.20、Java 21 Toolchain、Android Gradle Plugin (AGP) 9.4.1、minSdk 24、compileSdk/targetSdk 37。
 - **UI 架构**：
   - **上游触屏 UI**：MVP + Jetpack Compose（`BrowserActivity`、`BrowserScreen`、`BrowserPresenter`、Material3 `BrowserTheme`）。
-  - **按键机专用 UI**（`acr.browser.lightning.keyphone`）：基于 `io.github.cctyl.nokia:keydroidx-key-core` SDK，采用四区规范（状态/标题栏、内容区、2dp 进度线、三段式软键栏），包含 `BrowserHomeActivity`（首页书签宫格/搜索）、`KeyphoneBrowserActivity`（按键浏览页）、`KeyphoneOptionsActivity`（全屏选项菜单）、`KeyphoneTabsFragment`（卡片式标签页列表）。
+  - **按键机专用 UI**（`acr.browser.lightning.keyphone`）：
+    - **主界面与多窗口宿主**：`KeyphoneBrowserActivity`（内聚 UC 风格顶部动态标签栏、原生九宫格书签与搜索主页 `homeScroll`、WebView 网页容器 `browserFrameHost`、底部三段式软键栏）。
+    - **原生主页本质（核心红线）**：按键机的主页是**纯原生 Android View**（搜索栏 + 9 宫格书签 + 历史记录列表），**绝不是 WebView 加载的 HTML 页面**！新建主页窗口或切换到主页时，底层的 WebView 必须保持空白/NoOp 状态，绝对严禁让 WebView 去 `loadUrl("about:home")` 等伪协议（否则会被 Chromium 引擎重定向为 `chrome://home` 并抛出“网页无法打开”崩溃/错误页）。
+    - **多窗口（Tab）管理心智**：
+      - 顶部标签栏显示所有已打开的窗口（可以同时打开多个 `[ 主页 ]` 或各个 `[ 网页 ]`）。
+      - 处于主页状态的窗口，顶栏显示 `主页`，内容区仅展示原生书签与搜索主页；
+      - 处于浏览状态的窗口，顶栏显示网页标题，内容区展示 WebView 与地址栏。
+      - **新建窗口（1 键菜单 -> 2.新建窗口）**：在标签列表中新建一个主页窗口，并切换到该窗口展示原生主页。
+      - **关闭窗口（1 键菜单 -> 1.关闭窗口）**：只要还有其他窗口（无论主页或网页），直接关闭当前窗口并切换到相邻窗口，绝对不退出浏览器；仅在关闭全浏览器最后一个唯一窗口时才弹出退出确认。
+      - **按键防穿透**：菜单弹出期间在 `dispatchKeyEvent` 中全模态消费所有按键，并通过 `lastConsumedDownKeyCode` 严格拦截后续的 `ACTION_UP` 抬起事件，彻底杜绝穿透到底层书签。
+    - **辅助页面**：`KeyphoneOptionsActivity`（全屏三段式设置与数据选项页）、`KeyphoneTabsFragment`（卡片式标签管理器）、`BrowserHomeActivity`（启动入口兼容代理转发）。
 - **依赖注入**：Dagger 2.60.1（`AppComponent` 全局单例、`BrowserComponent` 每 Activity 独立 Scope、`SettingsComponent`）。
 - **数据存储**：
   - 手写 `SQLiteOpenHelper` + `DatabaseDelegate`（书签 Bookmark、历史 History、下载 Downloads、广告拦截 Hosts、白名单 AllowList），非 Room。

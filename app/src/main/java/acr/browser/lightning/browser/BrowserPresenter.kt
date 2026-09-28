@@ -348,7 +348,8 @@ class BrowserPresenter @Inject constructor(
         icon = favicon,
         title = title.orUntitled(),
         isSelected = selected,
-        preview = preview
+        preview = preview,
+        url = url
     )
 
     private fun List<TabViewState>.updateId(
@@ -524,20 +525,28 @@ class BrowserPresenter @Inject constructor(
         forEach { tabModel ->
             if (allTabsJobMap[tabModel.id] == null) {
                 allTabsJobMap[tabModel.id] = browserCoroutineScope.launch {
-                    combineMultiple(
+                    combine(
                         tabModel.titleChanges(),
                         tabModel.faviconChanges(),
-                        tabModel.previewChanges()
-                    ) { title, favicon, preview -> Triple(title, favicon, preview) }
+                        tabModel.previewChanges(),
+                        tabModel.urlChanges().onStart { emit(tabModel.url) }
+                    ) { title, favicon, preview, url ->
+                        listOf(title, favicon, preview, url)
+                    }
                         .distinctUntilChanged()
-                        .collectLatest { (title, favicon, preview) ->
+                        .collectLatest { list ->
+                            val title = list[0] as? String
+                            val favicon = list[1] as TabModel.Favicon
+                            val preview = list[2] as TabModel.Preview
+                            val url = (list[3] as? String).orEmpty()
                             state.updateSelf {
                                 copy(
                                     tabs = tabs.updateId(tabModel.id) {
                                         it.copy(
                                             title = title.orUntitled(),
                                             icon = favicon,
-                                            preview = preview
+                                            preview = preview,
+                                            url = url
                                         )
                                     }
                                 )
@@ -550,7 +559,13 @@ class BrowserPresenter @Inject constructor(
 
     private suspend fun onNewAction(action: BrowserContract.Action) {
         when (action) {
-            is BrowserContract.Action.LoadUrl -> if (action.url.isSpecialUrl()) {
+            is BrowserContract.Action.LoadUrl -> if (action.url.isBlank()) {
+                createNewTabAndSelect(
+                    tabInitializer = NoOpInitializer(),
+                    shouldSelect = true,
+                    tabType = TabModel.Type.NORMAL
+                )
+            } else if (action.url.isSpecialUrl()) {
                 state.updateSelf {
                     copy(
                         dialog = BrowserViewState.Dialogs.LocalFileBlocked,
@@ -562,7 +577,7 @@ class BrowserPresenter @Inject constructor(
                 createNewTabAndSelect(
                     tabInitializer = UrlInitializer(action.url),
                     shouldSelect = true,
-                    tabType = TabModel.Type.EPHEMERAL
+                    tabType = TabModel.Type.NORMAL
                 )
             }
 
@@ -578,7 +593,7 @@ class BrowserPresenter @Inject constructor(
                 createNewTabAndSelect(
                     tabInitializer = UrlInitializer(it.url),
                     shouldSelect = true,
-                    tabType = TabModel.Type.EPHEMERAL
+                    tabType = TabModel.Type.NORMAL
                 )
             }
         }
