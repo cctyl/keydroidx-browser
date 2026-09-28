@@ -19,6 +19,9 @@ import acr.browser.lightning.di.injector
 import acr.browser.lightning.preference.UserPreferencesDataStore
 import acr.browser.lightning.search.SearchEngineProvider
 import acr.browser.lightning.utils.isSpecialUrl
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
@@ -135,6 +138,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private var isFindMode = false
     private var currentFindQuery = ""
 
+    /** 自由复制模式状态 */
+    private var isFreeCopyMode = false
+    private var isCopySelecting = false
+
     /** 当前是否停留在「主页」标签 */
     private var isHomeSelected = true
 
@@ -164,6 +171,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
             if (isFindMode) {
                 exitFindMode()
+                return
+            }
+            if (isFreeCopyMode) {
+                exitFreeCopyMode()
                 return
             }
             if (isBookmarkEditMode) {
@@ -315,6 +326,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             if (isFindMode) {
                 exitFindMode()
             }
+            if (isFreeCopyMode) {
+                exitFreeCopyMode()
+            }
             homeScroll?.visibility = View.VISIBLE
             browserFrameHost?.visibility = View.GONE
             addressBarContainer?.visibility = View.GONE
@@ -331,6 +345,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 findBarContainer?.visibility = View.VISIBLE
                 if (activeMenuType == QuickMenuType.NONE) {
                     updateFindSoftKeys()
+                }
+            } else if (isFreeCopyMode) {
+                addressBarContainer?.visibility = View.GONE
+                findBarContainer?.visibility = View.VISIBLE
+                if (activeMenuType == QuickMenuType.NONE) {
+                    updateFreeCopySoftKeys()
                 }
             } else {
                 findBarContainer?.visibility = View.GONE
@@ -433,6 +453,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             if (isFindMode) {
                 exitFindMode()
             }
+            if (isFreeCopyMode) {
+                exitFreeCopyMode()
+            }
             isScrolledToBottom = false
             presenter.onEvent(BrowserUiEvent.TabClick(index))
             updateTabMode()
@@ -452,6 +475,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private fun openUrlInNewTab(url: String) {
         if (isFindMode) {
             exitFindMode()
+        }
+        if (isFreeCopyMode) {
+            exitFreeCopyMode()
         }
         lifecycleScope.launch {
             try {
@@ -495,7 +521,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         )
     }
 
-    /** 按键 # 全局快捷工具菜单条目（1~5、*、# 项） */
+    /** 按键 # 全局快捷工具菜单条目（1~6、*、# 项） */
     private fun buildGlobalMenuItems(): List<KeyphoneViews.QuickMenuItem> {
         return listOf(
             KeyphoneViews.QuickMenuItem("1", getString(R.string.keyphone_pm_input_url)) { openSearchEditor() },
@@ -503,6 +529,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             KeyphoneViews.QuickMenuItem("3", getString(R.string.keyphone_pm_bookmarks)) { menuClick(MenuSelection.HISTORY) },
             KeyphoneViews.QuickMenuItem("4", getString(R.string.keyphone_pm_downloads)) { menuClick(MenuSelection.DOWNLOADS) },
             KeyphoneViews.QuickMenuItem("5", getString(R.string.keyphone_pm_scroll_top_bottom)) { toggleScrollTopBottom() },
+            KeyphoneViews.QuickMenuItem("6", getString(R.string.keyphone_pm_free_copy)) { startFreeCopyMode() },
             KeyphoneViews.QuickMenuItem("*", getString(R.string.keyphone_pm_toggle_images)) { toggleBlockImages() },
             KeyphoneViews.QuickMenuItem("#", getString(R.string.keyphone_pm_toggle_fullscreen)) { toggleFullScreen() }
         )
@@ -544,12 +571,14 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (activeMenuType == QuickMenuType.NONE) return
         activeMenuType = QuickMenuType.NONE
         cachedMenuItems = emptyList()
-        backPressedCallback.isEnabled = (isBookmarkEditMode || isFindMode)
+        backPressedCallback.isEnabled = (isBookmarkEditMode || isFindMode || isFreeCopyMode)
         quickMenuOverlay?.visibility = View.GONE
         if (isHomeSelected) {
             updateHomeSoftKeys()
         } else if (isFindMode) {
             updateFindSoftKeys()
+        } else if (isFreeCopyMode) {
+            updateFreeCopySoftKeys()
         } else {
             updateWebSoftKeys()
         }
@@ -581,6 +610,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private fun closeCurrentTabOrExit() {
         if (isFindMode) {
             exitFindMode()
+        }
+        if (isFreeCopyMode) {
+            exitFreeCopyMode()
         }
         val tabs = presenter.state.value.tabs
         val currentIndex = tabs.indexOfFirst { it.isSelected }
@@ -706,6 +738,378 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             findViewById<View>(CommonR.id.bottomPanel)?.visibility = View.VISIBLE
         }
     }
+
+    // region 自由复制模式
+
+    private fun startFreeCopyMode() {
+        if (isHomeSelected) {
+            Toast.makeText(this, R.string.keyphone_need_page, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val webView = currentWebView()
+        if (webView == null) {
+            Toast.makeText(this, R.string.keyphone_need_page, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (isFindMode) {
+            exitFindMode()
+        }
+
+        isFreeCopyMode = true
+        isCopySelecting = false
+        backPressedCallback.isEnabled = true
+
+        addressBarContainer?.visibility = View.GONE
+        findBarContainer?.visibility = View.VISIBLE
+        findQueryText?.text = getString(R.string.keyphone_copy_title)
+        findCountText?.text = getString(R.string.keyphone_copy_start_hint)
+        updateFreeCopySoftKeys()
+
+        val initJs = """
+            (function() {
+                if (!window.__keyphone_copy__) {
+                    window.__keyphone_copy__ = {
+                        isSelecting: false,
+                        caretEl: null,
+                        init: function() {
+                            // 1. 尝试解除网页对 user-select 与复制事件的拦截
+                            var wasBlocked = false;
+                            try {
+                                var computed = window.getComputedStyle(document.body);
+                                if (computed && (computed.userSelect === 'none' || computed.webkitUserSelect === 'none')) {
+                                    wasBlocked = true;
+                                }
+                            } catch(e) {}
+
+                            var unblockStyle = document.getElementById('__keyphone_unblock_copy__');
+                            if (!unblockStyle) {
+                                unblockStyle = document.createElement('style');
+                                unblockStyle.id = '__keyphone_unblock_copy__';
+                                unblockStyle.textContent = '* { -webkit-user-select: text !important; user-select: text !important; }';
+                                document.head.appendChild(unblockStyle);
+                            }
+
+                            ['selectstart', 'copy', 'cut', 'contextmenu', 'select'].forEach(function(ev) {
+                                document.addEventListener(ev, function(e) { e.stopPropagation(); }, true);
+                                document['on' + ev] = null;
+                                if (document.body) document.body['on' + ev] = null;
+                            });
+
+                            // 2. 检查页面是否存在可选文本节点
+                            var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                            var hasText = false;
+                            var firstText = null;
+                            var n;
+                            while ((n = walker.nextNode())) {
+                                if (n.nodeValue && n.nodeValue.trim().length > 0) {
+                                    hasText = true;
+                                    if (!firstText) firstText = n;
+                                    break;
+                                }
+                            }
+                            if (!hasText) {
+                                return JSON.stringify({ success: false, reason: "no_text" });
+                            }
+
+                            if (!this.caretEl) {
+                                var el = document.createElement('div');
+                                el.id = '__keyphone_caret_overlay__';
+                                el.style.cssText = 'position:absolute; width:3px; background:#FF6600; border-radius:1px; z-index:2147483647; pointer-events:none; box-shadow:0 0 5px rgba(255,102,0,0.9); transition: left 0.04s linear, top 0.04s linear;';
+                                document.body.appendChild(el);
+                                this.caretEl = el;
+
+                                var style = document.createElement('style');
+                                style.id = '__keyphone_caret_style__';
+                                style.textContent = '@keyframes __caret_blink__ { 0%,100%{opacity:1;} 50%{opacity:0.15;} } ' +
+                                    '#__keyphone_caret_overlay__ { animation: __caret_blink__ 0.8s infinite; }';
+                                document.head.appendChild(style);
+                            }
+                            this.caretEl.style.display = 'block';
+                            this.isSelecting = false;
+
+                            var sel = window.getSelection();
+                            if (!sel || sel.rangeCount === 0 || (sel.isCollapsed && !sel.anchorNode)) {
+                                var startY = Math.max(30, Math.min(window.innerHeight / 3, 120));
+                                var range = document.caretRangeFromPoint ? document.caretRangeFromPoint(30, startY) : null;
+                                if (range) {
+                                    sel.removeAllRanges();
+                                    sel.addRange(range);
+                                } else if (firstText) {
+                                    var r = document.createRange();
+                                    r.setStart(firstText, 0);
+                                    r.collapse(true);
+                                    sel.removeAllRanges();
+                                    sel.addRange(r);
+                                }
+                            }
+                            this.updateCaret();
+                            this.scrollIntoView();
+                            return JSON.stringify({ success: true, unblocked: wasBlocked });
+                        },
+                        getCaretRect: function() {
+                            var sel = window.getSelection();
+                            if (!sel || sel.rangeCount === 0) return null;
+                            var range = sel.getRangeAt(0).cloneRange();
+                            if (this.isSelecting) {
+                                range.collapse(false);
+                            }
+
+                            // 1. 尝试直接获取 ClientRects
+                            var rects = range.getClientRects();
+                            if (rects && rects.length > 0) {
+                                for (var i = 0; i < rects.length; i++) {
+                                    var r = rects[i];
+                                    if (r.width > 0 || r.height > 0 || r.top > 0 || r.left > 0) {
+                                        return r;
+                                    }
+                                }
+                            }
+
+                            // 2. 尝试 getBoundingClientRect
+                            var bRect = range.getBoundingClientRect();
+                            if (bRect && (bRect.width > 0 || bRect.height > 0 || bRect.top > 0 || bRect.left > 0)) {
+                                return bRect;
+                            }
+
+                            // 3. 针对折叠 Range 在文本节点中的高精测距：临时扩展 1 字符测出物理像素
+                            if (range.collapsed && range.startContainer && range.startContainer.nodeType === Node.TEXT_NODE) {
+                                var textNode = range.startContainer;
+                                var offset = range.startOffset;
+                                var temp = range.cloneRange();
+                                if (offset < textNode.length) {
+                                    temp.setEnd(textNode, offset + 1);
+                                    var tr = temp.getBoundingClientRect();
+                                    if (tr && (tr.top > 0 || tr.left > 0 || tr.height > 0)) {
+                                        return { left: tr.left, top: tr.top, height: tr.height || 18, width: 2 };
+                                    }
+                                } else if (offset > 0) {
+                                    temp.setStart(textNode, offset - 1);
+                                    var tr = temp.getBoundingClientRect();
+                                    if (tr && (tr.top > 0 || tr.left > 0 || tr.height > 0)) {
+                                        return { left: tr.right, top: tr.top, height: tr.height || 18, width: 2 };
+                                    }
+                                }
+                            }
+
+                            // 4. 降级方案：获取父容器元素坐标
+                            var node = range.startContainer;
+                            if (node && node.nodeType === Node.TEXT_NODE) {
+                                node = node.parentNode;
+                            }
+                            if (node && node.getBoundingClientRect) {
+                                var pr = node.getBoundingClientRect();
+                                if (pr && (pr.top > 0 || pr.left > 0 || pr.height > 0)) {
+                                    return { left: pr.left, top: pr.top, height: Math.min(pr.height || 18, 24), width: 2 };
+                                }
+                            }
+                            return null;
+                        },
+                        move: function(dir) {
+                            var sel = window.getSelection();
+                            if (!sel) return;
+                            if (sel.rangeCount === 0) {
+                                this.init();
+                                return;
+                            }
+                            var alter = this.isSelecting ? 'extend' : 'move';
+                            try {
+                                if (dir === 'up') {
+                                    sel.modify(alter, 'backward', 'line');
+                                } else if (dir === 'down') {
+                                    sel.modify(alter, 'forward', 'line');
+                                } else if (dir === 'left') {
+                                    sel.modify(alter, 'left', 'character');
+                                } else if (dir === 'right') {
+                                    sel.modify(alter, 'right', 'character');
+                                }
+                            } catch (e) {
+                                if (dir === 'left') sel.modify(alter, 'backward', 'character');
+                                if (dir === 'right') sel.modify(alter, 'forward', 'character');
+                            }
+                            this.updateCaret();
+                            this.scrollIntoView();
+                        },
+                        startSelect: function() {
+                            this.isSelecting = true;
+                            this.updateCaret();
+                        },
+                        resetSelect: function() {
+                            this.isSelecting = false;
+                            var sel = window.getSelection();
+                            if (sel) {
+                                sel.collapseToStart();
+                            }
+                            this.updateCaret();
+                        },
+                        getSelectedText: function() {
+                            var sel = window.getSelection();
+                            return sel ? sel.toString() : '';
+                        },
+                        updateCaret: function() {
+                            if (!this.caretEl) return;
+                            var rect = this.getCaretRect();
+                            if (rect) {
+                                var scrollX = window.pageXOffset || document.documentElement.scrollLeft || 0;
+                                var scrollY = window.pageYOffset || document.documentElement.scrollTop || 0;
+                                this.caretEl.style.left = (scrollX + rect.left) + 'px';
+                                this.caretEl.style.top = (scrollY + rect.top) + 'px';
+                                this.caretEl.style.height = Math.max(rect.height || 18, 16) + 'px';
+                                this.caretEl.style.display = 'block';
+                            }
+                        },
+                        scrollIntoView: function() {
+                            var rect = this.getCaretRect();
+                            if (!rect) return;
+                            var margin = 50;
+                            if (rect.top < margin) {
+                                window.scrollBy(0, rect.top - margin);
+                            } else if (rect.bottom > window.innerHeight - margin) {
+                                window.scrollBy(0, rect.bottom - (window.innerHeight - margin));
+                            }
+                            if (rect.left < margin) {
+                                window.scrollBy(rect.left - margin, 0);
+                            } else if (rect.right > window.innerWidth - margin) {
+                                window.scrollBy(rect.right - (window.innerWidth - margin), 0);
+                            }
+                        },
+                        destroy: function() {
+                            if (this.caretEl && this.caretEl.parentNode) {
+                                this.caretEl.parentNode.removeChild(this.caretEl);
+                            }
+                            this.caretEl = null;
+                            var style = document.getElementById('__keyphone_caret_style__');
+                            if (style && style.parentNode) {
+                                style.parentNode.removeChild(style);
+                            }
+                            var unblock = document.getElementById('__keyphone_unblock_copy__');
+                            if (unblock && unblock.parentNode) {
+                                unblock.parentNode.removeChild(unblock);
+                            }
+                            var sel = window.getSelection();
+                            if (sel) {
+                                sel.removeAllRanges();
+                            }
+                            this.isSelecting = false;
+                        }
+                    };
+                }
+                return window.__keyphone_copy__.init();
+            })();
+        """.trimIndent()
+
+        webView.evaluateJavascript(initJs) { rawResult ->
+            val jsonStr = try {
+                org.json.JSONTokener(rawResult ?: "").nextValue() as? String ?: rawResult.orEmpty()
+            } catch (e: Exception) {
+                rawResult.orEmpty()
+            }
+            try {
+                val json = org.json.JSONObject(jsonStr)
+                val success = json.optBoolean("success", true)
+                val unblocked = json.optBoolean("unblocked", false)
+                if (!success) {
+                    Toast.makeText(this@KeyphoneBrowserActivity, R.string.keyphone_copy_page_restricted, Toast.LENGTH_LONG).show()
+                    exitFreeCopyMode()
+                } else if (unblocked) {
+                    Toast.makeText(this@KeyphoneBrowserActivity, R.string.keyphone_copy_unblocked_hint, Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                // 忽略非 JSON 返回
+            }
+        }
+    }
+
+    private fun moveFreeCopyCaret(direction: String) {
+        if (!isFreeCopyMode) return
+        currentWebView()?.evaluateJavascript(
+            "window.__keyphone_copy__ && window.__keyphone_copy__.move('$direction');",
+            null
+        )
+    }
+
+    private fun startFreeCopySelect() {
+        if (!isFreeCopyMode || isCopySelecting) return
+        isCopySelecting = true
+        findCountText?.text = getString(R.string.keyphone_copy_select_hint)
+        updateFreeCopySoftKeys()
+        currentWebView()?.evaluateJavascript(
+            "window.__keyphone_copy__ && window.__keyphone_copy__.startSelect();",
+            null
+        )
+        Toast.makeText(this, R.string.keyphone_copy_select_hint, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun resetFreeCopySelect() {
+        if (!isFreeCopyMode || !isCopySelecting) return
+        isCopySelecting = false
+        findCountText?.text = getString(R.string.keyphone_copy_start_hint)
+        updateFreeCopySoftKeys()
+        currentWebView()?.evaluateJavascript(
+            "window.__keyphone_copy__ && window.__keyphone_copy__.resetSelect();",
+            null
+        )
+        Toast.makeText(this, R.string.keyphone_copy_start_hint, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun performFreeCopy() {
+        if (!isFreeCopyMode) return
+        val webView = currentWebView() ?: return
+        webView.evaluateJavascript(
+            "window.__keyphone_copy__ ? window.__keyphone_copy__.getSelectedText() : '';"
+        ) { rawResult ->
+            val text = try {
+                org.json.JSONTokener(rawResult ?: "").nextValue() as? String ?: ""
+            } catch (e: Exception) {
+                rawResult?.trim('"').orEmpty()
+            }
+
+            if (text.isBlank()) {
+                Toast.makeText(this@KeyphoneBrowserActivity, R.string.keyphone_copy_empty, Toast.LENGTH_SHORT).show()
+            } else {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("text", text))
+                Toast.makeText(this@KeyphoneBrowserActivity, R.string.keyphone_copy_success, Toast.LENGTH_SHORT).show()
+                exitFreeCopyMode()
+            }
+        }
+    }
+
+    private fun exitFreeCopyMode() {
+        if (!isFreeCopyMode) return
+        isFreeCopyMode = false
+        isCopySelecting = false
+        backPressedCallback.isEnabled = (activeMenuType != QuickMenuType.NONE || isBookmarkEditMode || isFindMode)
+
+        findBarContainer?.visibility = View.GONE
+        currentWebView()?.evaluateJavascript(
+            "window.__keyphone_copy__ && window.__keyphone_copy__.destroy();",
+            null
+        )
+
+        updateTabMode()
+    }
+
+    private fun updateFreeCopySoftKeys() {
+        if (isCopySelecting) {
+            setSoftKeys(
+                getString(R.string.keyphone_copy_soft_reset),
+                getString(R.string.keyphone_copy_soft_copy),
+                getString(R.string.keyphone_copy_soft_exit)
+            )
+        } else {
+            setSoftKeys(
+                null,
+                getString(R.string.keyphone_copy_soft_start),
+                getString(R.string.keyphone_copy_soft_exit)
+            )
+        }
+        if (isFullScreenMode && activeMenuType == QuickMenuType.NONE) {
+            findViewById<View>(CommonR.id.bottomPanel)?.visibility = View.VISIBLE
+        }
+    }
+
+    // endregion
 
     private fun toggleFullScreen() {
         isFullScreenMode = !isFullScreenMode
@@ -1299,6 +1703,130 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
         }
 
+        // 自由复制模式：优先于 WebView 拦截方向键与确认键/软键，防止按键被 WebView 空间导航吞掉
+        if (isFreeCopyMode) {
+            val isDown = event.action == KeyEvent.ACTION_DOWN
+            val isFirstDown = isDown && event.repeatCount == 0
+
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> {
+                    if (isDown) {
+                        lastConsumedDownKeyCode = event.keyCode
+                        moveFreeCopyCaret("up")
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    if (isDown) {
+                        lastConsumedDownKeyCode = event.keyCode
+                        moveFreeCopyCaret("down")
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    if (isDown) {
+                        lastConsumedDownKeyCode = event.keyCode
+                        moveFreeCopyCaret("left")
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    if (isDown) {
+                        lastConsumedDownKeyCode = event.keyCode
+                        moveFreeCopyCaret("right")
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_NUMPAD_5,
+                KeyEvent.KEYCODE_BUTTON_A -> {
+                    if (isDown) {
+                        lastConsumedDownKeyCode = event.keyCode
+                        if (isFirstDown) {
+                            if (!isCopySelecting) {
+                                startFreeCopySelect()
+                            } else {
+                                performFreeCopy()
+                            }
+                        }
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_SOFT_LEFT, KeyEvent.KEYCODE_MENU -> {
+                    if (isDown) {
+                        lastConsumedDownKeyCode = event.keyCode
+                        if (isFirstDown && isCopySelecting) {
+                            resetFreeCopySelect()
+                        }
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_SOFT_RIGHT, KeyEvent.KEYCODE_BACK -> {
+                    if (isDown) {
+                        lastConsumedDownKeyCode = event.keyCode
+                        if (isFirstDown) {
+                            exitFreeCopyMode()
+                        }
+                    }
+                    return true
+                }
+            }
+        }
+
+        // 页内查找模式：优先于 WebView 拦截方向键与确认键/软键
+        if (isFindMode) {
+            val isDown = event.action == KeyEvent.ACTION_DOWN
+            val isFirstDown = isDown && event.repeatCount == 0
+
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    if (isDown) {
+                        lastConsumedDownKeyCode = event.keyCode
+                        findPreviousMatch()
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    if (isDown) {
+                        lastConsumedDownKeyCode = event.keyCode
+                        findNextMatch()
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_NUMPAD_5,
+                KeyEvent.KEYCODE_BUTTON_A -> {
+                    if (isDown) {
+                        lastConsumedDownKeyCode = event.keyCode
+                        if (isFirstDown) {
+                            findNextMatch()
+                        }
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_SOFT_LEFT, KeyEvent.KEYCODE_MENU -> {
+                    if (isDown) {
+                        lastConsumedDownKeyCode = event.keyCode
+                        if (isFirstDown) {
+                            findPreviousMatch()
+                        }
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_SOFT_RIGHT, KeyEvent.KEYCODE_BACK -> {
+                    if (isDown) {
+                        lastConsumedDownKeyCode = event.keyCode
+                        if (isFirstDown) {
+                            exitFindMode()
+                        }
+                    }
+                    return true
+                }
+            }
+        }
+
         // UC 经典快捷键 0：回到主页
         val isKey0 = event.keyCode == KeyEvent.KEYCODE_0 || event.keyCode == KeyEvent.KEYCODE_NUMPAD_0
         if (isKey0) {
@@ -1486,6 +2014,46 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
         }
 
+        if (isFreeCopyMode) {
+            return when (action) {
+                KeydroidxKeyAction.UP -> {
+                    moveFreeCopyCaret("up")
+                    true
+                }
+                KeydroidxKeyAction.DOWN -> {
+                    moveFreeCopyCaret("down")
+                    true
+                }
+                KeydroidxKeyAction.LEFT -> {
+                    moveFreeCopyCaret("left")
+                    true
+                }
+                KeydroidxKeyAction.RIGHT -> {
+                    moveFreeCopyCaret("right")
+                    true
+                }
+                KeydroidxKeyAction.SELECT -> {
+                    if (!isCopySelecting) {
+                        startFreeCopySelect()
+                    } else {
+                        performFreeCopy()
+                    }
+                    true
+                }
+                KeydroidxKeyAction.SOFT_LEFT -> {
+                    if (isCopySelecting) {
+                        resetFreeCopySelect()
+                    }
+                    true
+                }
+                KeydroidxKeyAction.SOFT_RIGHT -> {
+                    exitFreeCopyMode()
+                    true
+                }
+                else -> super.onAction(action)
+            }
+        }
+
         if (isHomeSelected) {
             val helper = focusHelper ?: return super.onAction(action)
             if (isBookmarkEditMode) {
@@ -1600,6 +2168,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private fun handleBack() {
         if (isFindMode) {
             exitFindMode()
+            return
+        }
+        if (isFreeCopyMode) {
+            exitFreeCopyMode()
             return
         }
         if (presenter.state.value.isBackEnabled) {
