@@ -64,6 +64,9 @@
     <string name="keyphone_copy_empty">未选择文字</string>
     <string name="keyphone_copy_success">已复制到剪贴板</string>
     <string name="keyphone_copy_page_restricted">该页面限制复制或无可提取文本</string>
+
+    <!-- 网页输入劫持（点中输入框 → SDK 输入页 → 回填） -->
+    <string name="keyphone_web_input_title">输入内容</string>
     <string name="keyphone_copy_unblocked_hint">已解除页面复制限制</string>
 
     <!-- 快捷动作提示 -->

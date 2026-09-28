@@ -65,7 +65,7 @@ class WebViewFactory @Inject constructor(
      * Construct a [WebView] based on the user's preferences.
      */
     @SuppressLint("SetJavaScriptEnabled")
-    fun createWebView(tabSettings: TabSettings): WebView = WebView(activity).apply {
+    fun createWebView(tabSettings: TabSettings): WebView = ImeBlockableWebView(activity).apply {
         tag = CompositeTouchListener().also(::setOnTouchListener)
         isFocusableInTouchMode = true
         isFocusable = true

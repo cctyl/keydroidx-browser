@@ -7,6 +7,7 @@ import io.github.cctyl.nokia.common.R as CommonR
 import acr.browser.lightning.browser.BrowserPresenter
 import acr.browser.lightning.browser.menu.MenuSelection
 import acr.browser.lightning.browser.search.IntentExtractor
+import acr.browser.lightning.browser.tab.ImeBlockableWebView
 import acr.browser.lightning.browser.tab.TabPager
 import acr.browser.lightning.browser.tab.TabViewState
 import acr.browser.lightning.constant.SCHEME_BLANK
@@ -25,6 +26,8 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.text.Editable
 import android.text.TextWatcher
@@ -61,6 +64,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONException
+import org.json.JSONObject
+import org.json.JSONTokener
 import javax.inject.Inject
 
 /**
@@ -122,6 +128,13 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     /** 确认键已向 WebView 派发 DOWN 尚未派发 UP（防止触摸序列悬挂） */
     private var mouseTouchDown = false
+
+    /** 网页输入劫持：探测定时器与状态 */
+    private val inputProbeHandler = Handler(Looper.getMainLooper())
+    private var webInputProbeAttempt = 0
+
+    /** 已注入 JS 模块的「标签:URL」键，避免重复 evaluate */
+    private var webInputInjectedKey: String? = null
 
     /** UC 风格数字快捷菜单 */
     private enum class QuickMenuType {
@@ -316,6 +329,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             dispatchCursorTouch(MotionEvent.ACTION_UP)
         }
         mouseController?.stopRepeat()
+        cancelWebInputProbe()
         presenter.onViewHidden()
     }
 
@@ -1492,6 +1506,13 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 if (!isHomeSelected) {
                     applyAddressBar()
                     applyProgress(state.progress)
+                    // 网页态预注入输入劫持 JS（幂等；按「标签:URL」去重，导航/换标签后重注入）
+                    val selectedTab = state.tabs.firstOrNull { it.isSelected }
+                    val key = "${selectedTab?.id}:${state.displayUrl}"
+                    if (key != webInputInjectedKey) {
+                        webInputInjectedKey = key
+                        currentWebView()?.evaluateJavascript(webInputInstallJs, null)
+                    }
                 }
             }
         }
@@ -2246,6 +2267,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 dispatchCursorTouch(MotionEvent.ACTION_UP)
             }
             mouseController?.stopRepeat()
+            cancelWebInputProbe()
             if (cursor.visibility != View.GONE) {
                 cursor.visibility = View.GONE
             }
@@ -2272,6 +2294,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                         x.toFloat(), y.toFloat(), 0
                     )
                     try {
+                        // 幂等安装网页输入劫持模块（点中输入框 → SDK 输入页）
+                        webView.evaluateJavascript(webInputInstallJs, null)
                         webView.dispatchTouchEvent(down)
                     } finally {
                         down.recycle()
@@ -2291,6 +2315,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                         up.recycle()
                     }
                     mouseTouchDown = false
+                    scheduleWebInputProbe()
                 }
             }
         } catch (t: Throwable) {
@@ -2298,6 +2323,147 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             mouseTouchDown = false
         }
     }
+
+    // region 网页输入劫持（点中输入框 → SDK 输入页 → JS 回填）
+
+    /**
+     * 幂等安装的 JS 模块：capture 阶段监听 focusin/click，记录最近点中的可编辑元素
+     * （input 按类型过滤，排除按钮类与 disabled/readonly）；poll() 消费一次并回传
+     * JSON {focus,value,multiline}；fill(text) 写回并派发 input/change 事件。
+     */
+    private val webInputInstallJs = """
+        (function() {
+            if (!window.__keyphone_input__) {
+                window.__keyphone_input__ = {
+                    installed: false, el: null, pending: false,
+                    editableOf: function(t) {
+                        if (!t || t.nodeType !== 1 || !t.closest) return null;
+                        var el = t.closest('textarea, input, [contenteditable="true"], [contenteditable="plaintext-only"]');
+                        if (!el || el.disabled || el.readOnly) return null;
+                        if (el.tagName === 'INPUT') {
+                            var ty = (el.getAttribute('type') || 'text').toLowerCase();
+                            var ok = ['text','search','email','url','tel','password','number','date','month','week','time','datetime-local'];
+                            if (ok.indexOf(ty) < 0) return null;
+                        }
+                        return el;
+                    },
+                    onTarget: function(t) {
+                        var el = this.editableOf(t);
+                        if (el) { this.el = el; this.pending = true; }
+                    },
+                    init: function() {
+                        if (this.installed) return;
+                        var self = this;
+                        document.addEventListener('focusin', function(e) { self.onTarget(e.target); }, true);
+                        document.addEventListener('click', function(e) { self.onTarget(e.target); }, true);
+                        this.installed = true;
+                    },
+                    poll: function() {
+                        var p = this.pending; this.pending = false;
+                        if (!p || !this.el || !document.contains(this.el)) return JSON.stringify({focus:false});
+                        var el = this.el;
+                        var isField = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+                        var v = isField ? (el.value || '') : (el.innerText || '');
+                        var ml = (el.tagName === 'TEXTAREA') || (el.isContentEditable === true);
+                        return JSON.stringify({focus:true, value:v, multiline:ml});
+                    },
+                    fill: function(text) {
+                        var el = this.el;
+                        if (!el || !document.contains(el)) return JSON.stringify({success:false});
+                        try {
+                            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') { el.value = text; }
+                            else { el.textContent = text; }
+                            el.dispatchEvent(new Event('input', {bubbles:true}));
+                            el.dispatchEvent(new Event('change', {bubbles:true}));
+                            return JSON.stringify({success:true});
+                        } catch (e) { return JSON.stringify({success:false}); }
+                    }
+                };
+            }
+            window.__keyphone_input__.init();
+        })();
+    """.trimIndent()
+
+    private val webInputProbeJs =
+        "window.__keyphone_input__ ? window.__keyphone_input__.poll() : '{\"focus\":false}';"
+
+    private val webInputProbeRunnable = Runnable { probeWebInput() }
+
+    /** 确认键抬起后调用：延迟探测光标点击是否落在网页可编辑元素上 */
+    private fun scheduleWebInputProbe() {
+        inputProbeHandler.removeCallbacksAndMessages(null)
+        webInputProbeAttempt = 0
+        inputProbeHandler.postDelayed(webInputProbeRunnable, WEB_INPUT_PROBE_FIRST_MS)
+    }
+
+    private fun cancelWebInputProbe() {
+        inputProbeHandler.removeCallbacksAndMessages(null)
+        webInputProbeAttempt = 0
+    }
+
+    private fun probeWebInput() {
+        val webView = currentWebView() ?: return
+        webInputProbeAttempt++
+        webView.evaluateJavascript(webInputProbeJs) { result ->
+            val parsed = parseWebInputProbe(result)
+            if (parsed != null) {
+                openWebInputEditor(parsed.first, parsed.second)
+            } else if (webInputProbeAttempt < WEB_INPUT_PROBE_MAX_ATTEMPTS) {
+                inputProbeHandler.postDelayed(webInputProbeRunnable, WEB_INPUT_PROBE_RETRY_MS)
+            }
+        }
+    }
+
+    /** 解析 poll() 的返回值；focus=false 或解析失败返回 null */
+    private fun parseWebInputProbe(result: String?): Pair<String, Boolean>? {
+        if (result.isNullOrBlank() || result == "null") return null
+        return try {
+            // evaluateJavascript 会把 JS 字符串结果再包一层 JSON 引号，先剥掉
+            val stripped = JSONTokener(result).nextValue()
+            val json = when (stripped) {
+                is String -> JSONObject(stripped)
+                is JSONObject -> stripped
+                else -> return null
+            }
+            if (json.optBoolean("focus", false)) {
+                Pair(json.optString("value", ""), json.optBoolean("multiline", false))
+            } else {
+                null
+            }
+        } catch (t: JSONException) {
+            KeydroidxLog.e(TAG, "解析网页输入探测结果失败: $result", t)
+            null
+        }
+    }
+
+    /** 打开 SDK 输入页（预填当前值；textarea/contenteditable 开多行） */
+    private fun openWebInputEditor(value: String, multiline: Boolean) {
+        if (getCurrentPage() != null) return
+        if (isFindMode || isFreeCopyMode || activeMenuType != QuickMenuType.NONE) return
+        val fragment = KeydroidxTextInputFragment.newInstance(
+            getString(R.string.keyphone_web_input_title),
+            value,
+            null,
+            multiline,
+            0
+        )
+        fragment.setOnConfirmListener { text -> fillWebInput(text) }
+        openFragment(fragment)
+    }
+
+    /** 确认后把文本写回网页输入框并派发 input/change 事件（页面脚本可感知） */
+    private fun fillWebInput(text: String) {
+        val webView = currentWebView() ?: return
+        try {
+            val js = "window.__keyphone_input__ && window.__keyphone_input__.fill(" +
+                JSONObject.quote(text) + ");"
+            webView.evaluateJavascript(js, null)
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "回填网页输入失败", t)
+        }
+    }
+
+    // endregion
 
     private fun scrollPage(up: Boolean): Boolean {
         val webView = currentWebView() ?: return false
@@ -2388,6 +2554,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         for (i in 0 until frame.childCount) {
             val child = frame.getChildAt(i)
             if (child is WebView) {
+                // 按键机模式：屏蔽 WebView 自身拉起输入法，输入统一走 SDK 输入页
+                if (child is ImeBlockableWebView) {
+                    child.blockIme = true
+                }
                 return child
             }
         }
@@ -2405,6 +2575,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         private const val GRID_COLUMNS = 3
         private const val MAX_HISTORY_ROWS = 10
         private const val MAX_INPUT_CHARS = 100
+
+        /** 网页输入劫持探测参数：确认键抬起后 120ms 首探，失败最多重试 3 次（间隔 300ms） */
+        private const val WEB_INPUT_PROBE_FIRST_MS = 120L
+        private const val WEB_INPUT_PROBE_RETRY_MS = 300L
+        private const val WEB_INPUT_PROBE_MAX_ATTEMPTS = 3
+
         private val PAYLOAD_SEARCH = Any()
     }
 }
