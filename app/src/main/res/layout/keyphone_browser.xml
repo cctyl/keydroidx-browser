@@ -4,7 +4,7 @@
 
     顶部：UC 风格横向标签栏（展示主页及所有打开的 Web 标签页，按 3 循环切换）；
     其下：地址栏容器（浏览网页时展示）与 2dp 加载进度线；
-    内容区：包含主页 ScrollView 与 WebView 宿主 FrameLayout。
+    内容区：包含主页 ScrollView 与 WebView 宿主 FrameLayout，以及按键 1 弹出的数字快捷菜单浮层。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/keyphone_browser_root"
@@ -57,7 +57,7 @@
         android:background="@color/keydroidx_bottom_text"
         android:visibility="invisible" />
 
-    <!-- 主内容区：主页（搜索+书签+历史）与 Web 页面宿主容器二选一 -->
+    <!-- 主内容区：主页、Web 页面宿主与快捷菜单浮层 -->
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -87,6 +87,27 @@
             android:focusable="false"
             android:focusableInTouchMode="false"
             android:visibility="gone" />
+
+        <!-- UC 风格数字快捷菜单浮层（按键 1 弹出） -->
+        <FrameLayout
+            android:id="@+id/keyphone_quick_menu_overlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#30000000"
+            android:visibility="gone"
+            android:clickable="true"
+            android:focusable="false">
+
+            <LinearLayout
+                android:id="@+id/keyphone_quick_menu_card"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:minWidth="110dp"
+                android:orientation="vertical"
+                android:background="#222C38"
+                android:padding="2dp" />
+        </FrameLayout>
     </FrameLayout>
 
 </LinearLayout>

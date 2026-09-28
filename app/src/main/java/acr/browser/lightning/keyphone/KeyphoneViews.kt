@@ -519,6 +519,53 @@ object KeyphoneViews {
         val isSelected: Boolean
     )
 
+    /** UC 风格数字快捷菜单条目数据 */
+    data class QuickMenuItem(
+        val keyLabel: String,
+        val text: String,
+        val action: () -> Unit
+    )
+
+    /** UC 风格数字快捷菜单单个条目 View */
+    fun quickMenuItem(
+        context: Context,
+        item: QuickMenuItem,
+        isFocused: Boolean,
+        onClick: () -> Unit
+    ): View {
+        val row = LinearLayout(context)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.minimumHeight = dp(context, 21f)
+        row.setPadding(dp(context, 7f), dp(context, 2f), dp(context, 7f), dp(context, 2f))
+        row.isClickable = true
+        row.isFocusable = false
+        row.isFocusableInTouchMode = false
+
+        val textView = TextView(context)
+        textView.text = item.text
+        textView.includeFontPadding = false
+        textView.isSingleLine = true
+        applyFontSize(textView, R.dimen.keydroidx_font_caption)
+
+        val bg = GradientDrawable()
+        bg.cornerRadius = dp(context, 2f).toFloat()
+
+        if (isFocused) {
+            bg.setColor(0xFF4A90E2.toInt())
+            textView.setTextColor(Color.WHITE)
+            textView.paint.isFakeBoldText = true
+        } else {
+            bg.setColor(Color.TRANSPARENT)
+            textView.setTextColor(0xFFD0DDEB.toInt())
+            textView.paint.isFakeBoldText = false
+        }
+        row.background = bg
+        row.addView(textView)
+        row.setOnClickListener { onClick() }
+        return row
+    }
+
     /**
      * UC 风格顶部标签栏单个标签 View：
      * 选中状态高亮天蓝底色 + 白色粗体字；未选中状态深蓝底色 + 边框 + 浅灰蓝字。
