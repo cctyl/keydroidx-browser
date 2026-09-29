@@ -259,16 +259,9 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
             .show()
     }
 
-    /** 破坏性操作确认：core 唯一确认组件，左软键=肯定、右软键=否定（红线 #9）。 */
+    /** 退出浏览器：不弹确认框，直接退出（清理逻辑由 onDestroy 链路保证）。 */
     private fun confirmExit() {
-        KeydroidxConfirmDialog(
-            this,
-            getString(R.string.keyphone_exit_title),
-            getString(R.string.keyphone_exit_message)
-        )
-            .setPositiveButton(getString(R.string.keyphone_exit_positive)) { finishAffinity() }
-            .setNegativeButton(getString(R.string.keyphone_soft_cancel), null)
-            .show()
+        finishAffinity()
     }
 
     override fun onAction(action: Int): Boolean {

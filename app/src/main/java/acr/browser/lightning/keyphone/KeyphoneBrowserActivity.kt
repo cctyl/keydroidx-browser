@@ -2965,14 +2965,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     private fun confirmExit() {
-        KeydroidxConfirmDialog(
-            this,
-            getString(R.string.keyphone_exit_title),
-            getString(R.string.keyphone_exit_message)
-        )
-            .setPositiveButton(getString(R.string.keyphone_exit_positive)) { finishAffinity() }
-            .setNegativeButton(getString(R.string.keyphone_soft_cancel), null)
-            .show()
+        // 不弹确认框，直接退出（清理逻辑由 onDestroy 链路保证）
+        finishAffinity()
     }
 
     // endregion
