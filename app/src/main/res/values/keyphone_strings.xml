@@ -22,6 +22,7 @@
     <string name="keyphone_soft_cancel">取消</string>
     <string name="keyphone_soft_delete">删除</string>
     <string name="keyphone_soft_clear">清空</string>
+    <string name="keyphone_soft_reset">重置</string>
 
     <!-- 按键 * 数字快捷菜单（UC 经典页面/窗口上下文菜单，按 * 关闭窗口、按 0 新建窗口） -->
     <string name="keyphone_qm_refresh">1.刷新/停止</string>
@@ -41,8 +42,16 @@
     <string name="keyphone_pm_downloads">4.文件管理</string>
     <string name="keyphone_pm_scroll_top_bottom">5.页首/页尾</string>
     <string name="keyphone_pm_free_copy">6.自由复制</string>
+    <string name="keyphone_pm_site_keys">7.专属按键适配</string>
     <string name="keyphone_pm_toggle_images">*.无图切换</string>
     <string name="keyphone_pm_toggle_fullscreen">#.切换全屏</string>
+
+    <!-- 专属按键适配（按网址自定义 1~9 键位） -->
+    <string name="keyphone_site_key_item">%1$d.适配本页：%2$s</string>
+    <string name="keyphone_calibrate_hint">按1~9选键 → 方向键移动 → 按其他键自动保存并切换</string>
+    <string name="keyphone_calibrate_digit">标定 %1$d 键：方向键移动光标，按其他键保存切换，右软键完成</string>
+    <string name="keyphone_calibrate_saved">键%1$d已保存(%2$d%%,%3$d%%)，可继续按其他键标定</string>
+    <string name="keyphone_calibrate_done">专属键位已保存并生效</string>
 
     <!-- 页内查找 -->
     <string name="keyphone_find_title">页内查找</string>

@@ -234,6 +234,22 @@ object KeyphoneViews {
     }
 
     /**
+     * 地址栏槽位的专属按键适配提示条（标定模式时等高替换地址输入框）。
+     * 字号/内边距与 [addressBar] 完全一致：替换前后容器总高不变，不挤动下方 WebView 布局，
+     * 保证标定的比例坐标在标定前后落在同一物理位置。
+     */
+    fun addressBarHint(context: Context): TextView {
+        val hint = TextView(context)
+        hint.includeFontPadding = false
+        hint.isSingleLine = true
+        hint.ellipsize = TextUtils.TruncateAt.END
+        hint.setTextColor(0xFFF39800.toInt())
+        applyFontSize(hint, R.dimen.keydroidx_font_body)
+        hint.setPadding(dp(context, 6f), dp(context, 2f), dp(context, 6f), dp(context, 2f))
+        return hint
+    }
+
+    /**
      * 标签页列表行（长方形卡片）：左侧页面预览缩略图 + 右侧标题。
      *
      * 注意卡片背景只能放在**行内的子 View** 上：`KeydroidxListPageFragment` 用行根 View 承载焦点高亮，

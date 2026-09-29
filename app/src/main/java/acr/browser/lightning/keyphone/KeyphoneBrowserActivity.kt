@@ -31,6 +31,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.text.Editable
 import android.text.TextWatcher
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -146,7 +147,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private enum class QuickMenuType {
         NONE,
         PAGE_MENU,   // 1 键：页面/窗口操作
-        GLOBAL_MENU  // # 键：全局工具导航
+        GLOBAL_MENU, // # 键：全局工具导航
+        URL_MENU     // # 菜单 7：专属按键适配的网址确认面板
     }
 
     private var activeMenuType = QuickMenuType.NONE
@@ -169,6 +171,15 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     /** 自由复制模式状态 */
     private var isFreeCopyMode = false
     private var isCopySelecting = false
+
+    /** 专属按键适配（按网址自定义 1~9 落点）状态 */
+    private var isCalibrateMode = false
+    private var calibratingDigit = 0
+    private var calibrateSiteKey = ""
+    private var calibrateStatusText: TextView? = null
+
+    /** 本次标定的内存映射（digit -> 比例坐标）：保存后立即生效，退出时与磁盘一致 */
+    private val calibratePoints = HashMap<Int, Pair<Float, Float>>()
 
     /** 当前是否停留在「主页」标签 */
     private var isHomeSelected = true
@@ -203,6 +214,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
             if (isFreeCopyMode) {
                 exitFreeCopyMode()
+                return
+            }
+            if (isCalibrateMode) {
+                exitCalibrateMode()
                 return
             }
             if (isBookmarkEditMode) {
@@ -580,12 +595,35 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             KeyphoneViews.QuickMenuItem("4", getString(R.string.keyphone_pm_downloads)) { menuClick(MenuSelection.DOWNLOADS) },
             KeyphoneViews.QuickMenuItem("5", getString(R.string.keyphone_pm_scroll_top_bottom)) { toggleScrollTopBottom() },
             KeyphoneViews.QuickMenuItem("6", getString(R.string.keyphone_pm_free_copy)) { startFreeCopyMode() },
+            KeyphoneViews.QuickMenuItem("7", getString(R.string.keyphone_pm_site_keys)) { showSiteKeyUrlMenu() },
             KeyphoneViews.QuickMenuItem("*", getString(R.string.keyphone_pm_toggle_images)) { toggleBlockImages() },
             KeyphoneViews.QuickMenuItem("#", getString(R.string.keyphone_pm_toggle_fullscreen)) { toggleFullScreen() }
         )
     }
 
     private fun getActiveMenuItems(): List<KeyphoneViews.QuickMenuItem> = cachedMenuItems
+
+    /** # 菜单 7：弹出候选站点键面板（纯净域名/域名+一级/二级路径），选中即进入专属按键适配 */
+    private fun showSiteKeyUrlMenu() {
+        if (isHomeSelected || currentWebView()?.url.isNullOrBlank() ||
+            KeyphoneSiteKeyStore.candidatesOf(currentWebView()?.url).isEmpty()
+        ) {
+            Toast.makeText(this, R.string.keyphone_need_page, Toast.LENGTH_SHORT).show()
+            return
+        }
+        showMenu(QuickMenuType.URL_MENU)
+    }
+
+    /** # 菜单 7 的候选站点键面板：从泛到具体逐条列出，最多三级（域名+两级路径） */
+    private fun buildSiteKeyUrlMenuItems(): List<KeyphoneViews.QuickMenuItem> {
+        val candidates = KeyphoneSiteKeyStore.candidatesOf(currentWebView()?.url)
+        return candidates.mapIndexed { index, key ->
+            KeyphoneViews.QuickMenuItem(
+                (index + 1).toString(),
+                getString(R.string.keyphone_site_key_item, index + 1, key)
+            ) { startSiteKeyCalibrate(key) }
+        }
+    }
 
     private fun showPageMenu() {
         showMenu(QuickMenuType.PAGE_MENU)
@@ -602,7 +640,17 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         cachedMenuItems = when (type) {
             QuickMenuType.PAGE_MENU -> buildPageMenuItems()
             QuickMenuType.GLOBAL_MENU -> buildGlobalMenuItems()
+            QuickMenuType.URL_MENU -> buildSiteKeyUrlMenuItems()
             QuickMenuType.NONE -> emptyList()
+        }
+        // 网址确认面板靠右弹出（二级子面板视觉），常规菜单居中
+        (quickMenuCard?.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+            lp.gravity = if (type == QuickMenuType.URL_MENU) {
+                Gravity.END or Gravity.CENTER_VERTICAL
+            } else {
+                Gravity.CENTER
+            }
+            quickMenuCard?.layoutParams = lp
         }
         backPressedCallback.isEnabled = true
         quickMenuFocusIndex = 0
@@ -1430,6 +1478,19 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             )
         )
 
+        // 标定提示条：与地址框同槽位等高替换（标定时隐藏输入框显示提示，
+        // 容器总高不变，不挤动 WebView 布局，保证标定坐标不漂移）
+        val calibrateHint = KeyphoneViews.addressBarHint(this)
+        calibrateHint.visibility = View.GONE
+        container.addView(
+            calibrateHint,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        calibrateStatusText = calibrateHint
+
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
@@ -1892,6 +1953,74 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
         }
 
+        // 专属按键适配模式：数字键选键/保存，方向键移动光标，确认/左软键保存，右软键完成。
+        // 全模态接管，严禁按键穿透至 WebView。
+        // 注意：不能写 lastConsumedDownKeyCode——否则同键 UP 会在 dispatchKeyEvent
+        // 顶部被吞掉，onDirectionUp 收不到，光标连发永不停止（一直滑到边）
+        if (isCalibrateMode) {
+            val isDown = event.action == KeyEvent.ACTION_DOWN
+            val isFirstDown = isDown && event.repeatCount == 0
+
+            val dir = when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> KeyphoneCursorView.DIR_UP
+                KeyEvent.KEYCODE_DPAD_DOWN -> KeyphoneCursorView.DIR_DOWN
+                KeyEvent.KEYCODE_DPAD_LEFT -> KeyphoneCursorView.DIR_LEFT
+                KeyEvent.KEYCODE_DPAD_RIGHT -> KeyphoneCursorView.DIR_RIGHT
+                else -> KeyphoneCursorView.DIR_NONE
+            }
+            if (dir != KeyphoneCursorView.DIR_NONE) {
+                if (isDown) {
+                    mouseController?.onDirectionDown(dir)
+                } else if (event.action == KeyEvent.ACTION_UP) {
+                    mouseController?.onDirectionUp(dir)
+                }
+                return true
+            }
+
+            val digit = keyDigitOf(event.keyCode)
+            if (digit in 1..9) {
+                if (isFirstDown) {
+                    // 实时保存：切换键的瞬间自动保存上一键位置，再开始标定新键；
+                    // 同键重复按下视为重新选键（光标跳回该键落点重新微调），无"双击保存"
+                    if (calibratingDigit in 1..9 && calibratingDigit != digit) {
+                        saveCalibratePoint()
+                    }
+                    beginCalibrateDigit(digit)
+                }
+                return true
+            }
+
+            when (event.keyCode) {
+                // 这台设备左软键实际发 KEYCODE_MENU（同自由复制/页内查找的处理），必须并列
+                KeyEvent.KEYCODE_SOFT_LEFT,
+                KeyEvent.KEYCODE_MENU -> {
+                    // 左软键「重置」：该键写回默认九宫格落点，光标同步跳过去
+                    if (isFirstDown) {
+                        resetCalibrateCursor()
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_NUMPAD_5,
+                KeyEvent.KEYCODE_BUTTON_A -> {
+                    if (isFirstDown && calibratingDigit in 1..9) {
+                        saveCalibratePoint()
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_SOFT_RIGHT,
+                KeyEvent.KEYCODE_BACK,
+                KeyEvent.KEYCODE_ESCAPE -> {
+                    if (isFirstDown) {
+                        exitCalibrateMode()
+                    }
+                    return true
+                }
+                else -> return true
+            }
+        }
+
         // 网页态鼠标模式：方向键驱动光标移动（数值与连发节奏照抄 keydroidx-foucs）；
         // 消费了 DOWN 就必须消费同键 UP，防止抬起事件穿透
         if (isMouseModeActive()) {
@@ -2141,6 +2270,42 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
         }
 
+        if (isCalibrateMode) {
+            return when (action) {
+                KeydroidxKeyAction.UP -> {
+                    tapDirection(KeyphoneCursorView.DIR_UP)
+                    true
+                }
+                KeydroidxKeyAction.DOWN -> {
+                    tapDirection(KeyphoneCursorView.DIR_DOWN)
+                    true
+                }
+                KeydroidxKeyAction.LEFT -> {
+                    tapDirection(KeyphoneCursorView.DIR_LEFT)
+                    true
+                }
+                KeydroidxKeyAction.RIGHT -> {
+                    tapDirection(KeyphoneCursorView.DIR_RIGHT)
+                    true
+                }
+                KeydroidxKeyAction.SELECT -> {
+                    if (calibratingDigit in 1..9) {
+                        saveCalibratePoint()
+                    }
+                    true
+                }
+                KeydroidxKeyAction.SOFT_LEFT -> {
+                    resetCalibrateCursor()
+                    true
+                }
+                KeydroidxKeyAction.SOFT_RIGHT -> {
+                    exitCalibrateMode()
+                    true
+                }
+                else -> true
+            }
+        }
+
         if (isHomeSelected) {
             val helper = focusHelper ?: return super.onAction(action)
             if (isBookmarkEditMode) {
@@ -2246,13 +2411,14 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         return !isHomeSelected &&
             activeMenuType == QuickMenuType.NONE &&
             !isFindMode &&
-            !isFreeCopyMode
+            !isFreeCopyMode &&
+            !isCalibrateMode
     }
 
     /** 刷新鼠标光标可见性：仅网页态显示，回主页/弹菜单/进查找复制态时隐藏并停连发 */
     private fun updateMouseCursorVisibility() {
         val cursor = mouseCursorView ?: return
-        if (isMouseModeActive()) {
+        if (isMouseModeActive() || isCalibrateMode) {
             mouseController?.ensurePositionValid()
             if (cursor.visibility != View.VISIBLE) {
                 cursor.visibility = View.VISIBLE
@@ -2520,10 +2686,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     // region 1~9 热区跳转（九宫格角部偏移定位）
 
     /**
-     * 按 1~9：光标平滑跳到对应九宫格位置（只移动不点击，落点由确认键触发）。
-     * 落点 = 格子内偏向本键对应的角落：左右列在格内取 25%/75% 宽处，顶/底行取 25%/75% 高处，
-     * 中间行列取格中心。顶栏按钮贴视口顶角、底栏按钮贴视口底角（如起点中文网顶栏左右菜单
-     * 与底栏「菜单/书友圈/红按钮」），此偏移普遍能落到真实按钮上；纯比例计算，天然适配各种分辨率。
+     * 按 1~9：光标平滑跳到对应落点（只移动不点击，落点由确认键触发）。
+     * 落点取 [zonePoint]：站点已标定用自定义比例，否则九宫格默认位置。
      */
     private fun jumpCursorToZone(zone: Int) {
         val controller = mouseController ?: return
@@ -2531,13 +2695,47 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         val w = host.width
         val h = host.height
         if (w <= 0 || h <= 0) return
+        val point = zonePoint(zone) ?: return
+        controller.animateCursorTo(Math.round(w * point.first), Math.round(h * point.second))
+    }
+
+    /**
+     * 某键的目标落点（宿主宽高的比例坐标）：
+     * 当前网址标定过该键则用自定义落点；否则九宫格默认位置——格子内偏向本键对应的角落：
+     * 左右列在格内取 25%/75% 宽处，顶/底行取 25%/75% 高处，中间行列取格中心。
+     * 顶栏按钮贴视口顶角、底栏按钮贴视口底角（如起点中文网顶栏左右菜单
+     * 与底栏「菜单/书友圈/红按钮」），此偏移普遍能落到真实按钮上；纯比例计算，天然适配各种分辨率。
+     */
+    private fun zonePoint(zone: Int): Pair<Float, Float>? {
+        val host = browserFrameHost ?: return null
+        val w = host.width
+        val h = host.height
+        if (w <= 0 || h <= 0) return null
+        // 站点专属键位优先：本次标定的内存映射（保存即生效）；
+        // 标定中锁定所选层级（getExact），不被上层（更泛）配置覆盖，重置后即默认九宫格；
+        // 日常跳转才按候选键从最具体到最泛做层级回退
+        calibratePoints[zone]?.let { return it }
+        if (isCalibrateMode) {
+            KeyphoneSiteKeyStore.getExact(this, calibrateSiteKey, zone)?.let { return it }
+        } else {
+            KeyphoneSiteKeyStore.get(
+                this,
+                KeyphoneSiteKeyStore.candidatesOf(currentWebView()?.url),
+                zone
+            )?.let { return it }
+        }
+        return defaultZonePoint(zone, w, h)
+    }
+
+    /** 九宫格默认落点（比例坐标）：格子内偏向本键对应角落，中间行列取格中心 */
+    private fun defaultZonePoint(zone: Int, w: Int, h: Int): Pair<Float, Float> {
         val col = (zone - 1) % 3
         val row = (zone - 1) / 3
         val fx = if (col == 0) 0.25f else if (col == 2) 0.75f else 0.5f
         val fy = if (row == 0) 0.25f else if (row == 2) 0.75f else 0.5f
         val tx = w * col / 3f + w / 3f * fx
         val ty = h * row / 3f + h / 3f * fy
-        controller.animateCursorTo(Math.round(tx), Math.round(ty))
+        return tx / w to ty / h
     }
 
     /** 键值 → 数字 1~9（Numpad 5 保留为确认键，映射为 0）；非数字键返回 0 */
@@ -2553,6 +2751,144 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         KeyEvent.KEYCODE_8, KeyEvent.KEYCODE_NUMPAD_8 -> 8
         KeyEvent.KEYCODE_9, KeyEvent.KEYCODE_NUMPAD_9 -> 9
         else -> 0
+    }
+
+    // endregion
+
+    // region 专属按键适配（按网址自定义 1~9 键位）
+
+    /** 进入标定模式：以选中的候选站点键为存取维度，光标进入自由移动状态 */
+    private fun startSiteKeyCalibrate(siteKey: String) {
+        if (isHomeSelected || siteKey.isEmpty()) {
+            Toast.makeText(this, R.string.keyphone_need_page, Toast.LENGTH_SHORT).show()
+            return
+        }
+        calibrateSiteKey = siteKey
+        calibratingDigit = 0
+        calibratePoints.clear()
+        isCalibrateMode = true
+        backPressedCallback.isEnabled = true
+        // 地址栏槽位等高替换为提示条（不新增行高，避免布局位移影响标定）
+        addressInput?.visibility = View.GONE
+        calibrateStatusText?.visibility = View.VISIBLE
+        updateCalibrateStatus(getString(R.string.keyphone_calibrate_hint))
+        mouseController?.ensurePositionValid()
+        updateMouseCursorVisibility()
+        setSoftKeys(
+            getString(R.string.keyphone_soft_reset),
+            null,
+            getString(R.string.keyphone_soft_back)
+        )
+        if (isFullScreenMode) {
+            findViewById<View>(CommonR.id.bottomPanel)?.visibility = View.VISIBLE
+        }
+    }
+
+    /** 选中要标定的数字键：光标先跳到该键落点（已标定用已存值，否则默认九宫格），再由方向键微调 */
+    private fun beginCalibrateDigit(digit: Int) {
+        calibratingDigit = digit
+        mouseController?.ensurePositionValid()
+        jumpCursorToZone(digit)
+        updateCalibrateStatus(getString(R.string.keyphone_calibrate_digit, digit))
+    }
+
+    /** 把当前光标位置保存为 [calibratingDigit] 键在该网址下的落点（比例坐标，实时落盘） */
+    private fun saveCalibratePoint() {
+        val digit = calibratingDigit
+        val controller = mouseController ?: return
+        val host = browserFrameHost ?: return
+        if (digit !in 1..9 || host.width <= 0 || host.height <= 0) return
+        val fx = (controller.posX / host.width.toFloat()).coerceIn(0f, 1f)
+        val fy = (controller.posY / host.height.toFloat()).coerceIn(0f, 1f)
+        calibratePoints[digit] = fx to fy
+        KeyphoneSiteKeyStore.put(this, calibrateSiteKey, digit, fx, fy)
+        KeydroidxLog.d(
+            TAG,
+            "专属键位保存 digit=$digit siteKey=$calibrateSiteKey fx=$fx fy=$fy"
+        )
+        calibratingDigit = 0
+        updateCalibrateStatus(
+            getString(
+                R.string.keyphone_calibrate_saved,
+                digit,
+                Math.round(fx * 100),
+                Math.round(fy * 100)
+            )
+        )
+    }
+
+    /** 完成标定：立即生效（后续 1~9 跳转优先读自定义落点） */
+    private fun exitCalibrateMode() {
+        if (!isCalibrateMode) return
+        // 收尾：还在标定中的键，右软键退出的瞬间自动保存
+        if (calibratingDigit in 1..9) {
+            saveCalibratePoint()
+        }
+        isCalibrateMode = false
+        calibratingDigit = 0
+        calibrateSiteKey = ""
+        calibratePoints.clear()
+        // 恢复地址栏
+        calibrateStatusText?.visibility = View.GONE
+        addressInput?.visibility = View.VISIBLE
+        applyAddressBar()
+        backPressedCallback.isEnabled =
+            (activeMenuType != QuickMenuType.NONE || isBookmarkEditMode)
+        updateMouseCursorVisibility()
+        Toast.makeText(this, R.string.keyphone_calibrate_done, Toast.LENGTH_SHORT).show()
+        if (isHomeSelected) {
+            updateHomeSoftKeys()
+        } else {
+            updateWebSoftKeys()
+        }
+        if (isFullScreenMode && activeMenuType == QuickMenuType.NONE) {
+            findViewById<View>(CommonR.id.bottomPanel)?.visibility = View.GONE
+        }
+    }
+
+    /**
+     * 左软键「重置」：把**全部 1~9 键**在所选站点键（[calibrateSiteKey]）上的落点
+     * 一次性写回默认九宫格比例（内存+磁盘），显式遮蔽上层（更泛层级）的旧配置——
+     * 只改本层，不动其他层级。光标跳回当前标定键的默认位（未选键则回中心）
+     */
+    private fun resetCalibrateCursor() {
+        val host = browserFrameHost ?: return
+        val w = host.width
+        val h = host.height
+        if (w <= 0 || h <= 0) return
+        for (digit in 1..9) {
+            val point = defaultZonePoint(digit, w, h)
+            calibratePoints[digit] = point
+            KeyphoneSiteKeyStore.put(this, calibrateSiteKey, digit, point.first, point.second)
+        }
+        KeydroidxLog.d(TAG, "重置键位 siteKey=$calibrateSiteKey -> 1~9 全部默认")
+        if (calibratingDigit in 1..9) {
+            jumpCursorToDefaultZone(calibratingDigit)
+        } else {
+            mouseController?.ensurePositionValid()
+        }
+        updateCalibrateStatus(getString(R.string.keyphone_calibrate_hint))
+    }
+
+    private fun jumpCursorToDefaultZone(zone: Int) {
+        val controller = mouseController ?: return
+        val host = browserFrameHost ?: return
+        val w = host.width
+        val h = host.height
+        if (w <= 0 || h <= 0) return
+        val point = defaultZonePoint(zone, w, h)
+        controller.animateCursorTo(Math.round(w * point.first), Math.round(h * point.second))
+    }
+
+    private fun updateCalibrateStatus(text: String) {
+        calibrateStatusText?.text = text
+    }
+
+    /** 软键路径的单步移动：按下即抬（无连发语义） */
+    private fun tapDirection(dir: Int) {
+        val controller = mouseController ?: return
+        controller.onDirectionDown(dir)
+        controller.onDirectionUp(dir)
     }
 
     // endregion
