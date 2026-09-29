@@ -133,6 +133,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private val inputProbeHandler = Handler(Looper.getMainLooper())
     private var webInputProbeAttempt = 0
 
+    /** 探测命中的输入框是否应在确认回填后模拟 Enter/提交表单（poll() 的 submit 字段） */
+    private var webInputPendingSubmit = false
+
+    /** 网页输入探测结果：value=当前值，multiline=多行输入，submit=确认后是否提交 */
+    private data class WebInputProbe(val value: String, val multiline: Boolean, val submit: Boolean)
+
     /** 已注入 JS 模块的「标签:URL」键，避免重复 evaluate */
     private var webInputInjectedKey: String? = null
 
@@ -2329,7 +2335,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     /**
      * 幂等安装的 JS 模块：capture 阶段监听 focusin/click，记录最近点中的可编辑元素
      * （input 按类型过滤，排除按钮类与 disabled/readonly）；poll() 消费一次并回传
-     * JSON {focus,value,multiline}；fill(text) 写回并派发 input/change 事件。
+     * JSON {focus,value,multiline,submit}；fill(text,submit) 写回并派发 input/change
+     * 事件，submit=true 时模拟 Enter 键 + 触发表单提交（对应触屏 IME 的「搜索」action 键）。
      */
     private val webInputInstallJs = """
         (function() {
@@ -2365,9 +2372,36 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                         var isField = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
                         var v = isField ? (el.value || '') : (el.innerText || '');
                         var ml = (el.tagName === 'TEXTAREA') || (el.isContentEditable === true);
-                        return JSON.stringify({focus:true, value:v, multiline:ml});
+                        var sub = this.shouldSubmit(el);
+                        return JSON.stringify({focus:true, value:v, multiline:ml, submit:sub});
                     },
-                    fill: function(text) {
+                    // 对齐 Chromium 的 IME action 推断：enterkeyhint / type=search / 表单隐式提交条件
+                    shouldSubmit: function(el) {
+                        try {
+                            var hint = ((el.getAttribute && el.getAttribute('enterkeyhint')) || '').toLowerCase();
+                            if (hint === 'search' || hint === 'go' || hint === 'send') return true;
+                            if (hint) return false;
+                            if (el.tagName === 'INPUT' && (el.getAttribute('type') || 'text').toLowerCase() === 'search') return true;
+                            // textarea / contenteditable 的 Enter 是换行，不做表单隐式提交
+                            if (el.tagName !== 'INPUT') return false;
+                            var form = el.form;
+                            if (!form) return false;
+                            // form 内只有一个文本类输入（HTML 隐式提交条件）→ Enter 即提交
+                            var fields = form.querySelectorAll('input, textarea');
+                            var textTypes = ['text','search','email','url','tel','password','number','date','month','week','time','datetime-local'];
+                            var textCount = 0;
+                            for (var i = 0; i < fields.length; i++) {
+                                var f = fields[i];
+                                if (f.disabled || f.readOnly) continue;
+                                var ty = (f.tagName === 'TEXTAREA') ? 'textarea' : (f.getAttribute('type') || 'text').toLowerCase();
+                                if (textTypes.indexOf(ty) < 0) continue;
+                                textCount++;
+                                if (textCount > 1) return false;
+                            }
+                            return textCount === 1;
+                        } catch (e) { return false; }
+                    },
+                    fill: function(text, submit) {
                         var el = this.el;
                         if (!el || !document.contains(el)) return JSON.stringify({success:false});
                         try {
@@ -2375,8 +2409,27 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                             else { el.textContent = text; }
                             el.dispatchEvent(new Event('input', {bubbles:true}));
                             el.dispatchEvent(new Event('change', {bubbles:true}));
+                            if (submit) { this.submitEnter(el); }
                             return JSON.stringify({success:true});
                         } catch (e) { return JSON.stringify({success:false}); }
+                    },
+                    // 模拟真实 Enter：keydown 若被页面 preventDefault（SPA 自行处理无刷新搜索）则到此为止；
+                    // 否则补齐 keypress/keyup 并触发 form 提交（requestSubmit 优先，老 WebView 走事件+submit() 兜底）
+                    submitEnter: function(el) {
+                        var kd = new KeyboardEvent('keydown', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true});
+                        el.dispatchEvent(kd);
+                        if (kd.defaultPrevented) return;
+                        el.dispatchEvent(new KeyboardEvent('keypress', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true}));
+                        el.dispatchEvent(new KeyboardEvent('keyup', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:false}));
+                        var form = el.form || (el.closest && el.closest('form'));
+                        if (form) {
+                            if (typeof form.requestSubmit === 'function') { form.requestSubmit(); }
+                            else {
+                                var se = new Event('submit', {bubbles:true, cancelable:true});
+                                form.dispatchEvent(se);
+                                if (!se.defaultPrevented && form.submit) { form.submit(); }
+                            }
+                        }
                     }
                 };
             }
@@ -2399,6 +2452,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private fun cancelWebInputProbe() {
         inputProbeHandler.removeCallbacksAndMessages(null)
         webInputProbeAttempt = 0
+        webInputPendingSubmit = false
     }
 
     private fun probeWebInput() {
@@ -2407,7 +2461,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         webView.evaluateJavascript(webInputProbeJs) { result ->
             val parsed = parseWebInputProbe(result)
             if (parsed != null) {
-                openWebInputEditor(parsed.first, parsed.second)
+                webInputPendingSubmit = parsed.submit
+                openWebInputEditor(parsed.value, parsed.multiline)
             } else if (webInputProbeAttempt < WEB_INPUT_PROBE_MAX_ATTEMPTS) {
                 inputProbeHandler.postDelayed(webInputProbeRunnable, WEB_INPUT_PROBE_RETRY_MS)
             }
@@ -2415,7 +2470,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     /** 解析 poll() 的返回值；focus=false 或解析失败返回 null */
-    private fun parseWebInputProbe(result: String?): Pair<String, Boolean>? {
+    private fun parseWebInputProbe(result: String?): WebInputProbe? {
         if (result.isNullOrBlank() || result == "null") return null
         return try {
             // evaluateJavascript 会把 JS 字符串结果再包一层 JSON 引号，先剥掉
@@ -2426,7 +2481,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 else -> return null
             }
             if (json.optBoolean("focus", false)) {
-                Pair(json.optString("value", ""), json.optBoolean("multiline", false))
+                WebInputProbe(
+                    value = json.optString("value", ""),
+                    multiline = json.optBoolean("multiline", false),
+                    submit = json.optBoolean("submit", false)
+                )
             } else {
                 null
             }
@@ -2447,16 +2506,20 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             multiline,
             0
         )
-        fragment.setOnConfirmListener { text -> fillWebInput(text) }
+        fragment.setOnConfirmListener { text -> fillWebInput(text, webInputPendingSubmit) }
         openFragment(fragment)
     }
 
-    /** 确认后把文本写回网页输入框并派发 input/change 事件（页面脚本可感知） */
-    private fun fillWebInput(text: String) {
+    /**
+     * 确认后把文本写回网页输入框并派发 input/change 事件（页面脚本可感知）；
+     * submit=true 时 JS 侧继续模拟 Enter 键并触发表单提交（搜索框等场景）
+     */
+    private fun fillWebInput(text: String, submit: Boolean) {
         val webView = currentWebView() ?: return
+        webInputPendingSubmit = false
         try {
             val js = "window.__keyphone_input__ && window.__keyphone_input__.fill(" +
-                JSONObject.quote(text) + ");"
+                JSONObject.quote(text) + "," + submit + ");"
             webView.evaluateJavascript(js, null)
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "回填网页输入失败", t)
