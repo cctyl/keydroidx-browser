@@ -34,20 +34,38 @@ class BundleWriter @AssistedInject constructor(
     /**
      * Writes a bundle to persistent storage in the files directory using the specified file name.
      *
+     * 写入采用「临时文件 + fsync + 原子 rename」：进程在写入中途被杀（adb install /
+     * force-stop / 低内存）时不会留下损坏的半截文件，最坏情况是保留上一次完整快照。
+     *
      * @param bundle the bundle to store in persistent storage.
      */
     suspend fun writeToStorage(bundle: Bundle?) = withContext(coroutineDispatchers.io) {
-        val outputFile = File(filesDir.file(), bundleFileName)
+        val dir = filesDir.file()
+        val outputFile = File(dir, bundleFileName)
+        val tempFile = File(dir, "$bundleFileName.tmp")
         try {
-            FileOutputStream(outputFile).use { outputStream ->
+            FileOutputStream(tempFile).use { outputStream ->
                 val parcel = Parcel.obtain()
-                parcel.writeBundle(bundle)
-                outputStream.write(parcel.marshall())
-                outputStream.flush()
-                parcel.recycle()
+                try {
+                    parcel.writeBundle(bundle)
+                    outputStream.write(parcel.marshall())
+                    outputStream.flush()
+                    outputStream.fd.sync()
+                } finally {
+                    parcel.recycle()
+                }
+            }
+            if (!tempFile.renameTo(outputFile)) {
+                // rename 失败（极少数文件系统），退化为先删后改名的非原子路径
+                outputFile.delete()
+                if (!tempFile.renameTo(outputFile)) {
+                    logger.log(TAG, "Unable to replace bundle file after write")
+                    tempFile.delete()
+                }
             }
         } catch (e: IOException) {
             logger.log(TAG, "Unable to write bundle to storage", e)
+            tempFile.delete()
         }
     }
 
@@ -58,6 +76,10 @@ class BundleWriter @AssistedInject constructor(
         val outputFile = File(filesDir.file(), bundleFileName)
         if (outputFile.exists()) {
             outputFile.delete()
+        }
+        val tempFile = File(filesDir.file(), "$bundleFileName.tmp")
+        if (tempFile.exists()) {
+            tempFile.delete()
         }
     }
 

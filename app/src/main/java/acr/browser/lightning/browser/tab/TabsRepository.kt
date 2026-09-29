@@ -23,10 +23,15 @@ import android.app.ActivityManager
 import android.webkit.WebView
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
@@ -50,11 +55,13 @@ class TabsRepository @Inject constructor(
     private val homePageInitializer: HomePageInitializer,
     private val bookmarkPageInitializer: BookmarkPageInitializer,
     private val historyPageInitializer: HistoryPageInitializer,
-    appCoroutineScope: AppCoroutineScope,
+    private val appCoroutineScope: AppCoroutineScope,
 ) : BrowserContract.Model {
 
     private val isInitialized = CompletableDeferred<Unit>()
     private val tabsListStateFlow = MutableStateFlow<List<TabModel>>(emptyList())
+    private val saveMutex = Mutex()
+    private var pendingSaveJob: Job? = null
     private val webViewPool: Deferred<ObjectPool<WebView>> = appCoroutineScope.async {
         if (userPreferencesDataStore.limitActiveTabs.get()) {
             LimitedObjectPool(
@@ -85,6 +92,7 @@ class TabsRepository @Inject constructor(
         tabsList = tabsList - tab
 
         tabsListStateFlow.emit(tabsList)
+        scheduleSaveTabs()
     }
 
     override suspend fun deleteAllTabs(): Unit = withContext(coroutineDispatchers.main) {
@@ -94,6 +102,7 @@ class TabsRepository @Inject constructor(
         tabsList = emptyList()
 
         tabsListStateFlow.emit(tabsList)
+        scheduleSaveTabs()
     }
 
     override suspend fun createTab(
@@ -134,6 +143,7 @@ class TabsRepository @Inject constructor(
 
         if (emitUpdate) {
             tabsListStateFlow.emit(tabsList)
+            scheduleSaveTabs()
         }
 
         tabModel
@@ -225,9 +235,41 @@ class TabsRepository @Inject constructor(
 
     override suspend fun pause() {
         if (userPreferencesDataStore.restoreLostTabsEnabled.get()) {
-            bundleStore.save(tabsList)
+            // 丢弃尚未触发的防抖落盘，由本次 pause 统一保存，避免重复写盘
+            pendingSaveJob?.cancel()
+            pendingSaveJob = null
+            saveMutex.withLock {
+                withContext(coroutineDispatchers.main) {
+                    bundleStore.save(tabsList)
+                }
+            }
         }
         tabsList.forEach { it.background(backgroundAll = true) }
+    }
+
+    /**
+     * 窗口列表发生变更（新建/关闭）后立即调度一次落盘。
+     *
+     * 此前唯一的写盘点在 [pause]（onPause 时异步触发），而 adb install / force-stop /
+     * 系统低内存杀进程不会执行任何生命周期回调，导致「关闭 A、打开 B 后进程被杀」时，
+     * 磁盘上仍是含 A 的旧快照，下次启动恢复出已关闭的窗口。
+     *
+     * 使用 App 级作用域（而非 Browser 的协程作用域），保证不被 onDestroy 取消；
+     * 短时间内的多次变更防抖合并为一次写盘，并通过 [saveMutex] 与 [pause] 互斥。
+     */
+    private fun scheduleSaveTabs() {
+        pendingSaveJob?.cancel()
+        pendingSaveJob = appCoroutineScope.launch {
+            if (!userPreferencesDataStore.restoreLostTabsEnabled.get()) {
+                return@launch
+            }
+            delay(SAVE_DEBOUNCE_MILLIS)
+            saveMutex.withLock {
+                withContext(coroutineDispatchers.main) {
+                    bundleStore.save(tabsList)
+                }
+            }
+        }
     }
 
     override suspend fun clean() {
@@ -235,4 +277,8 @@ class TabsRepository @Inject constructor(
     }
 
     private fun List<TabModel>.forId(id: Int): TabModel = requireNotNull(find { it.id == id })
+
+    private companion object {
+        private const val SAVE_DEBOUNCE_MILLIS = 300L
+    }
 }
