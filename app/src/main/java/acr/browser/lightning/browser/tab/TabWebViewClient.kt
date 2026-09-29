@@ -11,6 +11,8 @@ import acr.browser.lightning.di.FaviconCacheDir
 import acr.browser.lightning.di.GeneratedHtmlDir
 import acr.browser.lightning.extensions.resizeAndShow
 import acr.browser.lightning.js.TextReflow
+import acr.browser.lightning.keyphone.KeyphoneGuardStore
+import acr.browser.lightning.keyphone.KeyphoneUrlGuard
 import acr.browser.lightning.log.Logger
 import acr.browser.lightning.ssl.SslState
 import acr.browser.lightning.ssl.SslWarningPreferences
@@ -298,13 +300,60 @@ class TabWebViewClient @AssistedInject constructor(
         }.resizeAndShow()
     }
 
-    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
-        urlHandler.shouldOverrideLoading(
+    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+        val url = request.url.toString()
+
+        // 按键机安全拦截（仅按键机浏览页在场时生效）：外部协议审批 / 站内跳转拦截
+        if (request.isForMainFrame && KeyphoneUrlGuard.isActive()) {
+            val verdict = KeyphoneUrlGuard.evaluateNavigation(view.context, currentUrl, url)
+            when (verdict.decision) {
+                KeyphoneUrlGuard.Decision.BLOCK -> return true
+
+                KeyphoneUrlGuard.Decision.ASK -> {
+                    val host = KeyphoneUrlGuard.hostOrNull() ?: return true
+                    val scheme = verdict.scheme.orEmpty()
+                    val sourceDomain = verdict.sourceDomain
+                    host.requestSchemeApproval(
+                        currentUrl,
+                        url,
+                        verdict.mergedCount
+                    ) { allowLaunch, rememberAllow, denyForever ->
+                        if (denyForever) {
+                            KeyphoneGuardStore.setSchemeRule(
+                                view.context, scheme, sourceDomain,
+                                KeyphoneGuardStore.RuleAction.DENY
+                            )
+                        } else if (rememberAllow == true) {
+                            KeyphoneGuardStore.setSchemeRule(
+                                view.context, scheme, sourceDomain,
+                                KeyphoneGuardStore.RuleAction.ALLOW
+                            )
+                        } else {
+                            KeyphoneUrlGuard.onOnceDecision(scheme, sourceDomain, allowLaunch)
+                        }
+                        if (allowLaunch && !denyForever) {
+                            urlHandler.shouldOverrideLoading(
+                                tabSettings.openAvailableAppsEnabled,
+                                view,
+                                url,
+                                headers
+                            )
+                        }
+                    }
+                    return true
+                }
+
+                KeyphoneUrlGuard.Decision.PROCEED -> Unit
+            }
+        }
+
+        return urlHandler.shouldOverrideLoading(
             tabSettings.openAvailableAppsEnabled,
             view,
-            request.url.toString(),
+            url,
             headers
         ) || super.shouldOverrideUrlLoading(view, request)
+    }
 
     override fun shouldInterceptRequest(
         view: WebView,

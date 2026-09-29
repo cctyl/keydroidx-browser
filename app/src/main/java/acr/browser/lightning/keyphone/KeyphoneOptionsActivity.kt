@@ -127,6 +127,9 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
 
         OptionEntry.Divider,
         OptionEntry.Section(R.string.keyphone_section_system),
+        OptionEntry.Option(KeydroidxIcons.ICON_LOCK, R.string.keyphone_opt_guard) {
+            launchGuardRules()
+        },
         OptionEntry.Option(KeydroidxIcons.ICON_SETTINGS, R.string.keyphone_opt_settings) {
             relay(ACTION_SETTINGS)
         },
@@ -158,6 +161,7 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
 
         OptionEntry.Divider,
         OptionEntry.Section(R.string.keyphone_section_system),
+        OptionEntry.Option(KeydroidxIcons.ICON_LOCK, R.string.keyphone_opt_guard) { launchGuardRules() },
         OptionEntry.Option(KeydroidxIcons.ICON_SETTINGS, R.string.keyphone_opt_settings) { launchSettings() },
         OptionEntry.Option(KeydroidxIcons.ICON_POWER, R.string.keyphone_opt_exit) { confirmExit() }
     )
@@ -226,6 +230,15 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
             startActivity(Intent(this, SettingsActivity::class.java))
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "打开设置失败", t)
+        }
+    }
+
+    /** 安全拦截规则管理页（协议跳转 / 站内跳转 / 下载站点规则统一管理）。 */
+    private fun launchGuardRules() {
+        try {
+            startActivity(Intent(this, KeyphoneGuardListActivity::class.java))
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "打开安全拦截规则页失败", t)
         }
     }
 

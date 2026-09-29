@@ -10,6 +10,7 @@ import acr.browser.lightning.dialog.DialogItem
 import acr.browser.lightning.extensions.color
 import acr.browser.lightning.extensions.resizeAndShow
 import acr.browser.lightning.favicon.FaviconModel
+import acr.browser.lightning.keyphone.KeyphoneUrlGuard
 import acr.browser.lightning.preference.UserPreferencesDataStore
 import acr.browser.lightning.utils.Utils
 import android.Manifest
@@ -140,6 +141,11 @@ class TabWebChromeClient @AssistedInject constructor(
         isUserGesture: Boolean,
         resultMsg: Message
     ): Boolean {
+        // 按键机站内跳转拦截：弹新窗口（target="_blank"/window.open）一律在创建前拦截，
+        // 该链路不经过 shouldOverrideUrlLoading，且新标签页无来源页上下文
+        if (KeyphoneUrlGuard.shouldBlockCreateWindow(view.context, view.url)) {
+            return true
+        }
         tabCoroutineScope.launch {
             createWindowSharedFlow.emit(ResultMessageInitializer(resultMsg))
         }

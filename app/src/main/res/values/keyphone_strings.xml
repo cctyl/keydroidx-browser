@@ -39,12 +39,64 @@
     <string name="keyphone_pm_input_url">1.输入网址</string>
     <string name="keyphone_pm_search">2.快捷搜索</string>
     <string name="keyphone_pm_bookmarks">3.书签历史</string>
-    <string name="keyphone_pm_downloads">4.文件管理</string>
+    <!-- 原「4.文件管理」移入右软键选项页（下载），第 4 项改为跳转拦截级联入口 -->
+    <string name="keyphone_pm_jump_guard">4.跳转拦截</string>
     <string name="keyphone_pm_scroll_top_bottom">5.页首/页尾</string>
     <string name="keyphone_pm_free_copy">6.自由复制</string>
     <string name="keyphone_pm_site_keys">7.专属按键适配</string>
     <string name="keyphone_pm_toggle_images">*.无图切换</string>
     <string name="keyphone_pm_toggle_fullscreen">#.切换全屏</string>
+
+    <!-- 安全拦截：站内跳转拦截级联（# 菜单 4） -->
+    <string name="keyphone_jump_enable">开启拦截</string>
+    <string name="keyphone_jump_disable">关闭拦截</string>
+    <string name="keyphone_jump_current_domain">当前域名：%1$s</string>
+    <string name="keyphone_jump_enabled_toast">已开启站内拦截：%1$s</string>
+    <string name="keyphone_jump_disabled_toast">已关闭站内拦截：%1$s</string>
+
+    <!-- 安全拦截：外部协议审批卡 -->
+    <string name="keyphone_scheme_approval_title">外部应用跳转请求</string>
+    <string name="keyphone_scheme_body_source">页面 %1$s 请求打开：</string>
+    <string name="keyphone_scheme_merged">5 秒内已合并 %1$d 次重复请求</string>
+    <string name="keyphone_scheme_allow_once">1.本次允许</string>
+    <string name="keyphone_scheme_allow_forever">2.永久允许 %1$s</string>
+    <string name="keyphone_scheme_deny_forever">3.永久忽略 %1$s</string>
+    <string name="keyphone_scheme_deny_once">4.本次拒绝</string>
+
+    <!-- 安全拦截：下载审批卡（凡下载必审批） -->
+    <string name="keyphone_download_title">下载确认</string>
+    <string name="keyphone_download_body">文件：%1$s</string>
+    <string name="keyphone_download_size">大小：%1$s</string>
+    <string name="keyphone_download_source">来源：%1$s</string>
+    <string name="keyphone_size_unknown">未知</string>
+    <string name="keyphone_download_allow">1.开始下载</string>
+    <string name="keyphone_download_deny_forever">2.永久忽略该站点下载</string>
+    <string name="keyphone_download_cancel">3.取消</string>
+
+    <!-- 安全拦截：规则管理页 -->
+    <string name="keyphone_opt_guard">安全拦截</string>
+    <string name="keyphone_guard_title">安全拦截</string>
+    <string name="keyphone_guard_clear">清空</string>
+    <string name="keyphone_guard_section_scheme">协议跳转规则</string>
+    <string name="keyphone_guard_section_jump">站内跳转拦截（按域名）</string>
+    <string name="keyphone_guard_section_download">下载站点规则</string>
+    <string name="keyphone_guard_empty_scheme">暂无规则 · 拦截或审批外部协议时自动记录</string>
+    <string name="keyphone_guard_empty_jump">浏览网页时按 # → 4.跳转拦截 可为当前域名开启</string>
+    <string name="keyphone_guard_empty_download">暂无规则</string>
+    <string name="keyphone_guard_rule_allow">允许</string>
+    <string name="keyphone_guard_rule_deny">忽略</string>
+    <string name="keyphone_guard_rule_on">已开启</string>
+    <string name="keyphone_guard_rule_off">已关闭</string>
+    <string name="keyphone_guard_hits">已拦截 %1$d 次</string>
+    <string name="keyphone_guard_op_allow">1.改为永久允许</string>
+    <string name="keyphone_guard_op_deny">2.改为永久忽略</string>
+    <string name="keyphone_guard_op_delete">3.删除规则</string>
+    <string name="keyphone_guard_delete_rule_title">删除规则</string>
+    <string name="keyphone_guard_delete_rule_message">删除后恢复默认审批，下次触发会重新询问，确定吗？</string>
+    <string name="keyphone_guard_rule_deleted">规则已删除</string>
+    <string name="keyphone_guard_clear_title">清空拦截规则</string>
+    <string name="keyphone_guard_clear_message">将删除全部安全拦截规则（协议 / 站内开关 / 下载站点），确定吗？</string>
+    <string name="keyphone_guard_cleared">已清空全部拦截规则</string>
 
     <!-- 专属按键适配（按网址自定义 1~9 键位） -->
     <string name="keyphone_site_key_item">%1$d.适配本页：%2$s</string>

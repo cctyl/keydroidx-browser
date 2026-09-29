@@ -148,7 +148,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         NONE,
         PAGE_MENU,   // 1 键：页面/窗口操作
         GLOBAL_MENU, // # 键：全局工具导航
-        URL_MENU     // # 菜单 7：专属按键适配的网址确认面板
+        URL_MENU,    // # 菜单 7：专属按键适配的网址确认面板
+        JUMP_MENU    // # 菜单 4：站内跳转拦截开关（级联子面板）
     }
 
     private var activeMenuType = QuickMenuType.NONE
@@ -337,6 +338,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     override fun onResume() {
         super.onResume()
+        KeyphoneUrlGuard.attach(guardHost)
         presenter.onViewShown()
         if (isHomeSelected) {
             loadHomeData()
@@ -344,6 +346,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     override fun onPause() {
+        KeyphoneUrlGuard.detach(guardHost)
         super.onPause()
         selectLongPressJob?.cancel()
         if (mouseTouchDown) {
@@ -592,7 +595,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             KeyphoneViews.QuickMenuItem("1", getString(R.string.keyphone_pm_input_url)) { openSearchEditor() },
             KeyphoneViews.QuickMenuItem("2", getString(R.string.keyphone_pm_search)) { openSearchEditor() },
             KeyphoneViews.QuickMenuItem("3", getString(R.string.keyphone_pm_bookmarks)) { menuClick(MenuSelection.HISTORY) },
-            KeyphoneViews.QuickMenuItem("4", getString(R.string.keyphone_pm_downloads)) { menuClick(MenuSelection.DOWNLOADS) },
+            KeyphoneViews.QuickMenuItem("4", getString(R.string.keyphone_pm_jump_guard)) { showJumpGuardMenu() },
             KeyphoneViews.QuickMenuItem("5", getString(R.string.keyphone_pm_scroll_top_bottom)) { toggleScrollTopBottom() },
             KeyphoneViews.QuickMenuItem("6", getString(R.string.keyphone_pm_free_copy)) { startFreeCopyMode() },
             KeyphoneViews.QuickMenuItem("7", getString(R.string.keyphone_pm_site_keys)) { showSiteKeyUrlMenu() },
@@ -629,6 +632,187 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         showMenu(QuickMenuType.PAGE_MENU)
     }
 
+    // region 安全拦截（外部协议审批 / 站内跳转拦截 / 下载审批）
+
+    /** 拦截提示去重：同一文案 2s 内只提示一次。 */
+    private var lastGuardToastKey: String? = null
+    private var lastGuardToastAt: Long = 0L
+
+    /** 拦截引擎宿主：审批卡与拦截提示在此实现（onResume 注册 / onPause 注销）。 */
+    private val guardHost: KeyphoneUrlGuard.Host by lazy {
+        object : KeyphoneUrlGuard.Host {
+            override fun requestSchemeApproval(
+                sourceUrl: String?,
+                targetUrl: String,
+                mergedCount: Int,
+                onDecision: (Boolean, Boolean?, Boolean) -> Unit
+            ) {
+                showSchemeApprovalDialog(sourceUrl, targetUrl, mergedCount, onDecision)
+            }
+
+            override fun requestDownloadApproval(
+                sourceUrl: String?,
+                targetUrl: String,
+                fileName: String,
+                contentLength: Long,
+                onDecision: (Boolean, Boolean) -> Unit
+            ) {
+                showDownloadApprovalDialog(sourceUrl, targetUrl, fileName, contentLength, onDecision)
+            }
+
+            override fun notifyGuard(message: String) {
+                showGuardToast(message)
+            }
+        }
+    }
+
+    /** # 菜单 4：站内跳转拦截（需停留在网页态且有可归一的域名）。 */
+    private fun showJumpGuardMenu() {
+        if (isHomeSelected || KeyphoneGuardStore.baseDomain(currentWebView()?.url) == null) {
+            Toast.makeText(this, R.string.keyphone_need_page, Toast.LENGTH_SHORT).show()
+            return
+        }
+        showMenu(QuickMenuType.JUMP_MENU)
+    }
+
+    /** # 菜单 4 级联：开 / 关（仅对当前域名生效），并展示当前域名与状态。 */
+    private fun buildJumpGuardMenuItems(): List<KeyphoneViews.QuickMenuItem> {
+        val domain = KeyphoneGuardStore.baseDomain(currentWebView()?.url) ?: return emptyList()
+        val enabled = KeyphoneGuardStore.isJumpEnabled(this, domain)
+        return listOf(
+            KeyphoneViews.QuickMenuItem(
+                "1",
+                getString(R.string.keyphone_jump_enable) + if (enabled) "（已开启）" else ""
+            ) { setJumpGuardEnabled(domain, true) },
+            KeyphoneViews.QuickMenuItem(
+                "2",
+                getString(R.string.keyphone_jump_disable) + if (!enabled) "（已关闭）" else ""
+            ) { setJumpGuardEnabled(domain, false) },
+            KeyphoneViews.QuickMenuItem(
+                "3",
+                getString(R.string.keyphone_jump_current_domain, domain)
+            ) { }
+        )
+    }
+
+    /** 站内跳转拦截开关按域名持久化，开关即时生效。 */
+    private fun setJumpGuardEnabled(domain: String, enabled: Boolean) {
+        KeyphoneGuardStore.setJumpEnabled(this, domain, enabled)
+        Toast.makeText(
+            this,
+            getString(
+                if (enabled) R.string.keyphone_jump_enabled_toast else R.string.keyphone_jump_disabled_toast,
+                domain
+            ),
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    /** 外部协议审批卡：默认焦点在「永久忽略」，RSK=本次拒绝。 */
+    private fun showSchemeApprovalDialog(
+        sourceUrl: String?,
+        targetUrl: String,
+        mergedCount: Int,
+        onDecision: (Boolean, Boolean?, Boolean) -> Unit
+    ) {
+        val scheme = targetUrl.substringBefore(':', "")
+        val sourceDomain = KeyphoneGuardStore.baseDomain(sourceUrl) ?: "-"
+        val body = buildList {
+            add(getString(R.string.keyphone_scheme_body_source, sourceDomain))
+            add(targetUrl)
+            if (mergedCount > 1) {
+                add(getString(R.string.keyphone_scheme_merged, mergedCount))
+            }
+        }
+        KeyphoneOptionSheetDialog(
+            context = this,
+            titleText = getString(R.string.keyphone_scheme_approval_title),
+            bodyLines = body,
+            options = listOf(
+                KeyphoneViews.QuickMenuItem("1", getString(R.string.keyphone_scheme_allow_once)) {
+                    onDecision(true, null, false)
+                },
+                KeyphoneViews.QuickMenuItem(
+                    "2",
+                    getString(R.string.keyphone_scheme_allow_forever, scheme)
+                ) {
+                    onDecision(true, true, false)
+                },
+                KeyphoneViews.QuickMenuItem(
+                    "3",
+                    getString(R.string.keyphone_scheme_deny_forever, scheme)
+                ) {
+                    onDecision(false, null, true)
+                },
+                KeyphoneViews.QuickMenuItem("4", getString(R.string.keyphone_scheme_deny_once)) {
+                    onDecision(false, null, false)
+                }
+            ),
+            defaultFocusIndex = 2,
+            onSelected = { },
+            onCancelled = { onDecision(false, null, false) }
+        ).show()
+    }
+
+    /** 下载审批卡：所有下载一律先确认（凡下载必审批）。 */
+    private fun showDownloadApprovalDialog(
+        sourceUrl: String?,
+        targetUrl: String,
+        fileName: String,
+        contentLength: Long,
+        onDecision: (Boolean, Boolean) -> Unit
+    ) {
+        val sourceDomain = KeyphoneGuardStore.baseDomain(targetUrl)
+            ?: KeyphoneGuardStore.baseDomain(sourceUrl) ?: "-"
+        KeyphoneOptionSheetDialog(
+            context = this,
+            titleText = getString(R.string.keyphone_download_title),
+            bodyLines = listOf(
+                getString(R.string.keyphone_download_body, fileName),
+                getString(R.string.keyphone_download_size, formatBytes(contentLength)),
+                getString(R.string.keyphone_download_source, sourceDomain)
+            ),
+            options = listOf(
+                KeyphoneViews.QuickMenuItem("1", getString(R.string.keyphone_download_allow)) {
+                    onDecision(true, false)
+                },
+                KeyphoneViews.QuickMenuItem(
+                    "2",
+                    getString(R.string.keyphone_download_deny_forever)
+                ) {
+                    onDecision(false, true)
+                },
+                KeyphoneViews.QuickMenuItem("3", getString(R.string.keyphone_download_cancel)) {
+                    onDecision(false, false)
+                }
+            ),
+            defaultFocusIndex = 0,
+            onSelected = { },
+            onCancelled = { onDecision(false, false) }
+        ).show()
+    }
+
+    private fun showGuardToast(message: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (message == lastGuardToastKey && now - lastGuardToastAt < 2000) {
+            return
+        }
+        lastGuardToastKey = message
+        lastGuardToastAt = now
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun formatBytes(bytes: Long): String = when {
+        bytes <= 0L -> getString(R.string.keyphone_size_unknown)
+        bytes < 1024L -> "${bytes}B"
+        bytes < 1024L * 1024L -> String.format("%.1fKB", bytes / 1024f)
+        else -> String.format("%.1fMB", bytes / 1024f / 1024f)
+    }
+
+    // endregion
+
+
+
     private fun showGlobalMenu() {
         showMenu(QuickMenuType.GLOBAL_MENU)
     }
@@ -641,11 +825,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             QuickMenuType.PAGE_MENU -> buildPageMenuItems()
             QuickMenuType.GLOBAL_MENU -> buildGlobalMenuItems()
             QuickMenuType.URL_MENU -> buildSiteKeyUrlMenuItems()
+            QuickMenuType.JUMP_MENU -> buildJumpGuardMenuItems()
             QuickMenuType.NONE -> emptyList()
         }
-        // 网址确认面板靠右弹出（二级子面板视觉），常规菜单居中
+        // 级联子面板（网址确认 / 跳转拦截）靠右弹出，常规菜单居中
         (quickMenuCard?.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-            lp.gravity = if (type == QuickMenuType.URL_MENU) {
+            lp.gravity = if (type == QuickMenuType.URL_MENU || type == QuickMenuType.JUMP_MENU) {
                 Gravity.END or Gravity.CENTER_VERTICAL
             } else {
                 Gravity.CENTER

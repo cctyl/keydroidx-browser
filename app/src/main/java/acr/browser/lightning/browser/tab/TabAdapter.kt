@@ -11,6 +11,7 @@ import acr.browser.lightning.connectivity.ConnectivityProvider
 import acr.browser.lightning.constant.DESKTOP_USER_AGENT
 import acr.browser.lightning.download.PendingDownload
 import acr.browser.lightning.ids.ViewIdGenerator
+import acr.browser.lightning.keyphone.KeyphoneUrlGuard
 import acr.browser.lightning.pool.ObjectPool
 import acr.browser.lightning.preview.PreviewModel
 import acr.browser.lightning.ssl.SslCertificateInfo
@@ -109,6 +110,30 @@ class TabAdapter @AssistedInject constructor(
         webViewClient = tabWebViewClient
         webChromeClient = tabWebChromeClient
         setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
+            // 按键机下载审批（仅按键机浏览页在场时生效）：凡下载必先确认
+            if (KeyphoneUrlGuard.isActive()) {
+                val pending = PendingDownload(
+                    url = url,
+                    userAgent = userAgent,
+                    contentDisposition = contentDisposition,
+                    mimeType = mimetype,
+                    contentLength = contentLength
+                )
+                KeyphoneUrlGuard.handleDownload(
+                    context = context,
+                    sourceUrl = this@setup.url,
+                    targetUrl = url,
+                    fileName = KeyphoneUrlGuard.guessFileName(url, contentDisposition, mimetype),
+                    contentLength = contentLength
+                ) { allowed ->
+                    if (allowed) {
+                        tabCoroutineScope.launch {
+                            downloadsShareFlow.emit(pending)
+                        }
+                    }
+                }
+                return@setDownloadListener
+            }
             tabCoroutineScope.launch {
                 downloadsShareFlow.emit(
                     PendingDownload(

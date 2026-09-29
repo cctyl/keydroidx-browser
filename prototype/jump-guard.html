@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lightning Browser × KeydroidX — 安全拦截原型 v1</title>
+<style>
+/* ============================================================
+   Lightning Browser 按键机化原型 · 安全拦截专项 v1
+   ① # 菜单「4.跳转拦截」+ 右侧级联（02.png 形态）
+   ② 站外跳转被拦截（提示条）
+   ③ 外部协议审批卡（QREADER:// · 防轰炸合并计数）
+   ④ 永久忽略后的静默拦截提示
+   ⑤ 自动下载确认卡（跳转失败后自动下载 · 警示）
+   ⑥ 设置页：拦截规则管理
+   拦截点：TabWebViewClient.shouldOverrideUrlLoading / DownloadListener
+   ============================================================ */
+:root{
+  --primary:#1A3A6B; --dark:#0D1B3E; --accent:#64B5F6;
+  --focus:rgba(33,150,243,.4);
+  --text:#E8EEF5; --sub:#90CAF9; --card:rgba(13,27,62,.92); --status:#CBD5E1;
+  --sk-center:#FDE047;
+  --warn:#FF6B6B; --ok:#4ADE80; --gold:#E5B567;
+  --desk:#14171B; --desk-line:#262B31; --ink:#E8ECF1; --ink-dim:#8A94A0;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:
+    radial-gradient(1100px 460px at 75% -10%, rgba(26,58,107,.35), transparent 60%),
+    radial-gradient(800px 380px at 8% 110%, rgba(229,181,103,.06), transparent 60%),
+    var(--desk);
+  color:var(--ink);
+  font-family:Roboto,"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  min-height:100vh;
+}
+.topbar-page{
+  position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:20px;flex-wrap:wrap;
+  padding:14px 28px;background:rgba(20,23,27,.85);backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--desk-line);
+}
+.brand h1{font-size:18px;font-weight:700;letter-spacing:.4px}
+.brand h1 em{font-style:normal;color:var(--gold)}
+.brand p{font-size:11px;color:var(--ink-dim);margin-top:3px}
+.facts{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
+.fchip{font-size:10.5px;color:var(--ink-dim);border:1px solid var(--desk-line);border-radius:8px;
+  padding:5px 10px;background:rgba(255,255,255,.03)}
+.fchip b{color:var(--ink);font-weight:600}
+
+.gallery{display:flex;flex-wrap:wrap;gap:38px 30px;padding:34px 30px 80px;justify-content:center}
+.board{display:flex;flex-direction:column;align-items:center;width:262px}
+.board.first .phone{outline:2px solid var(--gold);outline-offset:4px;border-radius:24px}
+.phone{background:linear-gradient(160deg,#2B323B,#171B20 60%);border:1px solid #3A434E;
+  border-radius:24px;padding:14px 11px 10px;
+  box-shadow:0 24px 50px -18px rgba(0,0,0,.75), inset 0 1px 0 rgba(255,255,255,.08)}
+.keyhints{display:flex;justify-content:space-between;align-items:center;
+  padding:8px 6px 0;color:#525D69;font-size:9px;letter-spacing:1px}
+.keyhints i{width:14px;height:14px;border:1px solid #3E4854;border-radius:50%;display:inline-block}
+
+/* ---------- 240×320 骨架 ---------- */
+.screen{
+  position:relative;width:240px;height:320px;overflow:hidden;
+  background:linear-gradient(180deg,var(--dark) 0%,var(--primary) 50%,var(--dark) 100%);
+  border-radius:3px;display:flex;flex-direction:column;text-align:left;
+  font-family:'ArkPixel','FusionPixel',Roboto,"Noto Sans SC",sans-serif;
+}
+.topbar-s{height:22px;flex:0 0 22px;background:linear-gradient(180deg,var(--primary),var(--dark));
+  display:flex;align-items:center;padding:0 6px;color:var(--status)}
+.topbar-s .tic{font-size:13px;margin-right:4px;color:var(--text)}
+.topbar-s .tt{flex:1;font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-right:4px}
+.topbar-s .st{display:flex;align-items:center;gap:4px;font-size:9px}
+.sig{display:inline-flex;align-items:flex-end;gap:1px;height:9px}
+.sig i{width:2px;background:var(--status);border-radius:.5px;display:block}
+.sig i:nth-child(1){height:3px}.sig i:nth-child(2){height:5px}
+.sig i:nth-child(3){height:7px}.sig i:nth-child(4){height:9px}
+.batt{display:inline-flex;align-items:center;gap:2px}
+.batt .case{width:12px;height:7px;border:1px solid var(--status);border-radius:1.5px;position:relative}
+.batt .case::after{content:"";position:absolute;right:-2.5px;top:1.5px;width:1.5px;height:2.5px;background:var(--status)}
+.batt .fill{position:absolute;left:.5px;top:.5px;bottom:.5px;width:8.5px;background:#4ADE80}
+
+.content{flex:1 1 auto;position:relative;overflow:hidden}
+
+.softkeys{flex:0 0 30px;min-height:30px;background:linear-gradient(180deg,var(--primary),var(--dark));
+  display:flex;align-items:center;font-size:11px;color:var(--text)}
+.softkeys .lsk,.softkeys .rsk{flex:1;padding:0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.softkeys .rsk{text-align:right}
+.softkeys .csk{flex:1;text-align:center;color:var(--sk-center)}
+
+/* ---------- 焦点行 ---------- */
+.focused{background:var(--focus)}
+.focused .p1,.focused .ic,.focused .tag{color:#fff !important}
+
+/* ---------- 浏览页示意（网页底景） ---------- */
+.webdemo{position:absolute;inset:0;background:#F7F5F0;color:#333;padding:8px 9px;font-size:11px;line-height:1.7;overflow:hidden}
+.webdemo h3{font-size:13px;margin-bottom:5px;color:#222}
+.webdemo a{color:#1558B0;text-decoration:underline}
+.webdemo .adslot{margin-top:10px;border:1px dashed #C9B89A;background:#FBF3DF;color:#8A6D3B;
+  font-size:9px;padding:6px 7px;border-radius:3px}
+.webdemo .stub{height:7px;border-radius:3px;background:#E4E0D6;margin:6px 0}
+
+/* ---------- # 菜单 + 级联（02.png 形态） ---------- */
+.menuwrap{position:absolute;inset:0;background:rgba(0,0,0,.45)}
+.qmenu{position:absolute;left:0;bottom:0;width:112px;background:#16233B;
+  border-top:1px solid rgba(144,202,249,.35);border-right:1px solid rgba(144,202,249,.25);
+  padding:3px 0;box-shadow:3px -2px 10px rgba(0,0,0,.5)}
+.qmenu .mi{height:22px;display:flex;align-items:center;gap:5px;padding:0 7px;font-size:11px;color:var(--text)}
+.qmenu .mi .no{flex:0 0 10px;font-weight:700;font-size:10px;color:var(--sub)}
+.qmenu .mi.focused{background:#2E7BD1}
+.qmenu .mi.focused .no{color:#fff}
+.qmenu .mi .arr{margin-left:auto;font-size:9px;color:var(--gold)}
+.cascade{position:absolute;left:112px;bottom:0;width:128px;background:#1C2C49;
+  border-top:1px solid rgba(144,202,249,.45);border-left:1px solid rgba(144,202,249,.35);
+  padding:3px 0;box-shadow:3px -2px 12px rgba(0,0,0,.55)}
+.cascade .chead{height:20px;display:flex;align-items:center;padding:0 7px;font-size:10px;font-weight:700;
+  color:var(--gold);border-bottom:1px solid rgba(144,202,249,.2);letter-spacing:1px}
+.cascade .mi{height:24px;display:flex;align-items:center;gap:5px;padding:0 7px;font-size:11px;color:var(--text)}
+.cascade .mi .no{flex:0 0 10px;font-weight:700;font-size:10px;color:var(--sub)}
+.cascade .mi.focused{background:#2E7BD1}
+.cascade .mi .st-on{margin-left:auto;font-size:9px;color:var(--ok)}
+.cascade .mi .st-off{margin-left:auto;font-size:9px;color:var(--ink-dim)}
+.cascade .cdom{padding:5px 7px 2px;font-size:8.5px;color:var(--sub);line-height:1.5;border-top:1px dashed rgba(144,202,249,.25);margin-top:2px}
+
+/* ---------- 提示条（拦截 toast） ---------- */
+.guardbar{position:absolute;left:6px;right:6px;top:26px;background:#26354F;border:1px solid rgba(100,181,246,.6);
+  border-radius:5px;padding:6px 8px;font-size:10px;line-height:1.55;color:var(--text);
+  box-shadow:0 4px 12px rgba(0,0,0,.45)}
+.guardbar .gb-t{display:flex;align-items:center;gap:5px;font-weight:700;font-size:10.5px}
+.guardbar .gb-t .shield{color:var(--accent);font-size:12px}
+.guardbar .gb-d{margin-top:2px;color:var(--sub);font-size:9px}
+.guardbar.warnmode{border-color:rgba(255,107,107,.65)}
+.guardbar.warnmode .gb-t .shield{color:var(--warn)}
+
+/* ---------- 底部弹卡（审批 / 确认） ---------- */
+.dim{position:absolute;inset:0;background:rgba(0,0,0,.55)}
+.sheet{position:absolute;left:0;right:0;bottom:0;background:var(--card);border-radius:6px 6px 0 0;
+  overflow:hidden;display:flex;flex-direction:column;box-shadow:0 -6px 18px rgba(0,0,0,.45)}
+.sheet .shead{flex:0 0 20px;background:linear-gradient(180deg,var(--primary),var(--dark));
+  display:flex;align-items:center;padding:0 8px;font-size:11px;color:var(--text);font-weight:600}
+.sheet .shead.warn{background:linear-gradient(180deg,#7A2626,var(--dark))}
+.sheet .shead::before{content:"≡";margin-right:5px;color:var(--accent)}
+.sheet .shead.warn::before{color:var(--warn);content:"!"}
+.sheet .dbody{padding:7px 9px 8px;font-size:10.5px;line-height:1.6;color:var(--text)}
+.sheet .dbody .u{color:var(--accent);word-break:break-all}
+.sheet .dbody .rd{color:var(--warn)}
+.sheet .dbody .cnt{color:var(--gold);font-size:9px}
+.sheet .dopts{border-top:1px solid rgba(144,202,249,.18);padding:3px 0 4px}
+.sheet .dopt{height:24px;display:flex;align-items:center;gap:6px;padding:0 9px;font-size:10.5px;color:var(--text)}
+.sheet .dopt .no{flex:0 0 10px;font-weight:700;font-size:10px;color:var(--sub)}
+.sheet .dopt.focused{background:var(--focus)}
+.sheet .dopt.focused .no{color:#fff}
+.sheet .dopt.danger .no{color:var(--warn)}
+.sheet .ssk{flex:0 0 24px;display:flex;align-items:center;font-size:10px;color:var(--text);
+  border-top:1px solid rgba(144,202,249,.18)}
+.sheet .ssk .l,.sheet .ssk .r{flex:1;padding:0 8px}
+.sheet .ssk .r{text-align:right}
+.sheet .ssk .c{flex:1;text-align:center;color:var(--sk-center)}
+
+/* ---------- 设置页列表 ---------- */
+.seclabel{font-size:9px;color:var(--sub);letter-spacing:1px;padding:5px 10px 2px;opacity:.85}
+.row{min-height:32px;display:flex;flex-direction:column;justify-content:center;
+  margin:1px 5px;padding:0 7px;border-radius:4px}
+.row .p1{flex:1;min-width:0;font-size:11.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .p2{font-size:9px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.row .tail{margin-left:auto;font-size:9px;flex:0 0 auto;padding-left:6px;align-self:center}
+.row{flex-direction:row;align-items:center;gap:7px}
+.pill{font-size:8.5px;border-radius:3px;padding:1px 5px;flex:0 0 auto}
+.pill.deny{background:rgba(255,107,107,.18);color:var(--warn);border:1px solid rgba(255,107,107,.4)}
+.pill.allow{background:rgba(74,222,128,.15);color:var(--ok);border:1px solid rgba(74,222,128,.35)}
+.pill.on{background:rgba(100,181,246,.2);color:var(--accent);border:1px solid rgba(100,181,246,.45)}
+.divider{height:6px;position:relative;margin:0 5px}
+.divider::before{content:"";position:absolute;left:0;right:0;top:2.5px;height:1px;
+  background:repeating-linear-gradient(90deg,rgba(144,202,249,.4) 0 4px,transparent 4px 7px)}
+
+/* ---------- 管理页空状态 ---------- */
+.emptybox{margin:4px 8px;padding:10px 9px;border:1px dashed rgba(144,202,249,.35);border-radius:5px;text-align:center}
+.emptybox .e-t{font-size:11px;color:var(--text);font-weight:700;margin-bottom:4px}
+.emptybox .e-d{font-size:9px;color:var(--sub);line-height:1.7}
+
+/* ---------- 标注卡 ---------- */
+.spec-card{margin-top:12px;width:262px;background:#181C21;border:1px solid var(--desk-line);
+  border-radius:10px;padding:10px 12px;font-size:10.5px;line-height:1.6}
+.spec-card h4{font-size:12px;color:var(--ink);font-weight:700;margin-bottom:6px}
+.spec-card h4 .sid{font-family:Consolas,monospace;font-weight:400;font-size:9.5px;color:var(--gold);display:block;margin-top:2px}
+.spec-card .kv{display:flex;gap:8px;margin-top:3px}
+.spec-card .kv b{flex:0 0 62px;color:var(--ink-dim);font-weight:600;font-size:9.5px;letter-spacing:.5px;padding-top:1px}
+.spec-card .kv span{color:#B9C2CC;flex:1}
+.spec-card .kv span code{font-family:Consolas,monospace;font-size:9.5px;color:#7FB0E8}
+.spec-card .rule{margin-top:6px;padding-top:5px;border-top:1px dashed #2C333B;font-size:9.5px;color:#C8A15A}
+footer{padding:0 30px 50px;text-align:center;color:#525D69;font-size:11px;line-height:1.8}
+</style>
+</head>
+<body>
+
+<header class="topbar-page">
+  <div class="brand">
+    <h1>Lightning Browser <em>×</em> KeydroidX</h1>
+    <p>安全拦截专项原型 v1 · 外部协议审批 / 自动下载拦截 / 按域名站内跳转拦截 · 240×320</p>
+  </div>
+  <div class="facts">
+    <span class="fchip"><b>拦截点 A</b> shouldOverrideUrlLoading（外部 scheme + 跨域跳转）</span>
+    <span class="fchip"><b>拦截点 B</b> DownloadListener（下载一律先审批）</span>
+    <span class="fchip"><b>防轰炸</b> 同一来源+目标 5s 内合并弹窗 · 永久忽略后静默计数</span>
+  </div>
+</header>
+
+<main class="gallery">
+
+  <!-- ══════════════ ① # 菜单「4.跳转拦截」+ 右侧级联 ══════════════ -->
+  <section class="board first">
+    <div class="phone">
+      <div class="screen">
+        <div class="topbar-s">
+          <span class="tic">◉</span><span class="tt">m.example.com</span>
+          <span class="st"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"><span class="case"><span class="fill"></span></span>86%</span></span>
+        </div>
+        <div class="content">
+          <div class="webdemo">
+            <h3>新闻头条 · 今日热点</h3>
+            <div class="stub" style="width:92%"></div><div class="stub" style="width:78%"></div>
+            <div class="stub" style="width:85%"></div><div class="stub" style="width:60%"></div>
+            <div class="adslot">推广 · 假冒“继续访问”按钮（点击将跳出站外）</div>
+          </div>
+          <!-- # 菜单 + 级联（02.png 形态：左主菜单 + 右子菜单，底部对齐） -->
+          <div class="menuwrap"></div>
+          <div class="qmenu">
+            <div class="mi"><span class="no">1</span>输入网址</div>
+            <div class="mi"><span class="no">2</span>快捷搜索</div>
+            <div class="mi"><span class="no">3</span>书签历史</div>
+            <div class="mi focused"><span class="no">4</span>跳转拦截<span class="arr">▸</span></div>
+            <div class="mi"><span class="no">5</span>页首/页尾</div>
+            <div class="mi"><span class="no">6</span>自由复制</div>
+            <div class="mi"><span class="no">7</span>专属按键适配</div>
+            <div class="mi"><span class="no">*</span>无图切换</div>
+            <div class="mi"><span class="no">#</span>切换全屏</div>
+          </div>
+          <div class="cascade">
+            <div class="chead">跳转拦截</div>
+            <div class="mi focused"><span class="no">1</span>开启拦截<span class="st-on">✓ 已开</span></div>
+            <div class="mi"><span class="no">2</span>关闭拦截</div>
+            <div class="cdom">仅对当前域名生效：<br>m.example.com</div>
+          </div>
+        </div>
+        <div class="softkeys"><span class="lsk">选择</span><span class="csk"></span><span class="rsk">返回</span></div>
+      </div>
+      <div class="keyhints"><span>LSK 选择</span><i></i><i></i><i></i><span>RSK 返回上级</span></div>
+    </div>
+    <div class="spec-card">
+      <h4>① # 菜单 + 级联子菜单（02.png 形态）
+        <span class="sid">KeyphoneBrowserActivity · QuickMenuType.JUMP_MENU（新增）</span></h4>
+      <div class="kv"><b>菜单改造</b><span><code>#</code> 键全局菜单第 4 项「4.文件管理」→「<b>4.跳转拦截 ▸</b>」（文件管理移入右软键选项页）</span></div>
+      <div class="kv"><b>级联</b><span>选中后在<b>右侧</b>弹出级联：<code>1.开启拦截</code> / <code>2.关闭拦截</code>，并显示当前域名与状态；数字键直选</span></div>
+      <div class="kv"><b>作用域</b><span>按域名（eTLD+1）持久化记忆，重进该网站仍生效；地址栏加 🛡 角标提示</span></div>
+      <div class="rule">开启后：a 标签/JS 跳转目标域名 ≠ 当前域名 → 一律拦截并提示，仅允许站内跳转</div>
+    </div>
+  </section>
+
+  <!-- ══════════════ ② 站外跳转被拦截 ══════════════ -->
+  <section class="board">
+    <div class="phone">
+      <div class="screen">
+        <div class="topbar-s">
+          <span class="tic">◉</span><span class="tt">m.example.com</span>
+          <span class="st"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"><span class="case"><span class="fill"></span></span>86%</span></span>
+        </div>
+        <div class="content">
+          <div class="webdemo">
+            <h3>新闻头条 · 今日热点</h3>
+            <div class="stub" style="width:92%"></div><div class="stub" style="width:78%"></div>
+            <div class="stub" style="width:85%"></div><div class="stub" style="width:60%"></div>
+          </div>
+          <div class="guardbar">
+            <div class="gb-t"><span class="shield">🛡</span>已拦截站外跳转 ×2</div>
+            目标：ad.example-ads.com<br>
+            <span class="gb-d">当前已开启站内拦截 · 按菜单可临时关闭</span>
+          </div>
+        </div>
+        <div class="softkeys"><span class="lsk">选项</span><span class="csk"></span><span class="rsk">返回</span></div>
+      </div>
+      <div class="keyhints"><span>提示条 3s 自动消失</span><i></i><i></i><i></i><span>累计计数</span></div>
+    </div>
+    <div class="spec-card">
+      <h4>② 站外跳转拦截生效
+        <span class="sid">TabWebViewClient.shouldOverrideUrlLoading</span></h4>
+      <div class="kv"><b>判定</b><span>目标 host 与当前页 host 按 <code>eTLD+1</code> 比较；不同 → 拦截（连 www 子域跳广告主域也会拦）</span></div>
+      <div class="kv"><b>提示</b><span>顶部提示条显示目标域名 + 累计拦截次数，3s 自动消失，不打断浏览</span></div>
+      <div class="kv"><b>豁免</b><span>about/file/内页 scheme（首页哨兵）不参与比较；无痕标签页沿用当前域规则</span></div>
+      <div class="rule">默认关闭：只有用户在 # 菜单里对当前域名手动开启后才拦截</div>
+    </div>
+  </section>
+
+  <!-- ══════════════ ③ 外部协议审批卡 ══════════════ -->
+  <section class="board">
+    <div class="phone">
+      <div class="screen">
+        <div class="topbar-s">
+          <span class="tic">◉</span><span class="tt">m.forum.com</span>
+          <span class="st"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"><span class="case"><span class="fill"></span></span>86%</span></span>
+        </div>
+        <div class="content">
+          <div class="webdemo">
+            <h3>论坛帖子详情</h3>
+            <div class="stub" style="width:90%"></div><div class="stub" style="width:70%"></div>
+            <div class="stub" style="width:83%"></div>
+          </div>
+          <div class="dim"></div>
+          <div class="sheet">
+            <div class="shead">外部应用跳转请求</div>
+            <div class="dbody">
+              页面 <span class="u">m.forum.com</span> 请求打开：<br>
+              <span class="u">QREADER://novel/8832104</span><br>
+              <span class="cnt">⚠ 5 秒内已合并 3 次重复请求</span>
+            </div>
+            <div class="dopts">
+              <div class="dopt"><span class="no">1</span>本次允许</div>
+              <div class="dopt"><span class="no">2</span>永久允许 QREADER://</div>
+              <div class="dopt focused danger"><span class="no">3</span>永久忽略 QREADER://</div>
+              <div class="dopt danger"><span class="no">4</span>本次拒绝</div>
+            </div>
+            <div class="ssk"><span class="l">选择</span><span class="c"></span><span class="r">取消</span></div>
+          </div>
+        </div>
+        <div class="softkeys"><span class="lsk">选择</span><span class="csk"></span><span class="rsk">取消</span></div>
+      </div>
+      <div class="keyhints"><span>RSK = 本次拒绝</span><i></i><i></i><i></i><span>数字键直选</span></div>
+    </div>
+    <div class="spec-card">
+      <h4>③ 外部协议（第三方 App）审批
+        <span class="sid">KeyphoneSchemeGuard · 默认拦截 QREADER:// 等自定义 scheme</span></h4>
+      <div class="kv"><b>默认</b><span>自定义 scheme / <code>intent://</code> <b>一律不自动跳起第三方应用</b>，先弹审批卡</span></div>
+      <div class="kv"><b>豁免</b><span>http/https/about/file/data/javascript 内置放行；<code>mailto:</code> 可在设置里放行</span></div>
+      <div class="kv"><b>规则</b><span>规则 = 协议 + 来源域名；<code>永久忽略</code>后同类请求<b>静默拦截</b>（防弹窗轰炸）</span></div>
+      <div class="kv"><b>防轰炸</b><span>同一规则 5s 内重复触发 → 合并为一次弹窗并显示合并次数</span></div>
+      <div class="rule">焦点默认落在「永久忽略」——野生网站的拉起请求，一键永久闭嘴</div>
+    </div>
+  </section>
+
+  <!-- ══════════════ ④ 永久忽略后的静默拦截 ══════════════ -->
+  <section class="board">
+    <div class="phone">
+      <div class="screen">
+        <div class="topbar-s">
+          <span class="tic">◉</span><span class="tt">m.forum.com</span>
+          <span class="st"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"><span class="case"><span class="fill"></span></span>85%</span></span>
+        </div>
+        <div class="content">
+          <div class="webdemo">
+            <h3>论坛帖子详情（续）</h3>
+            <div class="stub" style="width:88%"></div><div class="stub" style="width:74%"></div>
+            <div class="stub" style="width:81%"></div><div class="stub" style="width:55%"></div>
+          </div>
+          <div class="guardbar warnmode">
+            <div class="gb-t"><span class="shield">⛔</span>已静默拦截 QREADER://</div>
+            累计 ×7 · 来自 m.forum.com<br>
+            <span class="gb-d">按选择键(中键)打开规则管理页可撤销</span>
+          </div>
+        </div>
+        <div class="softkeys"><span class="lsk">选项</span><span class="csk"></span><span class="rsk">返回</span></div>
+      </div>
+      <div class="keyhints"><span>不再弹窗</span><i></i><i></i><i></i><span>仅状态条</span></div>
+    </div>
+    <div class="spec-card">
+      <h4>④ 永久忽略 = 静默拦截 + 计数
+        <span class="sid">KeyphoneSchemeGuardStore（JSON 持久化）</span></h4>
+      <div class="kv"><b>行为</b><span>命中 <code>DENY_FOREVER</code> 规则 → 直接吃掉跳转，<b>绝不弹窗</b></span></div>
+      <div class="kv"><b>反馈</b><span>仅顶部状态条 2s（累计次数），可长按/进入设置页查看与撤销</span></div>
+      <div class="kv"><b>存储</b><span>键：<code>scheme + 来源eTLD+1</code> → ALLOW / DENY_FOREVER，落盘 SharedPreferences</span></div>
+      <div class="rule">「疯狂发起请求」的场景 = 弹一次 → 忽略 → 之后全程安静</div>
+    </div>
+  </section>
+
+  <!-- ══════════════ ⑤ 自动下载确认卡 ══════════════ -->
+  <section class="board">
+    <div class="phone">
+      <div class="screen">
+        <div class="topbar-s">
+          <span class="tic">◉</span><span class="tt">cdn.tracker-ad.com</span>
+          <span class="st"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"><span class="case"><span class="fill"></span></span>85%</span></span>
+        </div>
+        <div class="content">
+          <div class="webdemo">
+            <h3>网页无法打开（示例底景）</h3>
+            <div class="stub" style="width:80%"></div><div class="stub" style="width:65%"></div>
+          </div>
+          <div class="dim"></div>
+          <div class="sheet">
+            <div class="shead">下载确认</div>
+            <div class="dbody">
+              文件：<span class="u">inviter_2026.apk</span> · 2.3 MB<br>
+              来源：<span class="u">cdn.tracker-ad.com</span><br>
+              <span class="cnt">未经确认不会开始下载</span>
+            </div>
+            <div class="dopts">
+              <div class="dopt focused"><span class="no">1</span>开始下载</div>
+              <div class="dopt danger"><span class="no">2</span>永久忽略该站点下载</div>
+              <div class="dopt danger"><span class="no">3</span>取消</div>
+            </div>
+            <div class="ssk"><span class="l">选择</span><span class="c"></span><span class="r">取消</span></div>
+          </div>
+        </div>
+        <div class="softkeys"><span class="lsk">选择</span><span class="csk"></span><span class="rsk">取消</span></div>
+      </div>
+      <div class="keyhints"><span>凡下载必审批</span><i></i><i></i><i></i><span>RSK 取消</span></div>
+    </div>
+    <div class="spec-card">
+      <h4>⑤ 所有下载一律先审批
+        <span class="sid">TabAdapter.setDownloadListener → KeyphoneDownloadGuard</span></h4>
+      <div class="kv"><b>默认</b><span><b>凡是下载都要审批</b>：a 链接下载、JS 触发、302 跳附件、点按钮下 APK……一律弹确认卡，不区分“自动/手动”</span></div>
+      <div class="kv"><b>内容</b><span>确认卡列出文件名 / 大小 / 来源站点；未确认前不产生任何下载流量</span></div>
+      <div class="kv"><b>忽略</b><span>「永久忽略该站点下载」→ 之后该域名的下载请求静默拒绝并计数</span></div>
+      <div class="kv"><b>防轰炸</b><span>同站点 5s 内重复触发合并为一次确认</span></div>
+      <div class="rule">不猜意图、不做特判：审批是唯一通道，要下载就过确认卡</div>
+    </div>
+  </section>
+
+  <!-- ══════════════ ⑥ 设置页：拦截规则管理 ══════════════ -->
+  <section class="board">
+    <div class="phone">
+      <div class="screen">
+        <div class="topbar-s">
+          <span class="tic">◉</span><span class="tt">安全拦截</span>
+          <span class="st"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"><span class="case"><span class="fill"></span></span>85%</span></span>
+        </div>
+        <div class="content">
+          <div class="seclabel">协议跳转规则</div>
+          <div class="row"><span class="p1">QREADER://</span><span class="p2" style="flex:1;margin:0 6px">m.forum.com ×12</span><span class="pill deny">忽略</span></div>
+          <div class="row"><span class="p1">tbopen://</span><span class="p2" style="flex:1;margin:0 6px">s.taobao.com ×3</span><span class="pill allow">允许</span></div>
+          <div class="row focused"><span class="p1">openapp.jdmobile://</span><span class="p2" style="flex:1;margin:0 6px">m.jd.com ×5</span><span class="pill deny">忽略</span></div>
+          <div class="divider"></div>
+          <div class="seclabel">站内跳转拦截（按域名）</div>
+          <div class="row"><span class="p1">m.example.com</span><span class="pill on">已开启</span></div>
+          <div class="row"><span class="p1">bbs.foo.cn</span><span class="pill" style="background:rgba(138,148,160,.15);color:var(--ink-dim);border:1px solid rgba(138,148,160,.35)">已关闭</span></div>
+          <div class="divider"></div>
+          <div class="seclabel">下载规则</div>
+          <div class="row"><span class="p1">cdn.tracker-ad.com</span><span class="p2" style="flex:1;margin:0 6px">×2</span><span class="pill deny">忽略</span></div>
+        </div>
+        <div class="softkeys"><span class="lsk">清空</span><span class="csk"></span><span class="rsk">返回</span></div>
+      </div>
+      <div class="keyhints"><span>上下移动</span><i></i><i></i><i></i><span>SELECT 打开操作</span></div>
+    </div>
+    <div class="spec-card">
+      <h4>⑥ 拦截规则管理页（主列表）
+        <span class="sid">KeyphoneGuardListActivity（新增按键机专页）</span></h4>
+      <div class="kv"><b>入口①</b><span>设置页新增「安全拦截」分组项 → 进入本页（常规路径）</span></div>
+      <div class="kv"><b>入口②</b><span>任何拦截提示条（屏②/屏④）显示期间按<b>选择键(中键)</b> → 直接进入并高亮定位到该条规则</span></div>
+      <div class="kv"><b>入口③</b><span>审批卡点了「永久允许/永久忽略」后的提示条，同样支持中键直达</span></div>
+      <div class="kv"><b>作用</b><span>事后查看/改判/撤销所有拦截规则：谁被拦了、拦了多少次、当前是允许还是忽略</span></div>
+      <div class="kv"><b>内容</b><span>三组列表：协议跳转规则（协议+来源域+次数+允许/忽略徽标）、站内跳转开关（按域名）、下载站点规则；SELECT 打开操作菜单（屏⑦），站内开关 SELECT 直接切换开/关</span></div>
+      <div class="kv"><b>LSK</b><span>「清空」：清当前焦点所在组的全部规则（KeydroidxConfirmDialog 确认）</span></div>
+      <div class="rule">规则仅存本机（SharedPreferences JSON）；无痕标签页命中相同规则但不新增记录</div>
+    </div>
+  </section>
+
+  <!-- ══════════════ ⑦ 规则操作级联菜单 ══════════════ -->
+  <section class="board">
+    <div class="phone">
+      <div class="screen">
+        <div class="topbar-s">
+          <span class="tic">◉</span><span class="tt">安全拦截</span>
+          <span class="st"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"><span class="case"><span class="fill"></span></span>85%</span></span>
+        </div>
+        <div class="content">
+          <div class="seclabel">协议跳转规则</div>
+          <div class="row focused"><span class="p1">QREADER://</span><span class="p2" style="flex:1;margin:0 6px">m.forum.com ×12</span><span class="pill deny">忽略</span></div>
+          <div class="row"><span class="p1">tbopen://</span><span class="p2" style="flex:1;margin:0 6px">s.taobao.com ×3</span><span class="pill allow">允许</span></div>
+          <div class="row"><span class="p1">openapp.jdmobile://</span><span class="p2" style="flex:1;margin:0 6px">m.jd.com ×5</span><span class="pill deny">忽略</span></div>
+          <div class="divider"></div>
+          <div class="seclabel">站内跳转拦截（按域名）</div>
+          <div class="row"><span class="p1">m.example.com</span><span class="pill on">已开启</span></div>
+          <!-- 规则操作级联（与 # 菜单同形态：左侧列表 + 右侧操作子菜单） -->
+          <div class="menuwrap"></div>
+          <div class="qmenu">
+            <div class="mi"><span class="no">1</span>QREADER://</div>
+            <div class="mi focused"><span class="no">2</span>tbopen://</div>
+            <div class="mi"><span class="no">3</span>openapp.jdm://</div>
+          </div>
+          <div class="cascade">
+            <div class="chead">tbopen:// 操作</div>
+            <div class="mi focused"><span class="no">1</span>改为永久允许</div>
+            <div class="mi"><span class="no">2</span>改为永久忽略</div>
+            <div class="mi"><span class="no">3</span>删除规则</div>
+            <div class="cdom">来源：s.taobao.com<br>已拦截 3 次</div>
+          </div>
+        </div>
+        <div class="softkeys"><span class="lsk">清空</span><span class="csk"></span><span class="rsk">返回</span></div>
+      </div>
+      <div class="keyhints"><span>SELECT 呼出操作</span><i></i><i></i><i></i><span>RSK 关闭级联</span></div>
+    </div>
+    <div class="spec-card">
+      <h4>⑦ 规则操作级联（选中规则后）
+        <span class="sid">复用 # 菜单级联形态 · 数字键直选</span></h4>
+      <div class="kv"><b>呼出</b><span>主列表 SELECT 焦点行 → 右侧弹级联操作菜单；RSK/返回 关闭</span></div>
+      <div class="kv"><b>操作</b><span><code>1.改为永久允许</code> / <code>2.改为永久忽略</code> / <code>3.删除规则</code>，改完立即生效并刷新徽标</span></div>
+      <div class="kv"><b>信息</b><span>级联底部显示该规则来源域名与累计拦截次数</span></div>
+      <div class="kv"><b>站内开关</b><span>站内跳转组的行 SELECT 不弹级联，直接开 ↔ 关切换</span></div>
+      <div class="rule">删除规则后回到“默认拦截并弹审批”状态，下次触发重新审批</div>
+    </div>
+  </section>
+
+  <!-- ══════════════ ⑧ 管理页空状态 ══════════════ -->
+  <section class="board">
+    <div class="phone">
+      <div class="screen">
+        <div class="topbar-s">
+          <span class="tic">◉</span><span class="tt">安全拦截</span>
+          <span class="st"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"><span class="case"><span class="fill"></span></span>85%</span></span>
+        </div>
+        <div class="content">
+          <div class="seclabel">协议跳转规则</div>
+          <div class="emptybox">
+            <div class="e-t">暂无拦截规则</div>
+            <div class="e-d">规则在首次拦截或审批时自动记录：<br>遇到 QREADER:// 这类跳转请求时<br>在审批卡选择「永久允许 / 永久忽略」<br>即会出现在这里</div>
+          </div>
+          <div class="divider"></div>
+          <div class="seclabel">站内跳转拦截（按域名）</div>
+          <div class="emptybox">
+            <div class="e-t">尚未对任何域名开启</div>
+            <div class="e-d">浏览网页时按 # → 4.跳转拦截<br>即可为当前域名开启/关闭</div>
+          </div>
+        </div>
+        <div class="softkeys"><span class="lsk">清空</span><span class="csk"></span><span class="rsk">返回</span></div>
+      </div>
+      <div class="keyhints"><span>首次使用</span><i></i><i></i><i></i><span>RSK 返回设置</span></div>
+    </div>
+    <div class="spec-card">
+      <h4>⑧ 管理页空状态
+        <span class="sid">KeyphoneGuardListActivity · empty state</span></h4>
+      <div class="kv"><b>时机</b><span>首次使用、从未触发过任何拦截/审批时展示</span></div>
+      <div class="kv"><b>内容</b><span>分组空提示 + 指引文案：告诉用户规则从哪来（审批卡）、站内开关在哪开（# 菜单 4）</span></div>
+      <div class="kv"><b>LSK</b><span>空状态下「清空」置灰不可用</span></div>
+      <div class="rule">三条进入路径汇总：设置 → 安全拦截 ／ 拦截提示条期间按中键 ／ 审批后提示条按中键</div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  拦截优先级：外部协议审批 ＞ 站内跳转拦截 ＞ 下载审批（同一跳转只命中一层）<br>
+  规则管理页进入路径：① 设置 → 安全拦截　② 任何拦截提示条显示期间按选择键(中键)直达定位　③ 审批后的提示条同样支持<br>
+  主题 classic_blue · 骨架 activity_keydroidx_base.xml · 组件 KeydroidxConfirmDialog / QuickMenu 复用 · 240×320
+</footer>
+
+</body>
+</html>
