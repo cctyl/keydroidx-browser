@@ -73,8 +73,8 @@ import javax.inject.Inject
  * 按键机浏览页（UC 风格多标签架构）：
  *
  * 结构：
- * - 顶部标签栏：横向滚动展示全部标签页及主页，按键 3 快速循环切换；
- * - 页面快捷菜单（按键 1 弹出）：面向当前网页/窗口深度操作，按 1~9 直达执行；
+ * - 顶部标签栏：横向滚动展示全部标签页及主页，按键 0 快速循环切换；
+ * - 页面快捷菜单（按键 * 弹出）：面向当前网页/窗口深度操作，按 1~9 直达执行；
  * - 全局快捷菜单（按键 # 弹出）：面向全局快捷跳转、无图/全屏/滚动等常用工具，按 0~9、*、# 直达执行；
  * - 地址/搜索栏：浏览具体网页时展示（可直接输入/前往）；
  * - 加载进度线：2dp 横向拉伸；
@@ -512,7 +512,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
     }
 
-    /** 按键 3：循环切换下一个标签页 */
+    /** 按键 0：循环切换下一个标签页 */
     private fun cycleNextTab() {
         val tabs = presenter.state.value.tabs
         if (tabs.size <= 1) return
@@ -556,18 +556,18 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     private var cachedMenuItems: List<KeyphoneViews.QuickMenuItem> = emptyList()
 
-    /** 按键 1 页面/窗口上下文菜单条目（1~9 项） */
+    /** 按键 * 页面/窗口上下文菜单条目（0~7、* 项） */
     private fun buildPageMenuItems(): List<KeyphoneViews.QuickMenuItem> {
         return listOf(
-            KeyphoneViews.QuickMenuItem("1", getString(R.string.keyphone_qm_close_tab)) { closeCurrentTabOrExit() },
-            KeyphoneViews.QuickMenuItem("2", getString(R.string.keyphone_qm_new_tab)) { createNewWindow() },
-            KeyphoneViews.QuickMenuItem("3", getString(R.string.keyphone_qm_refresh)) { refreshCurrentPage() },
-            KeyphoneViews.QuickMenuItem("4", getString(R.string.keyphone_qm_add_bookmark)) { addCurrentPageToHome() },
-            KeyphoneViews.QuickMenuItem("5", getString(R.string.keyphone_qm_copy_link)) { copyCurrentPageLink() },
-            KeyphoneViews.QuickMenuItem("6", getString(R.string.keyphone_qm_share)) { shareCurrentPage() },
-            KeyphoneViews.QuickMenuItem("7", getString(R.string.keyphone_qm_find)) { findInCurrentPage() },
-            KeyphoneViews.QuickMenuItem("8", getString(R.string.keyphone_qm_tabs)) { showTabsPage() },
-            KeyphoneViews.QuickMenuItem("9", getString(R.string.keyphone_qm_clear_tabs)) { confirmClearAllTabs() }
+            KeyphoneViews.QuickMenuItem("1", getString(R.string.keyphone_qm_refresh)) { refreshCurrentPage() },
+            KeyphoneViews.QuickMenuItem("2", getString(R.string.keyphone_qm_add_bookmark)) { addCurrentPageToHome() },
+            KeyphoneViews.QuickMenuItem("3", getString(R.string.keyphone_qm_copy_link)) { copyCurrentPageLink() },
+            KeyphoneViews.QuickMenuItem("4", getString(R.string.keyphone_qm_share)) { shareCurrentPage() },
+            KeyphoneViews.QuickMenuItem("5", getString(R.string.keyphone_qm_find)) { findInCurrentPage() },
+            KeyphoneViews.QuickMenuItem("6", getString(R.string.keyphone_qm_tabs)) { showTabsPage() },
+            KeyphoneViews.QuickMenuItem("7", getString(R.string.keyphone_qm_clear_tabs)) { confirmClearAllTabs() },
+            KeyphoneViews.QuickMenuItem("0", getString(R.string.keyphone_qm_new_tab)) { createNewWindow() },
+            KeyphoneViews.QuickMenuItem("*", getString(R.string.keyphone_qm_close_tab)) { closeCurrentTabOrExit() }
         )
     }
 
@@ -671,8 +671,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
         if (tabs.size > 1 && currentIndex >= 0) {
             closeTab(currentIndex)
+        } else if (currentIndex >= 0 && !isTabHome(tabs[currentIndex])) {
+            // 最后一个网页窗口：closeTab 关空后已自动新建主页窗口（退出浏览器走选项页/长按返回）
+            closeTab(currentIndex)
         } else {
-            confirmExit()
+            // 已在主页窗口：刷新主页数据，不再弹退出确认
+            switchToHome()
         }
     }
 
@@ -1700,10 +1704,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                         hideQuickMenu()
                         matchedItem.action()
                     } else if (keyLabel == "#" && activeMenuType == QuickMenuType.PAGE_MENU) {
-                        // 在 1 键菜单打开时按 # 直接切到全局 # 菜单
+                        // 在 * 键菜单打开时按 # 直接切到全局 # 菜单
                         showGlobalMenu()
                     } else if (keyLabel == "1" && activeMenuType == QuickMenuType.GLOBAL_MENU) {
-                        // 在 # 键菜单中按 1 直接切到页面 1 菜单
+                        // 在 # 键菜单中按 1 直接切到 * 键页面菜单
                         showPageMenu()
                     }
                 }
@@ -1925,33 +1929,21 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
         }
 
-        // UC 经典快捷键 0：回到主页
+        // UC 经典快捷键 0：循环切换标签页
         val isKey0 = event.keyCode == KeyEvent.KEYCODE_0 || event.keyCode == KeyEvent.KEYCODE_NUMPAD_0
         if (isKey0) {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 lastConsumedDownKeyCode = event.keyCode
                 if (event.repeatCount == 0) {
-                    switchToHome()
+                    cycleNextTab()
                 }
             }
             return true
         }
 
-        // UC 经典快捷键 *：刷新当前页面
+        // UC 经典快捷键 *：弹出页面/窗口操作菜单（刷新已并入菜单第 3 项；菜单打开时再按 * 关闭当前窗口）
         val isKeyStar = event.keyCode == KeyEvent.KEYCODE_STAR || event.keyCode == KeyEvent.KEYCODE_NUMPAD_MULTIPLY
         if (isKeyStar) {
-            if (event.action == KeyEvent.ACTION_DOWN) {
-                lastConsumedDownKeyCode = event.keyCode
-                if (event.repeatCount == 0) {
-                    refreshCurrentPage()
-                }
-            }
-            return true
-        }
-
-        // UC 经典快捷键 1：弹出页面/窗口操作菜单
-        val isKey1 = event.keyCode == KeyEvent.KEYCODE_1 || event.keyCode == KeyEvent.KEYCODE_NUMPAD_1
-        if (isKey1) {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 lastConsumedDownKeyCode = event.keyCode
                 if (event.repeatCount == 0) {
@@ -1968,18 +1960,6 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 lastConsumedDownKeyCode = event.keyCode
                 if (event.repeatCount == 0) {
                     showGlobalMenu()
-                }
-            }
-            return true
-        }
-
-        // UC 经典快捷键 3：循环切换标签页
-        val isKey3 = event.keyCode == KeyEvent.KEYCODE_3 || event.keyCode == KeyEvent.KEYCODE_NUMPAD_3
-        if (isKey3) {
-            if (event.action == KeyEvent.ACTION_DOWN) {
-                lastConsumedDownKeyCode = event.keyCode
-                if (event.repeatCount == 0) {
-                    cycleNextTab()
                 }
             }
             return true

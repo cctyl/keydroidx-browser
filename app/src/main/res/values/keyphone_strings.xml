@@ -23,16 +23,16 @@
     <string name="keyphone_soft_delete">删除</string>
     <string name="keyphone_soft_clear">清空</string>
 
-    <!-- 按键 1 数字快捷菜单（UC 经典页面/窗口上下文菜单） -->
-    <string name="keyphone_qm_close_tab">1.关闭窗口</string>
-    <string name="keyphone_qm_new_tab">2.新建窗口</string>
-    <string name="keyphone_qm_refresh">3.刷新/停止</string>
-    <string name="keyphone_qm_add_bookmark">4.加入书签</string>
-    <string name="keyphone_qm_copy_link">5.复制链接</string>
-    <string name="keyphone_qm_share">6.分享页面</string>
-    <string name="keyphone_qm_find">7.页内查找</string>
-    <string name="keyphone_qm_tabs">8.标签页列表</string>
-    <string name="keyphone_qm_clear_tabs">9.清空标签页</string>
+    <!-- 按键 * 数字快捷菜单（UC 经典页面/窗口上下文菜单，按 * 关闭窗口、按 0 新建窗口） -->
+    <string name="keyphone_qm_refresh">1.刷新/停止</string>
+    <string name="keyphone_qm_add_bookmark">2.加入书签</string>
+    <string name="keyphone_qm_copy_link">3.复制链接</string>
+    <string name="keyphone_qm_share">4.分享页面</string>
+    <string name="keyphone_qm_find">5.页内查找</string>
+    <string name="keyphone_qm_tabs">6.标签页列表</string>
+    <string name="keyphone_qm_clear_tabs">7.清空标签页</string>
+    <string name="keyphone_qm_new_tab">0.新建窗口</string>
+    <string name="keyphone_qm_close_tab">*.关闭窗口</string>
 
     <!-- 按键 # 全局快捷工具菜单（UC 经典 # 键全局菜单） -->
     <string name="keyphone_pm_input_url">1.输入网址</string>

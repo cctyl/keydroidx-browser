@@ -2,9 +2,9 @@
 <!--
     按键机浏览页内容布局（UC 风格）。
 
-    顶部：UC 风格横向标签栏（展示主页及所有打开的 Web 标签页，按 3 循环切换）；
+    顶部：UC 风格横向标签栏（展示主页及所有打开的 Web 标签页，按 0 循环切换）；
     其下：地址栏容器（浏览网页时展示）与 2dp 加载进度线；
-    内容区：包含主页 ScrollView 与 WebView 宿主 FrameLayout，以及按键 1 弹出的数字快捷菜单浮层。
+    内容区：包含主页 ScrollView 与 WebView 宿主 FrameLayout，以及按键 * 弹出的数字快捷菜单浮层。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/keyphone_browser_root"
