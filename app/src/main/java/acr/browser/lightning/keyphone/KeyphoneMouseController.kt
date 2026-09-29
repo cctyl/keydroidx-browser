@@ -4,6 +4,7 @@ import android.animation.ValueAnimator
 import android.os.Handler
 import android.os.Looper
 import android.view.animation.AnimationUtils
+import android.view.animation.DecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import android.webkit.WebView
 import android.widget.FrameLayout
@@ -53,6 +54,9 @@ class KeyphoneMouseController(
         private const val PAGE_SCROLL_STEP_RATIO_V = 0.32f
         private const val PAGE_SCROLL_STEP_RATIO_H = 0.72f
 
+        /** 1~9 热区跳转动画时长 */
+        private const val JUMP_DURATION_MS = 180L
+
         /** 短边缩放基准（foucs 用屏幕短边，这里用宿主短边，视觉一致） */
         private fun shortSideOf(host: FrameLayout): Int =
             minOf(host.width, host.height).coerceAtLeast(1)
@@ -76,6 +80,9 @@ class KeyphoneMouseController(
     /** 贴边滚动动画：唯一的滚动源，null 表示未在滚动 */
     private var edgeAnimator: ValueAnimator? = null
 
+    /** 1~9 热区跳转动画，null 表示未在跳转 */
+    private var jumpAnimator: ValueAnimator? = null
+
     /** 松手标记：置位后滚动到「一个步长」即自停（速度不变） */
     private var edgeReleased = false
 
@@ -88,7 +95,9 @@ class KeyphoneMouseController(
         // ROM 连发的重复 DOWN（foucs: DIR_DOWN_DEDUP_MS 去重同理）：
         // 手势已在进行则只视为「仍按住」信号，不重置加速与额度
         if (repeatDir == dir && repeatRunnable != null && heldDirs.contains(dir)) return
-        // 新手势（含换向）：终止上一轮贴边滚动，重开一轮（速度不变，无视觉跳变）
+        // 新手势（含换向）：终止上一轮贴边滚动与热区跳转动画，重开一轮
+        jumpAnimator?.cancel()
+        jumpAnimator = null
         cancelEdgeAnimator()
         edgeReleased = false
         heldDirs.remove(dir)
@@ -114,7 +123,40 @@ class KeyphoneMouseController(
     /** 外部停止（Activity 切后台 / 退出网页态）：停连发并立即终止贴边滚动 */
     fun stopRepeat() {
         stopMoveRepeat()
+        jumpAnimator?.cancel()
+        jumpAnimator = null
         cancelEdgeAnimator()
+    }
+
+    /**
+     * 1~9 热区跳转：光标平滑动画移动到目标点（只移动不点击，落点确认交给确认键）。
+     * 期间按方向键会立即取消动画改由手势接管。
+     */
+    fun animateCursorTo(x: Int, y: Int) {
+        val w = host.width
+        val h = host.height
+        if (w <= 0 || h <= 0) return
+        ensurePositionValid()
+        val targetX = x.coerceIn(1, w - 1)
+        val targetY = y.coerceIn(1, h - 1)
+        if (targetX == cursorX && targetY == cursorY) return
+        stopMoveRepeat()
+        cancelEdgeAnimator()
+        jumpAnimator?.cancel()
+        val startX = cursorX
+        val startY = cursorY
+        val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = JUMP_DURATION_MS
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { a ->
+                val t = a.animatedValue as Float
+                cursorX = Math.round(startX + (targetX - startX) * t)
+                cursorY = Math.round(startY + (targetY - startY) * t)
+                cursorView.update(cursorX, cursorY, KeyphoneCursorView.DIR_NONE)
+            }
+        }
+        jumpAnimator = anim
+        anim.start()
     }
 
     /** 停止光标连发定时器（不影响贴边滚动动画） */

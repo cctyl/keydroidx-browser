@@ -1927,6 +1927,15 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 }
                 return true
             }
+
+            // 1~9 热区跳转：光标平滑移动到对应九宫格的角部/中心位置（只移动不点击，落点由确认键触发）
+            val digit = keyDigitOf(event.keyCode)
+            if (digit in 1..9) {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                    jumpCursorToZone(digit)
+                }
+                return true
+            }
         }
 
         // UC 经典快捷键 0：循环切换标签页
@@ -2504,6 +2513,46 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "回填网页输入失败", t)
         }
+    }
+
+    // endregion
+
+    // region 1~9 热区跳转（九宫格角部偏移定位）
+
+    /**
+     * 按 1~9：光标平滑跳到对应九宫格位置（只移动不点击，落点由确认键触发）。
+     * 落点 = 格子内偏向本键对应的角落：左右列在格内取 25%/75% 宽处，顶/底行取 25%/75% 高处，
+     * 中间行列取格中心。顶栏按钮贴视口顶角、底栏按钮贴视口底角（如起点中文网顶栏左右菜单
+     * 与底栏「菜单/书友圈/红按钮」），此偏移普遍能落到真实按钮上；纯比例计算，天然适配各种分辨率。
+     */
+    private fun jumpCursorToZone(zone: Int) {
+        val controller = mouseController ?: return
+        val host = browserFrameHost ?: return
+        val w = host.width
+        val h = host.height
+        if (w <= 0 || h <= 0) return
+        val col = (zone - 1) % 3
+        val row = (zone - 1) / 3
+        val fx = if (col == 0) 0.25f else if (col == 2) 0.75f else 0.5f
+        val fy = if (row == 0) 0.25f else if (row == 2) 0.75f else 0.5f
+        val tx = w * col / 3f + w / 3f * fx
+        val ty = h * row / 3f + h / 3f * fy
+        controller.animateCursorTo(Math.round(tx), Math.round(ty))
+    }
+
+    /** 键值 → 数字 1~9（Numpad 5 保留为确认键，映射为 0）；非数字键返回 0 */
+    private fun keyDigitOf(keyCode: Int): Int = when (keyCode) {
+        KeyEvent.KEYCODE_1, KeyEvent.KEYCODE_NUMPAD_1 -> 1
+        KeyEvent.KEYCODE_2, KeyEvent.KEYCODE_NUMPAD_2 -> 2
+        KeyEvent.KEYCODE_3, KeyEvent.KEYCODE_NUMPAD_3 -> 3
+        KeyEvent.KEYCODE_4, KeyEvent.KEYCODE_NUMPAD_4 -> 4
+        KeyEvent.KEYCODE_5 -> 5
+        KeyEvent.KEYCODE_NUMPAD_5 -> 0
+        KeyEvent.KEYCODE_6, KeyEvent.KEYCODE_NUMPAD_6 -> 6
+        KeyEvent.KEYCODE_7, KeyEvent.KEYCODE_NUMPAD_7 -> 7
+        KeyEvent.KEYCODE_8, KeyEvent.KEYCODE_NUMPAD_8 -> 8
+        KeyEvent.KEYCODE_9, KeyEvent.KEYCODE_NUMPAD_9 -> 9
+        else -> 0
     }
 
     // endregion
