@@ -147,6 +147,9 @@ class WebViewFactory @Inject constructor(
             settings.layoutAlgorithm = WebSettings.LayoutAlgorithm.NORMAL
         }
 
+        // 无图模式：loadsImagesAutomatically=false 关闭整个图片管线（含 data:/base64 内联图、
+        // blob: 图与 CSS 背景），blockNetworkImage 仅拦网络图，拦不住脚本注入的内联广告图
+        settings.loadsImagesAutomatically = !tabSettings.blockImagesEnabled
         settings.blockNetworkImage = tabSettings.blockImagesEnabled
         // Modifying headers causes SEGFAULTS, so disallow multi window if headers are enabled.
         settings.setSupportMultipleWindows(tabSettings.popupsEnabled && !modifiesHeaders)

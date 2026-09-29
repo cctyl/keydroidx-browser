@@ -125,28 +125,63 @@ object KeyphoneGuardStore {
     // 站内跳转拦截开关（按来源域名）
     // ------------------------------------------------------------------
 
+    /**
+     * 站内跳转拦截是否生效：**默认开启**——无记录的域名一律视为开启，
+     * 只有用户手动关闭过的域名（存有 `{"on":false}` 记录）才放行站外跳转。
+     */
     fun isJumpEnabled(context: Context, domain: String?): Boolean {
         if (domain.isNullOrEmpty()) return false
-        val raw = prefs(context, PREF_JUMP).getString(domain, null) ?: return false
+        val raw = prefs(context, PREF_JUMP).getString(domain, null) ?: return true
         return try {
-            JSONObject(raw).optBoolean("on", false)
+            JSONObject(raw).optBoolean("on", true)
         } catch (t: Throwable) {
-            false
+            true
         }
     }
 
+    /** 开关切换：保留既有命中次数。 */
     fun setJumpEnabled(context: Context, domain: String, enabled: Boolean) {
-        val json = JSONObject().put("on", enabled).put("c", 0)
-        prefs(context, PREF_JUMP).edit().putString(domain, json.toString()).apply()
+        val pref = prefs(context, PREF_JUMP)
+        val hits = try {
+            pref.getString(domain, null)?.let { JSONObject(it).optInt("c", 0) } ?: 0
+        } catch (t: Throwable) {
+            0
+        }
+        pref.edit().putString(domain, jumpJson(enabled, hits)).apply()
     }
 
-    /** 站外跳转拦截次数 +1，返回累计次数。 */
-    fun bumpJumpHits(context: Context, domain: String): Int =
-        bump(prefs(context, PREF_JUMP), domain)
+    /** 站外跳转拦截次数 +1，返回累计次数（必须保留 on 标志，否则开关会被计数重写破坏）。 */
+    fun bumpJumpHits(context: Context, domain: String): Int {
+        val pref = prefs(context, PREF_JUMP)
+        val current = try {
+            pref.getString(domain, null)?.let { JSONObject(it) }
+        } catch (t: Throwable) {
+            null
+        }
+        val hits = (current?.optInt("c", 0) ?: 0) + 1
+        val on = current?.optBoolean("on", true) ?: true
+        pref.edit().putString(domain, jumpJson(on, hits)).apply()
+        return hits
+    }
 
-    /** 全部站内拦截开关。 */
-    fun jumpRules(context: Context): List<Rule> =
-        rules(context, PREF_JUMP) { key -> Triple(key, key, key) }
+    /** 全部站内拦截开关（含已关闭条目，供管理页展示）。 */
+    fun jumpRules(context: Context): List<Rule> {
+        val pref = prefs(context, PREF_JUMP)
+        return pref.all.mapNotNull { (key, value) ->
+            val json = try {
+                JSONObject(value as? String ?: return@mapNotNull null)
+            } catch (t: Throwable) {
+                return@mapNotNull null
+            }
+            Rule(
+                key = key,
+                display = key,
+                source = key,
+                action = if (json.optBoolean("on")) RuleAction.ALLOW else RuleAction.DENY,
+                hits = json.optInt("c", 0)
+            )
+        }
+    }
 
     fun clearJumpRules(context: Context) {
         prefs(context, PREF_JUMP).edit().clear().apply()
@@ -196,6 +231,10 @@ object KeyphoneGuardStore {
     private fun encodeRule(action: RuleAction, hits: Int): String =
         JSONObject().put("a", if (action == RuleAction.ALLOW) "allow" else "deny").put("c", hits)
             .toString()
+
+    /** 站内拦截开关专用格式：`{"on":bool,"c":次数}`。 */
+    private fun jumpJson(on: Boolean, hits: Int): String =
+        JSONObject().put("on", on).put("c", hits).toString()
 
     private fun decodeRule(raw: String?): Pair<RuleAction, Int>? {
         if (raw.isNullOrBlank()) return null

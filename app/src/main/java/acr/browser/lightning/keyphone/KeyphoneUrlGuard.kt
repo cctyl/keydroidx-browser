@@ -127,11 +127,15 @@ object KeyphoneUrlGuard {
      * （弹窗在新建标签页的 WebView 中加载，且新标签无来源页上下文），
      * 因此必须在 `onCreateWindow` 阶段拦截。
      *
-     * 站内跳转拦截开启时，弹新窗口一律不放行（弹窗目标域在创建时不可知，且多为广告）。
+     * 站内跳转拦截默认开启：来源页为普通网页时，弹新窗口一律不放行
+     * （弹窗目标域在创建时不可知，且多为广告）。必须由用户对该域名手动关闭。
      * 必须在主线程调用。
      */
     fun shouldBlockCreateWindow(context: android.content.Context, sourceUrl: String?): Boolean {
         if (!isActive()) {
+            return false
+        }
+        if (!URLUtil.isNetworkUrl(sourceUrl)) {
             return false
         }
         val sourceDomain = KeyphoneGuardStore.baseDomain(sourceUrl) ?: return false
@@ -216,6 +220,11 @@ object KeyphoneUrlGuard {
         sourceUrl: String?,
         targetUrl: String
     ): Verdict {
+        // 只对「普通网页 → 普通网页」的跳转做站内比对：
+        // 内部页（file:// 书签/历史/首页页、about: 哨兵）不参与，避免误伤应用内导航
+        if (!URLUtil.isNetworkUrl(sourceUrl) || !URLUtil.isNetworkUrl(targetUrl)) {
+            return Verdict(Decision.PROCEED)
+        }
         val sourceDomain = KeyphoneGuardStore.baseDomain(sourceUrl) ?: return Verdict(Decision.PROCEED)
         val targetDomain = KeyphoneGuardStore.baseDomain(targetUrl) ?: return Verdict(Decision.PROCEED)
         if (sourceDomain == targetDomain) {

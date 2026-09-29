@@ -1419,7 +1419,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 val currentBlocked = userPreferencesDataStore.blockImagesEnabled.get()
                 val newBlocked = !currentBlocked
                 userPreferencesDataStore.blockImagesEnabled.set(newBlocked)
-                currentWebView()?.settings?.blockNetworkImage = newBlocked
+                currentWebView()?.settings?.apply {
+                    // 双开关：loadsImagesAutomatically 管全部图片（含内联），blockNetworkImage 兜底网络图
+                    loadsImagesAutomatically = !newBlocked
+                    blockNetworkImage = newBlocked
+                }
                 Toast.makeText(
                     this@KeyphoneBrowserActivity,
                     if (newBlocked) R.string.keyphone_images_blocked else R.string.keyphone_images_loaded,
