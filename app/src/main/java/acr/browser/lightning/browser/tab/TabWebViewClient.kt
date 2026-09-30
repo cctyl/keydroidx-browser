@@ -173,8 +173,6 @@ class TabWebViewClient @AssistedInject constructor(
 
     /** 最近的主帧请求环形缓冲（时间戳,URL）：用于 302 链的事后溯源。 */
     private val recentMainFrameRequests = ArrayDeque<Pair<Long, String>>()
-    private val lastRedirectorNotifyAt = HashMap<String, Long>()
-    private val lastJumpNotifyAt = HashMap<String, Long>()
 
     /**
      * 用户手势发起的主帧导航（时间戳,URL）。这些 URL 即使被服务器 302 劫持到广告，
@@ -273,16 +271,8 @@ class TabWebViewClient @AssistedInject constructor(
         } ?: return
         val persisted = KeyphoneGuardStore.addRedirector(view.context, culprit)
         val key = KeyphoneGuardStore.redirectorKeyOf(culprit) ?: return
+        // 学习是内部动作：不弹提示（与同一时刻的拦截提示重复且很吵），次数在管理页可见
         logger.log(TAG, "Redirector learned: $key (persisted=$persisted)")
-        view.post {
-            KeyphoneUrlGuard.notify(
-                if (persisted) {
-                    "已拉黑跳转中转：$key（下次直接拦截）"
-                } else {
-                    "已在本次会话内拦截跳转中转：$key"
-                }
-            )
-        }
     }
 
     /** path 必须是具体路径（非根、非空），否则不允许进入中转黑名单。 */
@@ -291,47 +281,25 @@ class TabWebViewClient @AssistedInject constructor(
         return key.substringAfter('|').length > 1
     }
 
-    /** 中转黑名单命中：计数 + 提示（2s 内同键去重，防止页面里几十个请求刷屏）。 */
+    /** 中转黑名单命中：提示走统一节流（同一来源域整段会话只响一次），其余静默拦截。 */
     private fun onRedirectorBlocked(view: WebView, requestUrl: String) {
         val key = KeyphoneGuardStore.redirectorKeyOf(requestUrl) ?: return
-        val shouldNotify = synchronized(this) {
-            val now = SystemClock.elapsedRealtime()
-            val last = lastRedirectorNotifyAt[key] ?: 0L
-            if (now - last < 2000L) {
-                false
-            } else {
-                lastRedirectorNotifyAt[key] = now
-                true
-            }
-        }
-        if (shouldNotify) {
-            view.post {
-                val hits = KeyphoneGuardStore.redirectorHits(view.context, requestUrl)
-                KeyphoneUrlGuard.notify("已拦截跳转中转：$key（累计 $hits 次）")
-            }
+        val sourceDomain = KeyphoneGuardStore.baseDomain(currentUrl)
+        logger.log(TAG, "Guard blocked redirector: $key")
+        view.post {
+            KeyphoneUrlGuard.notifyBlocked(
+                sourceDomain,
+                KeyphoneUrlGuard.BlockKind.JUMP,
+                "已拦截跳转中转：$key"
+            )
         }
     }
 
-    /** 站外跳转拦截提示：按目标域 2s 去重，防止页面里多个请求刷屏。 */
-    private fun notifyJumpBlockedOnce(view: WebView, targetDomain: String) {
-        val key = "jump|$targetDomain"
-        val shouldNotify = synchronized(this) {
-            val now = SystemClock.elapsedRealtime()
-            val last = lastJumpNotifyAt[key] ?: 0L
-            if (now - last < 2000L) {
-                false
-            } else {
-                lastJumpNotifyAt[key] = now
-                true
-            }
-        }
-        if (!shouldNotify) return
-        val sourceDomain = KeyphoneGuardStore.baseDomain(currentUrl).orEmpty()
-        val hits = KeyphoneGuardStore.bumpJumpHits(view.context, sourceDomain)
+    /** 站外跳转拦截提示：与其它拦截共用「同一来源域整段会话一声」的聚合节流。 */
+    private fun notifyJumpBlocked(view: WebView, targetDomain: String) {
+        val sourceDomain = KeyphoneGuardStore.baseDomain(currentUrl)
         logger.log(TAG, "Guard blocked cross-domain navigation to $targetDomain")
-        view.post {
-            KeyphoneUrlGuard.notify("已拦截站外跳转：$targetDomain（累计 $hits 次）")
-        }
+        KeyphoneUrlGuard.notifyBlocked(sourceDomain, KeyphoneUrlGuard.BlockKind.JUMP, "已拦截站外跳转：$targetDomain")
     }
 
     private fun shouldBlockRequest(pageUrl: String, requestUri: Uri) =
@@ -626,7 +594,7 @@ class TabWebViewClient @AssistedInject constructor(
             val requestReferer = request.requestHeaders?.entries
                 ?.firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value
             captureRedirectorCulprit(view, requestReferer, requestUrl)
-            notifyJumpBlockedOnce(view, KeyphoneGuardStore.baseDomain(requestUrl).orEmpty())
+            notifyJumpBlocked(view, KeyphoneGuardStore.baseDomain(requestUrl).orEmpty())
             return WebResourceResponse(
                 BLOCKED_RESPONSE_MIME_TYPE,
                 BLOCKED_RESPONSE_ENCODING,

@@ -295,6 +295,7 @@ class KeyphoneGuardListActivity : KeydroidxBaseActivity() {
                     KeyphoneGuardStore.clearJumpRules(this)
                     KeyphoneGuardStore.clearDownloadRules(this)
                     KeyphoneGuardStore.clearRedirectors(this)
+                    KeyphoneUrlGuard.resetNotifyThrottle()
                     lastFocusIndex = 0
                     rebuild()
                     Toast.makeText(this, R.string.keyphone_guard_cleared, Toast.LENGTH_SHORT).show()
