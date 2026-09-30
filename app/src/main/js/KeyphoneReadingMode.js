@@ -27,6 +27,13 @@
  *   window.__keyphone_rm_init__ = {theme: <int>, font: <px>};
  * evaluated together with this file, so a new chapter keeps the previous look.
  *
+ * The stitched chapters are reported over the same "host pulls, script returns" channel:
+ *   window.__keyphone_rm__.progress() -> "url\ttitle\nurl\ttitle\n..."  (reading order)
+ * The host mirrors every chapter into the URL history (so the reader behaves like plain
+ * browsing: 39..59 all show up in history) and, when reading mode is left, navigates the
+ * tab to the last chapter it saw - which also fixes both the address bar and the tab that
+ * is restored on the next launch. [pageLog] therefore outlives the trimmed DOM pages.
+ *
  * IMPORTANT: keep this file ASCII only. Mezzanine embeds the file content into a
  * generated string literal at build time and the build machine default charset is not
  * guaranteed to be UTF-8, so CJK keywords are written as \uXXXX escapes (they are
@@ -218,6 +225,11 @@
     var active = false;
     var root = null;
     var pages = [];
+    // every chapter stitched so far, in reading order: {url: string, title: string}.
+    // Kept apart from `pages` (which only holds the DOM nodes that trimPages() keeps
+    // around) so the full trail survives trimming - the host reports it to the browser's
+    // URL history and reopens the last chapter when the reader is left.
+    var pageLog = [];
     var pageSeq = 0;
     var nextUrl = null;
     var loading = false;
@@ -845,8 +857,29 @@
         var wrap = createPage(html, pageSeq, sourceUrl);
         root.appendChild(wrap);
         pages.push(wrap);
+        pageLog.push({ url: sourceUrl, title: titleText || '' });
         pageSeq += 1;
         trimPages();
+    }
+
+    /**
+     * Reading progress for the host: one line per stitched chapter, in reading order,
+     * encoded as "URL \t TITLE". The host uses it to mirror every chapter into the browser
+     * URL history and to know which chapter to reopen when reading mode is left.
+     */
+    function progress() {
+        var out = [];
+        for (var i = 0; i < pageLog.length; i++) {
+            var entry = pageLog[i];
+            if (!entry || !entry.url) {
+                continue;
+            }
+            out.push(
+                String(entry.url) + '\t' +
+                String(entry.title || '').replace(/[\t\r\n]+/g, ' ')
+            );
+        }
+        return out.join('\n');
     }
 
     /** Bottom "loading next chapter" hint shown while a page is being fetched. */
@@ -1157,6 +1190,7 @@
         applyViewport();
 
         pages = [];
+        pageLog = [{ url: pageUrl, title: pageTitleOf(document, pageUrl) }];
         pageSeq = 1;
         var first = createPage(contentHtml, pageSeq, pageUrl);
         root.appendChild(first);
@@ -1208,6 +1242,7 @@
         }
         root = null;
         pages = [];
+        pageLog = [];
         nextUrl = null;
         ended = false;
         loading = false;
@@ -1282,6 +1317,10 @@
         },
         nextUrl: function () {
             return nextUrl;
+        },
+        progress: progress,
+        chapterCount: function () {
+            return pageLog.length;
         },
         font: changeFont,
         theme: cycleTheme,

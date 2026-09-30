@@ -583,8 +583,50 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     // region 阅读模式（按键 * 菜单 6：正文提纯 + 下一页自动拼页）
 
-    /** 已进入阅读模式的标签页：tabId(Int) -> 进入时的 URL（页面导航后自动失配清理） */
-    private val readingModeTabs = HashMap<Int, String>()
+    /**
+     * 阅读模式会话。
+     *
+     * 阅读模式把「进入时那一章 → 后面拼进来的每一章」放进同一张 DOM 里连续滚动，而浏览器
+     * 仍认为当前页是进入时那一章。为了让阅读模式等价于**普通浏览**（地址栏、历史记录、
+     * 关掉浏览器后下次启动恢复都停在最后读到的那一章），这里跟着 JS 的拼页进展记账：
+     * - [recorded]：已写进 URL 历史的章节，逐条入库（见 [pullReadingProgress]）；
+     * - [lastUrl]：最后拼进来的一章，已不是 [entryUrl] 时退出即导航过去（见 [exitReadingMode]）。
+     */
+    private class ReadingSession(val entryUrl: String) {
+        val recorded = HashSet<String>()
+
+        /** 拼页轨迹：按阅读顺序的全部章节（含进入时那一章），退出导航落地后据此补写历史标题。 */
+        var trail: List<ReadingPage> = emptyList()
+        var lastUrl: String = entryUrl
+        var lastTitle: String = ""
+        var chapterCount: Int = 1
+    }
+
+    /**
+     * 退出阅读模式后待补写的章节轨迹。
+     *
+     * 浏览内核的「历史记录」是把**标题**与 **URL** 两个独立事件流组合出来的
+     * （`combine(tab.titleChanges(), tab.urlChanges())`）：退出阅读模式发起导航时，新章节的标题
+     * 会先于 URL 上报，于是「进入时那一章」的历史行被写成新章节的标题
+     * （实测：第 39 章的行被写成第 59 章）。导航落地后按阅读顺序把轨迹重写一遍即可纠正——
+     * 写入时间随阅读顺序递增，主页历史列表的顺序（最后读到的在最上）不受影响。
+     */
+    private var pendingTrailReassert: List<ReadingPage>? = null
+
+    /** 补写轨迹触发条件：当前页 URL 必须已经是这一章（否则页面还没导航过去）。 */
+    private var pendingTrailTargetUrl: String? = null
+
+    /** 退出阅读模式的时刻（用于避开导航刚开始那一瞬的 URL / 进度错位）。 */
+    private var readingTrailExitAt = 0L
+
+    /** 补写定时器：延时兜底那一遍（页面加载慢/中断，或站点很晚才设标题时用）。 */
+    private val readingTrailHandler = Handler(Looper.getMainLooper())
+
+    /** 拼页进展里的一章（章节 URL + 章节标题）。 */
+    private data class ReadingPage(val url: String, val title: String)
+
+    /** 已进入阅读模式的标签页：tabId(Int) -> 会话（页面导航后自动失配清理） */
+    private val readingModeTabs = HashMap<Int, ReadingSession>()
 
     /** 已挂载阅读模式 JS 桥的 WebView（WebView 池化复用，同一实例只挂一次） */
     private val readingBridgeHosts = WeakHashMap<WebView, Boolean>()
@@ -603,9 +645,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     /** 当前标签页是否处于阅读模式 */
     private fun isReadingMode(): Boolean {
-        val tab = presenter.state.value.tabs.firstOrNull { it.isSelected } ?: return false
-        return readingModeTabs.containsKey(tab.id)
+        val tabId = selectedTabId() ?: return false
+        return readingModeTabs.containsKey(tabId)
     }
+
+    /** 当前选中标签页的 id（无标签时为空） */
+    private fun selectedTabId(): Int? = presenter.state.value.tabs.firstOrNull { it.isSelected }?.id
 
     /** 统一计算返回键回调开关：任一模式 / 菜单激活时都要先由 Activity 消费返回键 */
     private fun updateBackPressedEnabled() {
@@ -648,7 +693,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             val result = decodeJsString(rawResult)
             when (result) {
                 "ok" -> {
-                    readingModeTabs[tab.id] = url
+                    readingModeTabs[tab.id] = ReadingSession(url)
                     updateBackPressedEnabled()
                     // 阅读模式下隐藏鼠标光标层（方向键已改为整屏翻页）
                     updateMouseCursorVisibility()
@@ -736,15 +781,65 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
     }
 
-    /** 退出阅读模式：JS 侧用进入前的 DOM 备份原地恢复（无刷新、无网络请求） */
+    /**
+     * 退出阅读模式。
+     *
+     * 退出前先把拼页进展拉回来（见 [pullReadingProgress]）：已经读到别的章节时，按**普通浏览**
+     * 的语义直接导航到最后读到的那一章——地址栏、标签标题、URL 历史与「关掉浏览器下次启动
+     * 恢复」随之都停在第 59 章；只读了进入时那一章则就地还原 DOM（无刷新、保留滚动位置）。
+     */
     private fun exitReadingMode() {
-        val tabId = presenter.state.value.tabs.firstOrNull { it.isSelected }?.id
-        if (tabId != null) {
-            readingModeTabs.remove(tabId)
+        val tabId = selectedTabId()
+        val webView = currentWebView()
+        if (tabId == null || webView == null || !readingModeTabs.containsKey(tabId)) {
+            // 状态与界面不同步时也要把返回键 / 光标层恢复正常
+            updateBackPressedEnabled()
+            updateTabMode()
+            return
         }
-        currentWebView()?.evaluateJavascript(READING_JS_EXIT, null)
-        updateBackPressedEnabled()
-        updateTabMode()
+        val dispatched = pullReadingProgress(tabId, webView) { session ->
+            // 拉取是异步的：期间用户可能已经切走标签或又退了一次
+            if (readingModeTabs.remove(tabId) == null) {
+                return@pullReadingProgress
+            }
+            updateBackPressedEnabled()
+            updateTabMode()
+            val target = session.lastUrl.takeIf { it != session.entryUrl }
+            if (target == null) {
+                KeydroidxLog.d(TAG, "阅读模式退出：只读了进入时那一章，原地还原 DOM")
+                webView.evaluateJavascript(READING_JS_EXIT, null)
+                showReadingToast(getString(R.string.keyphone_reading_exit))
+                return@pullReadingProgress
+            }
+            KeydroidxLog.d(TAG, "阅读模式退出：已读 ${session.chapterCount} 章，导航到 $target")
+            pendingTrailReassert = session.trail
+            pendingTrailTargetUrl = target
+            pendingTrailDelayed = session.trail
+            readingTrailExitAt = SystemClock.elapsedRealtime()
+            readingTrailHandler.postDelayed(
+                readingTrailDelayedWrite,
+                READING_TRAIL_REASSERT_DELAY_MS
+            )
+            try {
+                // 走 WebView 原生导航（等价于普通浏览打开这一章）：标签 URL / 历史 / 会话快照
+                // 全部由既有链路接管，不做任何"暗改状态"
+                webView.loadUrl(target)
+            } catch (t: Throwable) {
+                KeydroidxLog.e(TAG, "阅读模式退出导航失败: $target", t)
+                webView.evaluateJavascript(READING_JS_EXIT, null)
+            }
+            showReadingToast(
+                getString(R.string.keyphone_reading_exit_chapters, session.chapterCount)
+            )
+        }
+        if (!dispatched) {
+            // 拉取都没能发出去（WebView 异常）：直接按老路径原地还原，别把用户卡在阅读态
+            readingModeTabs.remove(tabId)
+            updateBackPressedEnabled()
+            updateTabMode()
+            webView.evaluateJavascript(READING_JS_EXIT, null)
+            showReadingToast(getString(R.string.keyphone_reading_exit))
+        }
     }
 
     /**
@@ -753,9 +848,118 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
      */
     private fun clearReadingModeOnNavigation() {
         if (readingModeTabs.isEmpty()) return
-        val tabId = presenter.state.value.tabs.firstOrNull { it.isSelected }?.id ?: return
+        val tabId = selectedTabId() ?: return
         if (readingModeTabs.remove(tabId) != null) {
             updateBackPressedEnabled()
+        }
+    }
+
+    /**
+     * 把 JS 侧已拼好的章节列表拉回 Kotlin（js 桥收不到事件，只能"宿主拉 + 脚本返回值"）。
+     *
+     * 拼页是异步的，脚本返回值即**此刻**的进度；拉到的新章节逐条写进 URL 历史，
+     * 于是"回到主页看历史记录"能看到读过的每一章（第 39~59 章）。
+     * 拉取点：每次翻页按键、退出阅读模式。
+     */
+    private fun pullReadingProgress(
+        tabId: Int,
+        webView: WebView,
+        script: String = READING_JS_PROGRESS,
+        onSynced: ((ReadingSession) -> Unit)? = null
+    ): Boolean {
+        if (!readingModeTabs.containsKey(tabId)) {
+            return false
+        }
+        return try {
+            webView.evaluateJavascript(script) { rawResult ->
+                val session = readingModeTabs[tabId] ?: return@evaluateJavascript
+                val pages = parseReadingProgress(decodeJsString(rawResult))
+                if (pages.isNotEmpty()) {
+                    session.trail = pages
+                }
+                for (page in pages) {
+                    session.lastUrl = page.url
+                    session.lastTitle = page.title
+                    if (session.recorded.add(page.url)) {
+                        KeydroidxLog.d(TAG, "阅读模式章节入库: ${page.title} <- ${page.url}")
+                        lifecycleScope.launch {
+                            historyRepository.visitHistoryEntry(
+                                page.url,
+                                page.title.ifBlank { page.url }
+                            )
+                        }
+                    }
+                }
+                if (pages.size > session.chapterCount) {
+                    session.chapterCount = pages.size
+                }
+                onSynced?.invoke(session)
+            }
+            true
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "阅读模式进展同步失败 tabId=$tabId", t)
+            false
+        }
+    }
+
+    /** 延时兜底那一遍（新章节页面还没结束、或站点很晚才设标题时用）。 */
+    private var pendingTrailDelayed: List<ReadingPage>? = null
+
+    private val readingTrailDelayedWrite = Runnable {
+        val trail = pendingTrailDelayed
+        pendingTrailDelayed = null
+        if (trail != null) {
+            writeTrailHistory(trail, "延时兜底")
+        }
+    }
+
+    /**
+     * 按阅读顺序把章节轨迹写进 URL 历史。
+     *
+     * 同一条协程里顺序执行，写入时间戳随阅读顺序递增，主页历史列表的顺序
+     * （最后读到的章节在最上）不会被补写打乱。
+     */
+    private fun writeTrailHistory(trail: List<ReadingPage>, reason: String) {
+        if (trail.isEmpty()) return
+        KeydroidxLog.d(TAG, "阅读模式补写历史（$reason）: ${trail.size} 章")
+        lifecycleScope.launch {
+            for (page in trail) {
+                historyRepository.visitHistoryEntry(page.url, page.title.ifBlank { page.url })
+            }
+        }
+    }
+
+    /**
+     * 退出阅读模式后的主补写：目标章节这一页已结束（进度 100）且确实停在那一章时，
+     * 把整条轨迹覆盖一遍（原因见 [pendingTrailReassert]）。
+     */
+    private fun reassertTrailHistory() {
+        val trail = pendingTrailReassert ?: return
+        val target = pendingTrailTargetUrl ?: return
+        val webView = currentWebView() ?: return
+        if (webView.url != target || webView.progress != 100) return
+        // 刚发起导航的那一瞬，WebView 可能已报出新 URL 而进度还是上一页的 100，
+        // 用最小间隔把这个窗口兜开，保证补写在浏览内核的错配写入之后
+        if (SystemClock.elapsedRealtime() - readingTrailExitAt < READING_TRAIL_MIN_GAP_MS) return
+        pendingTrailReassert = null
+        pendingTrailTargetUrl = null
+        writeTrailHistory(trail, "页面结束")
+    }
+
+    /**
+     * 解析脚本回传的进展文本：每行一章，`章节URL \t 章节标题`（标题可缺省）。
+     * 非 http 行直接丢弃（未进入阅读态时脚本会返回 "null" 这类字面量）。
+     */
+    private fun parseReadingProgress(text: String): List<ReadingPage> {
+        if (text.isBlank()) return emptyList()
+        return text.split('\n').mapNotNull { line ->
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) return@mapNotNull null
+            val sep = trimmed.indexOf('\t')
+            val url = if (sep < 0) trimmed else trimmed.substring(0, sep)
+            if (!url.startsWith("http")) return@mapNotNull null
+            val title = if (sep < 0) "" else trimmed.substring(sep + 1).trim()
+            ReadingPage(url, title)
         }
     }
 
@@ -873,6 +1077,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 KeydroidxLog.w(TAG, "阅读模式翻页跳过：WebView 不可用 keyCode=$keyCode")
                 return true
             }
+            val tabId = selectedTabId()
             try {
                 val step = (webView.height * READING_SCROLL_STEP_RATIO).toInt().coerceAtLeast(1)
                 val scrollUp = isUpKey || digit == 2
@@ -885,10 +1090,21 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     "阅读模式翻页 keyCode=$keyCode up=$scrollUp from=$fromY to=${webView.scrollY}" +
                         " step=$step content=$contentPx viewport=${webView.height} remain=$remaining"
                 )
-                // 方向键滚动（WebView.scrollBy）不派发页面 scroll 事件：接近页尾时主动催 JS 拼接，
-                // 否则会"翻到章尾后再也翻不动"。JS 侧有 loading / ended / 冷却守卫，重复调用无害。
-                if (!scrollUp && remaining <= (webView.height * READING_PRE_READ_RATIO).toInt()) {
-                    webView.evaluateJavascript(READING_JS_APPEND, null)
+                if (tabId != null) {
+                    // 方向键滚动（WebView.scrollBy）不派发页面 scroll 事件：接近页尾时主动催 JS 拼接，
+                    // 否则会"翻到章尾后再也翻不动"。JS 侧有 loading / ended / 冷却守卫，重复调用无害。
+                    // 同一批脚本顺手把拼页进展拉回来（拼接是异步的，本次拿到的是上一键的进度，
+                    // 最后一次按键 / 退出时补齐），历史记录与退出落点都依赖它。
+                    val nearTail = remaining <= (webView.height * READING_PRE_READ_RATIO).toInt()
+                    when {
+                        !scrollUp && nearTail ->
+                            pullReadingProgress(tabId, webView, READING_JS_APPEND_PROGRESS)
+
+                        event.repeatCount == 0 ->
+                            pullReadingProgress(tabId, webView, READING_JS_PROGRESS)
+
+                        else -> Unit
+                    }
                 }
             } catch (t: Throwable) {
                 KeydroidxLog.e(TAG, "阅读模式翻页失败 keyCode=$keyCode", t)
@@ -2099,6 +2315,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         lifecycleScope.launch {
             presenter.state.collectLatest { state ->
                 addressText = state.displayUrl
+                // 退出阅读模式后的历史补写：等新章节页面加载完成（标题 / URL 都已上报）再覆盖
+                if (state.progress == 100) {
+                    reassertTrailHistory()
+                }
                 if (state.tabs.isEmpty()) {
                     isHomeSelected = true
                 }
@@ -3548,14 +3768,27 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         /** 阅读模式：退出脚本（等价 window.__keyphone_rm__.exit()） */
         private const val READING_JS_EXIT = "window.__keyphone_rm__ && window.__keyphone_rm__.exit();"
 
-        /** 阅读模式：主动催拼接（方向键滚动不派发页面 scroll 事件，需宿主推一下） */
-        private const val READING_JS_APPEND = "window.__keyphone_rm__ && window.__keyphone_rm__.append();"
+        /** 阅读模式：主动催拼接 + 顺手回传拼页进展（见 [pullReadingProgress]） */
+        private const val READING_JS_APPEND_PROGRESS =
+            "(function(){var r=window.__keyphone_rm__;if(r&&r.append)r.append();" +
+                "return r&&r.progress?r.progress():'';})()"
+
+        /** 阅读模式：只回传拼页进展（不改动页面） */
+        private const val READING_JS_PROGRESS =
+            "(function(){var r=window.__keyphone_rm__;" +
+                "return r&&r.progress?r.progress():'';})()"
 
         /** 阅读模式：按键 7 轮换背景主题（脚本返回新序号，字号脚本按 Δ 现拼） */
         private const val READING_JS_THEME = "window.__keyphone_rm__ && window.__keyphone_rm__.theme();"
 
         /** 阅读模式：距页尾小于「视口高度 × 该系数」时主动催拼接（与 JS 侧预读窗口对齐） */
         private const val READING_PRE_READ_RATIO = 1.4f
+
+        /** 阅读模式：退出后补写历史的最小间隔（避开导航刚开始那一瞬的 URL / 进度错位） */
+        private const val READING_TRAIL_MIN_GAP_MS = 1000L
+
+        /** 阅读模式：退出后补写历史的延时兜底时间点 */
+        private const val READING_TRAIL_REASSERT_DELAY_MS = 3000L
 
         /** 阅读模式：方向键单次翻页步长（占 WebView 可见高度比例） */
         private const val READING_SCROLL_STEP_RATIO = 0.85f

@@ -144,6 +144,8 @@
     <!-- 阅读模式（按键 * 菜单 6）：正文提纯 + 下一页自动拼页 -->
     <string name="keyphone_reading_enter">已进入阅读模式\n1/3 字号 · 7 背景 · 2/8 翻页</string>
     <string name="keyphone_reading_exit">已退出阅读模式</string>
+    <!-- 读到多章后退出：按普通浏览导航到最后读到的那一章 -->
+    <string name="keyphone_reading_exit_chapters">已退出阅读模式（共 %1$d 章）</string>
     <string name="keyphone_reading_appended">已拼接第 %1$d 页</string>
     <string name="keyphone_reading_end">已到最后一页</string>
     <string name="keyphone_reading_no_content">未识别到正文内容</string>
