@@ -30,7 +30,8 @@
     <string name="keyphone_qm_copy_link">3.复制链接</string>
     <string name="keyphone_qm_share">4.分享页面</string>
     <string name="keyphone_qm_find">5.页内查找</string>
-    <string name="keyphone_qm_tabs">6.标签页列表</string>
+    <string name="keyphone_qm_reading">6.阅读模式</string>
+    <string name="keyphone_qm_exit_reading">6.退出阅读</string>
     <string name="keyphone_qm_clear_tabs">7.清空标签页</string>
     <string name="keyphone_qm_new_tab">0.新建窗口</string>
     <string name="keyphone_qm_close_tab">*.关闭窗口</string>
@@ -139,6 +140,16 @@
     <string name="keyphone_fullscreen_off">已退出全屏</string>
     <string name="keyphone_scroll_top">已回到页首</string>
     <string name="keyphone_scroll_bottom">已滚动至页尾</string>
+
+    <!-- 阅读模式（按键 * 菜单 6）：正文提纯 + 下一页自动拼页 -->
+    <string name="keyphone_reading_enter">已进入阅读模式</string>
+    <string name="keyphone_reading_exit">已退出阅读模式</string>
+    <string name="keyphone_reading_appended">已拼接第 %1$d 页</string>
+    <string name="keyphone_reading_end">已到最后一页</string>
+    <string name="keyphone_reading_no_content">未识别到正文内容</string>
+    <string name="keyphone_reading_failed">进入阅读模式失败</string>
+    <string name="keyphone_reading_page_failed">下一页加载失败</string>
+    <string name="keyphone_reading_loading">页面加载中，请稍后再试</string>
 
     <!-- 按键机浏览页（顶栏=地址栏，底栏=菜单栏；地址为空时的兜底标题） -->
     <string name="keyphone_browser_title">浏览器</string>

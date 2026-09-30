@@ -17,6 +17,7 @@ import acr.browser.lightning.database.HistoryEntry
 import acr.browser.lightning.database.bookmark.BookmarkRepository
 import acr.browser.lightning.database.history.HistoryRepository
 import acr.browser.lightning.di.injector
+import acr.browser.lightning.js.KeyphoneReadingMode
 import acr.browser.lightning.preference.UserPreferencesDataStore
 import acr.browser.lightning.search.SearchEngineProvider
 import acr.browser.lightning.utils.isSpecialUrl
@@ -68,6 +69,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.util.WeakHashMap
 import javax.inject.Inject
 
 /**
@@ -104,6 +106,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     @Inject
     internal lateinit var searchEngineProvider: SearchEngineProvider
+
+    @Inject
+    internal lateinit var keyphoneReadingMode: KeyphoneReadingMode
 
     /** 顶部标签栏 */
     private var tabBarScroll: HorizontalScrollView? = null
@@ -207,6 +212,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         override fun handleOnBackPressed() {
             if (activeMenuType != QuickMenuType.NONE) {
                 hideQuickMenu()
+                return
+            }
+            if (isReadingMode()) {
+                exitReadingMode()
                 return
             }
             if (isFindMode) {
@@ -548,6 +557,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (isFreeCopyMode) {
             exitFreeCopyMode()
         }
+        clearReadingModeOnNavigation()
         lifecycleScope.launch {
             try {
                 val normalizedUrl = KeyphoneUrls.normalize(url, searchEngineProvider)
@@ -571,6 +581,209 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     // endregion
 
+    // region 阅读模式（按键 * 菜单 6：正文提纯 + 下一页自动拼页）
+
+    /** 已进入阅读模式的标签页：tabId(Int) -> 进入时的 URL（页面导航后自动失配清理） */
+    private val readingModeTabs = HashMap<Int, String>()
+
+    /** 已挂载阅读模式 JS 桥的 WebView（WebView 池化复用，同一实例只挂一次） */
+    private val readingBridgeHosts = WeakHashMap<WebView, Boolean>()
+
+    /** 当前标签页是否处于阅读模式 */
+    private fun isReadingMode(): Boolean {
+        val tab = presenter.state.value.tabs.firstOrNull { it.isSelected } ?: return false
+        return readingModeTabs.containsKey(tab.id)
+    }
+
+    /** 统一计算返回键回调开关：任一模式 / 菜单激活时都要先由 Activity 消费返回键 */
+    private fun updateBackPressedEnabled() {
+        backPressedCallback.isEnabled = activeMenuType != QuickMenuType.NONE ||
+            isFindMode ||
+            isFreeCopyMode ||
+            isBookmarkEditMode ||
+            isReadingMode()
+    }
+
+    /** 按键 * 菜单 6：进入 / 退出阅读模式 */
+    private fun toggleReadingMode() {
+        if (isReadingMode()) {
+            exitReadingMode()
+        } else {
+            enterReadingMode()
+        }
+    }
+
+    /** 进入阅读模式：注入脚本，脚本内用当前渲染后的 DOM 提取正文并原地重排 */
+    private fun enterReadingMode() {
+        val tab = presenter.state.value.tabs.firstOrNull { it.isSelected }
+        val webView = currentWebView()
+        if (isHomeSelected || tab == null || webView == null) {
+            Toast.makeText(this, R.string.keyphone_need_page, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val url = webView.url.orEmpty()
+        if (url.isBlank() || url.isSpecialUrl()) {
+            Toast.makeText(this, R.string.keyphone_need_page, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (webView.progress < 100) {
+            Toast.makeText(this, R.string.keyphone_reading_loading, Toast.LENGTH_SHORT).show()
+            return
+        }
+        installReadingBridge(webView)
+        webView.evaluateJavascript(keyphoneReadingMode.provideJs()) { rawResult ->
+            val result = decodeJsString(rawResult)
+            when (result) {
+                "ok" -> {
+                    readingModeTabs[tab.id] = url
+                    updateBackPressedEnabled()
+                    // 阅读模式下隐藏鼠标光标层（方向键已改为整屏翻页）
+                    updateMouseCursorVisibility()
+                    Toast.makeText(this, R.string.keyphone_reading_enter, Toast.LENGTH_SHORT).show()
+                }
+                "empty" -> Toast.makeText(this, R.string.keyphone_reading_no_content, Toast.LENGTH_SHORT).show()
+                else -> {
+                    KeydroidxLog.w(TAG, "进入阅读模式失败: result=$result url=$url")
+                    Toast.makeText(this, R.string.keyphone_reading_failed, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    /** 退出阅读模式：JS 侧用进入前的 DOM 备份原地恢复（无刷新、无网络请求） */
+    private fun exitReadingMode() {
+        val tabId = presenter.state.value.tabs.firstOrNull { it.isSelected }?.id
+        if (tabId != null) {
+            readingModeTabs.remove(tabId)
+        }
+        currentWebView()?.evaluateJavascript(READING_JS_EXIT, null)
+        updateBackPressedEnabled()
+        updateTabMode()
+    }
+
+    /**
+     * 页面即将被导航 / 刷新替换：只清 Kotlin 侧阅读状态。
+     * 新页面 DOM 会覆盖旧内容，JS 侧备份随之失效，不能再调用 exit()。
+     */
+    private fun clearReadingModeOnNavigation() {
+        if (readingModeTabs.isEmpty()) return
+        val tabId = presenter.state.value.tabs.firstOrNull { it.isSelected }?.id ?: return
+        if (readingModeTabs.remove(tabId) != null) {
+            updateBackPressedEnabled()
+        }
+    }
+
+    /** 挂载阅读模式 JS 桥（仅暴露 onEvent 一个方法，避免扩大 JS 可调用面） */
+    private fun installReadingBridge(webView: WebView) {
+        if (readingBridgeHosts.containsKey(webView)) return
+        try {
+            webView.addJavascriptInterface(KeyphoneReadingBridge(this), READING_BRIDGE_NAME)
+            readingBridgeHosts[webView] = true
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "挂载阅读模式 JS 桥失败", t)
+        }
+    }
+
+    /** 阅读模式 JS 事件回调（已在主线程） */
+    internal fun onReadingBridgeEvent(type: String, payload: String) {
+        when (type) {
+            "enter" -> KeydroidxLog.d(TAG, "阅读模式已进入，正文 ${payload} 字")
+            "append" -> {
+                val page = payload.toIntOrNull() ?: 0
+                KeydroidxLog.d(TAG, "阅读模式已拼接第 $page 页")
+                Toast.makeText(this, getString(R.string.keyphone_reading_appended, page), Toast.LENGTH_SHORT)
+                    .show()
+            }
+            "end" -> {
+                KeydroidxLog.d(TAG, "阅读模式已到最后一页")
+                Toast.makeText(this, R.string.keyphone_reading_end, Toast.LENGTH_SHORT).show()
+            }
+            "fail" -> {
+                KeydroidxLog.w(TAG, "阅读模式下一页加载失败: $payload")
+                Toast.makeText(this, R.string.keyphone_reading_page_failed, Toast.LENGTH_SHORT).show()
+            }
+            "link" -> {
+                // 阅读模式不参与跳转：正文里的残留链接（书名 / 作者 / 目录）被点击时
+                // 既不退出阅读态也不导航，避免误点后方向键回落到鼠标模式而"完全没反应"
+                KeydroidxLog.d(TAG, "阅读模式忽略正文链接点击: $payload")
+            }
+            "exit" -> {
+                KeydroidxLog.d(TAG, "阅读模式已退出")
+                Toast.makeText(this, R.string.keyphone_reading_exit, Toast.LENGTH_SHORT).show()
+            }
+            else -> KeydroidxLog.w(TAG, "未知的阅读模式事件: $type")
+        }
+    }
+
+    /** evaluateJavascript 回调返回的是 JSON 字符串字面量（如 "\"ok\""），解成原始文本 */
+    private fun decodeJsString(raw: String?): String {
+        return try {
+            JSONTokener(raw ?: "").nextValue() as? String ?: raw.orEmpty()
+        } catch (t: Throwable) {
+            KeydroidxLog.w(TAG, "阅读模式 JS 返回值解析失败: $raw")
+            raw.orEmpty()
+        }
+    }
+
+    /**
+     * 阅读模式按键路由：上/下方向键整屏翻页（长按连翻），左右方向键、数字键与确认键直接消费
+     * （阅读模式下光标层已隐藏，热区跳转与"所见即点"无意义）。
+     *
+     * 消费 DOWN 必须消费同键 UP/REPEAT，因此这里不写 [lastConsumedDownKeyCode]（与标定模式同做法）。
+     * 返回 false 的按键继续走既有分发链，保证 `*` / `#` 菜单、左右软键与返回键不受影响。
+     */
+    private fun handleReadingModeKeys(event: KeyEvent): Boolean {
+        val keyCode = event.keyCode
+        val isUpKey = keyCode == KeyEvent.KEYCODE_DPAD_UP
+        val isDownKey = keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+        val isHorizontalKey = keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+        val isConfirmKey = keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+            keyCode == KeyEvent.KEYCODE_ENTER ||
+            keyCode == KeyEvent.KEYCODE_NUMPAD_5 ||
+            keyCode == KeyEvent.KEYCODE_BUTTON_A
+        val digit = keyDigitOf(keyCode)
+        // 数字键 2 / 8 也可翻页：阅读模式没有光标，2 上翻、8 下翻比方向键更顺手
+        val isDigitScroll = digit == 2 || digit == 8
+        val isScrollKey = isUpKey || isDownKey || isDigitScroll
+        if (!isScrollKey && !isHorizontalKey && !isConfirmKey && digit !in 1..9) {
+            return false
+        }
+        // 同键 UP/REPEAT 一律消费，避免穿透到 WebView 触发光标触摸或页面默认行为
+        if (event.action != KeyEvent.ACTION_DOWN) {
+            return true
+        }
+        if (isScrollKey) {
+            val webView = currentWebView()
+            if (webView == null) {
+                KeydroidxLog.w(TAG, "阅读模式翻页跳过：WebView 不可用 keyCode=$keyCode")
+                return true
+            }
+            try {
+                val step = (webView.height * READING_SCROLL_STEP_RATIO).toInt().coerceAtLeast(1)
+                val scrollUp = isUpKey || digit == 2
+                val fromY = webView.scrollY
+                webView.scrollBy(0, if (scrollUp) -step else step)
+                val contentPx = (webView.contentHeight * webView.scale).toInt()
+                val remaining = contentPx - webView.scrollY - webView.height
+                KeydroidxLog.d(
+                    TAG,
+                    "阅读模式翻页 keyCode=$keyCode up=$scrollUp from=$fromY to=${webView.scrollY}" +
+                        " step=$step content=$contentPx viewport=${webView.height} remain=$remaining"
+                )
+                // 方向键滚动（WebView.scrollBy）不派发页面 scroll 事件：接近页尾时主动催 JS 拼接，
+                // 否则会"翻到章尾后再也翻不动"。JS 侧有 loading / ended / 冷却守卫，重复调用无害。
+                if (!scrollUp && remaining <= (webView.height * READING_PRE_READ_RATIO).toInt()) {
+                    webView.evaluateJavascript(READING_JS_APPEND, null)
+                }
+            } catch (t: Throwable) {
+                KeydroidxLog.e(TAG, "阅读模式翻页失败 keyCode=$keyCode", t)
+            }
+        }
+        return true
+    }
+
+    // endregion
+
     // region 快捷菜单（1 键页面菜单与 # 键全局菜单）
 
     private var cachedMenuItems: List<KeyphoneViews.QuickMenuItem> = emptyList()
@@ -583,7 +796,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             KeyphoneViews.QuickMenuItem("3", getString(R.string.keyphone_qm_copy_link)) { copyCurrentPageLink() },
             KeyphoneViews.QuickMenuItem("4", getString(R.string.keyphone_qm_share)) { shareCurrentPage() },
             KeyphoneViews.QuickMenuItem("5", getString(R.string.keyphone_qm_find)) { findInCurrentPage() },
-            KeyphoneViews.QuickMenuItem("6", getString(R.string.keyphone_qm_tabs)) { showTabsPage() },
+            KeyphoneViews.QuickMenuItem(
+                "6",
+                getString(if (isReadingMode()) R.string.keyphone_qm_exit_reading else R.string.keyphone_qm_reading)
+            ) { toggleReadingMode() },
             KeyphoneViews.QuickMenuItem("7", getString(R.string.keyphone_qm_clear_tabs)) { confirmClearAllTabs() },
             KeyphoneViews.QuickMenuItem("0", getString(R.string.keyphone_qm_new_tab)) { createNewWindow() },
             KeyphoneViews.QuickMenuItem("*", getString(R.string.keyphone_qm_close_tab)) { closeCurrentTabOrExit() }
@@ -856,7 +1072,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (activeMenuType == QuickMenuType.NONE) return
         activeMenuType = QuickMenuType.NONE
         cachedMenuItems = emptyList()
-        backPressedCallback.isEnabled = (isBookmarkEditMode || isFindMode || isFreeCopyMode)
+        updateBackPressedEnabled()
         quickMenuOverlay?.visibility = View.GONE
         if (isHomeSelected) {
             updateHomeSoftKeys()
@@ -918,6 +1134,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (isHomeSelected) {
             loadHomeData()
         } else {
+            clearReadingModeOnNavigation()
             presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
         }
     }
@@ -1008,7 +1225,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private fun exitFindMode() {
         if (!isFindMode) return
         isFindMode = false
-        backPressedCallback.isEnabled = (activeMenuType != QuickMenuType.NONE || isBookmarkEditMode)
+        updateBackPressedEnabled()
 
         findBarContainer?.visibility = View.GONE
         val webView = currentWebView()
@@ -1371,7 +1588,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (!isFreeCopyMode) return
         isFreeCopyMode = false
         isCopySelecting = false
-        backPressedCallback.isEnabled = (activeMenuType != QuickMenuType.NONE || isBookmarkEditMode || isFindMode)
+        updateBackPressedEnabled()
 
         findBarContainer?.visibility = View.GONE
         currentWebView()?.evaluateJavascript(
@@ -1814,7 +2031,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         .distinctUntilChanged()
 
     internal fun closeTab(index: Int) {
+        val closingId = presenter.state.value.tabs.getOrNull(index)?.id
         presenter.onEvent(BrowserUiEvent.TabClose(index))
+        if (closingId != null) {
+            readingModeTabs.remove(closingId)
+        }
         if (presenter.state.value.tabs.isEmpty()) {
             createNewWindow()
         }
@@ -1831,6 +2052,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     internal fun clearAllTabs() {
         val currentId = presenter.state.value.tabs
             .firstOrNull { it.isSelected }?.id ?: 0
+        readingModeTabs.clear()
         presenter.onEvent(
             BrowserUiEvent.CloseBrowser(currentId, BrowserContract.CloseTabEvent.CLOSE_ALL)
         )
@@ -2209,6 +2431,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 }
                 else -> return true
             }
+        }
+
+        // 阅读模式：方向键直接整屏翻页（长按连翻），不再走鼠标光标移动 + 贴边慢速滚动
+        if (!isHomeSelected && isReadingMode() && handleReadingModeKeys(event)) {
+            return true
         }
 
         // 网页态鼠标模式：方向键驱动光标移动（数值与连发节奏照抄 keydroidx-foucs）；
@@ -2602,7 +2829,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             activeMenuType == QuickMenuType.NONE &&
             !isFindMode &&
             !isFreeCopyMode &&
-            !isCalibrateMode
+            !isCalibrateMode &&
+            // 阅读模式：方向键改为整屏翻页，光标层隐藏，避免出现第二个滚动源
+            !isReadingMode()
     }
 
     /** 刷新鼠标光标可见性：仅网页态显示，回主页/弹菜单/进查找复制态时隐藏并停连发 */
@@ -3130,7 +3359,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             KeyphoneOptionsActivity.ACTION_NEW_TAB -> switchToHome()
             KeyphoneOptionsActivity.ACTION_NEW_INCOGNITO_TAB ->
                 menuClick(MenuSelection.NEW_INCOGNITO_TAB)
-            KeyphoneOptionsActivity.ACTION_REFRESH,
+            KeyphoneOptionsActivity.ACTION_REFRESH -> {
+                clearReadingModeOnNavigation()
+                presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
+            }
             KeyphoneOptionsActivity.ACTION_STOP -> presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
             KeyphoneOptionsActivity.ACTION_SHARE -> menuClick(MenuSelection.SHARE)
             KeyphoneOptionsActivity.ACTION_COPY_LINK -> menuClick(MenuSelection.COPY_LINK)
@@ -3187,6 +3419,21 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         private const val GRID_COLUMNS = 3
         private const val MAX_HISTORY_ROWS = 10
         private const val MAX_INPUT_CHARS = 100
+
+        /** 阅读模式：JS 桥名（须与 KeyphoneReadingMode.js 内 BRIDGE_NAME 保持一致） */
+        private const val READING_BRIDGE_NAME = "__keyphoneReadingBridge__"
+
+        /** 阅读模式：退出脚本（等价 window.__keyphone_rm__.exit()） */
+        private const val READING_JS_EXIT = "window.__keyphone_rm__ && window.__keyphone_rm__.exit();"
+
+        /** 阅读模式：主动催拼接（方向键滚动不派发页面 scroll 事件，需宿主推一下） */
+        private const val READING_JS_APPEND = "window.__keyphone_rm__ && window.__keyphone_rm__.append();"
+
+        /** 阅读模式：距页尾小于「视口高度 × 该系数」时主动催拼接（与 JS 侧预读窗口对齐） */
+        private const val READING_PRE_READ_RATIO = 1.4f
+
+        /** 阅读模式：方向键单次翻页步长（占 WebView 可见高度比例） */
+        private const val READING_SCROLL_STEP_RATIO = 0.85f
 
         /** 网页输入劫持探测参数：确认键抬起后 120ms 首探，失败最多重试 3 次（间隔 300ms） */
         private const val WEB_INPUT_PROBE_FIRST_MS = 120L
