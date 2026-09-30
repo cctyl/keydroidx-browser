@@ -808,8 +808,15 @@
 
     /**
      * Keep only the newest KEEP_PAGES pages: the user asked for the oldest stitched
-     * pages to be dropped so the DOM (and therefore memory) stays bounded. The scroll
-     * position is compensated by the removed height so the viewport does not jump.
+     * pages to be dropped so the DOM (and therefore memory) stays bounded.
+     *
+     * The scroll position is compensated the same RELATIVE way as restyle(): the first
+     * visible child is measured, the page is dropped, and only the drift it actually
+     * moved by is scrolled back. The removed height must NOT be used as the correction:
+     * dropping content above the viewport already makes the WebView's scroll anchoring
+     * move the scroll offset up by that height, so subtracting it again scrolls the
+     * reader two chapters backwards (measured on the device: a 24k px jump back while
+     * the user was scrolling forward with no key other than "page down").
      */
     function trimPages() {
         var viewport = window.innerHeight || 480;
@@ -829,21 +836,25 @@
             if (docTop + pageSize > scrollY - viewport * 2) {
                 break;
             }
+
+            var anchor = topVisibleChild();
+            var anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
+
             pages.shift();
-            var beforeHeight = root ? root.offsetHeight : 0;
             var sep = oldest.previousElementSibling;
             removeNode(oldest);
             if (sep && sep.hasAttribute && sep.hasAttribute(SEP_ATTR)) {
                 removeNode(sep);
             }
-            var afterHeight = root ? root.offsetHeight : 0;
-            var removed = beforeHeight - afterHeight;
-            var nowY = window.pageYOffset || document.documentElement.scrollTop || 0;
-            if (removed > 0 && nowY > docTop) {
-                try {
-                    window.scrollTo(0, Math.max(0, nowY - removed));
-                } catch (e) {
-                    // scroll compensation failed - viewport may shift slightly
+
+            if (anchor && anchor.parentNode) {
+                var delta = anchor.getBoundingClientRect().top - anchorTop;
+                if (delta) {
+                    try {
+                        window.scrollBy(0, delta);
+                    } catch (e) {
+                        // scroll compensation failed - viewport may shift slightly
+                    }
                 }
             }
         }
