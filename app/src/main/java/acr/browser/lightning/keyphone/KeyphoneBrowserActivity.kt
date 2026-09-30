@@ -69,6 +69,9 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.WeakHashMap
 import javax.inject.Inject
 
@@ -349,12 +352,16 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         super.onResume()
         KeyphoneUrlGuard.attach(guardHost)
         presenter.onViewShown()
+        // 回前台立刻校时（后台期间可能已跨分钟），再对齐下一次整分刷新
+        refreshBottomClock()
+        scheduleBottomClock()
         if (isHomeSelected) {
             loadHomeData()
         }
     }
 
     override fun onPause() {
+        bottomClockHandler.removeCallbacks(bottomClockTick)
         KeyphoneUrlGuard.detach(guardHost)
         super.onPause()
         selectLongPressJob?.cancel()
@@ -2173,6 +2180,66 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
     }
 
+    // region 底部软键栏时间（中键空位）
+
+    private val bottomClockFormat = SimpleDateFormat(BOTTOM_CLOCK_PATTERN, Locale.getDefault())
+
+    /** 当前时间的文本；由 [refreshBottomClock] 维护，中键空位时显示 */
+    private var bottomClockText: String = bottomClockFormat.format(Date())
+
+    /** 最近一次软键内容：中键的「真实文案」与时间是互斥关系，必须分别记住 */
+    private var lastSoftLeft: CharSequence? = null
+    private var lastSoftCenter: CharSequence? = null
+    private var lastSoftRight: CharSequence? = null
+
+    private val bottomClockHandler = Handler(Looper.getMainLooper())
+    private val bottomClockTick = object : Runnable {
+        override fun run() {
+            refreshBottomClock()
+            scheduleBottomClock()
+        }
+    }
+
+    /**
+     * 软键栏中键在正常态是空位（左键「菜单 / 选项」、右键「返回 / 退出」），这里把空位用来显示
+     * **24 小时制**时间 `HH:mm`：软键栏三栏等宽，中键正好在屏幕正中。
+     *
+     * 中键出现真实文案时（页内查找「下一个」、自由复制「复制」、书签编辑「删除」）文案优先，
+     * 时间临时让位；文案清空后由下一次整分刷新自动补回（见 [refreshBottomClock]）。
+     * 走 [KeydroidxBaseActivity.setSoftKeys] 而非直接设 TextView，是为了复用 SDK 的中键
+     * 自适应字号逻辑（窄屏下自动缩小，不出现省略号）。
+     */
+    override fun setSoftKeys(left: CharSequence?, center: CharSequence?, right: CharSequence?) {
+        lastSoftLeft = left
+        lastSoftCenter = center
+        lastSoftRight = right
+        super.setSoftKeys(left, center ?: bottomClockText, right)
+    }
+
+    /** 刷新中键时间（只在文本真的变化时重设，避免无谓重排） */
+    private fun refreshBottomClock() {
+        val text = bottomClockFormat.format(Date())
+        if (text == bottomClockText) {
+            return
+        }
+        bottomClockText = text
+        if (lastSoftCenter == null) {
+            super.setSoftKeys(lastSoftLeft, text, lastSoftRight)
+        }
+    }
+
+    /** 分钟粒度，无需每秒唤醒：对齐到下一个整分再刷新 */
+    private fun scheduleBottomClock() {
+        bottomClockHandler.removeCallbacks(bottomClockTick)
+        val now = System.currentTimeMillis()
+        bottomClockHandler.postDelayed(
+            bottomClockTick,
+            BOTTOM_CLOCK_INTERVAL_MS - now % BOTTOM_CLOCK_INTERVAL_MS + BOTTOM_CLOCK_SLACK_MS
+        )
+    }
+
+    // endregion
+
     private fun deleteBookmark(bookmark: Bookmark.Entry) {
         lifecycleScope.launch {
             try {
@@ -3761,6 +3828,13 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         private const val GRID_COLUMNS = 3
         private const val MAX_HISTORY_ROWS = 10
         private const val MAX_INPUT_CHARS = 100
+
+        /** 底部软键栏中键时间：24 小时制，分钟粒度（对齐整分刷新） */
+        private const val BOTTOM_CLOCK_PATTERN = "HH:mm"
+        private const val BOTTOM_CLOCK_INTERVAL_MS = 60_000L
+
+        /** 整分定时的小余量，避免恰好卡在边界上被系统判为提前唤醒 */
+        private const val BOTTOM_CLOCK_SLACK_MS = 200L
 
         /** 阅读模式：JS 桥名（须与 KeyphoneReadingMode.js 内 BRIDGE_NAME 保持一致） */
         private const val READING_BRIDGE_NAME = "__keyphoneReadingBridge__"
