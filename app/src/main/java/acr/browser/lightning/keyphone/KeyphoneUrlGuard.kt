@@ -215,26 +215,41 @@ object KeyphoneUrlGuard {
         }
     }
 
+    /**
+     * 纯读判定：该跳转是否违反站内拦截（无线程副作用，可从 IO 线程调用）。
+     * 只对「普通网页 → 普通网页」的跳转做站内比对：
+     * 内部页（file:// 书签/历史/首页页、about: 哨兵）不参与，避免误伤应用内导航。
+     */
+    fun isJumpGuardViolation(
+        context: android.content.Context,
+        sourceUrl: String?,
+        targetUrl: String
+    ): Boolean {
+        if (!isActive()) {
+            return false
+        }
+        if (!URLUtil.isNetworkUrl(sourceUrl) || !URLUtil.isNetworkUrl(targetUrl)) {
+            return false
+        }
+        val sourceDomain = KeyphoneGuardStore.baseDomain(sourceUrl) ?: return false
+        val targetDomain = KeyphoneGuardStore.baseDomain(targetUrl) ?: return false
+        if (sourceDomain == targetDomain) {
+            return false
+        }
+        return KeyphoneGuardStore.isJumpEnabled(context, sourceDomain)
+    }
+
     private fun evaluateJumpGuard(
         context: android.content.Context,
         sourceUrl: String?,
         targetUrl: String
     ): Verdict {
-        // 只对「普通网页 → 普通网页」的跳转做站内比对：
-        // 内部页（file:// 书签/历史/首页页、about: 哨兵）不参与，避免误伤应用内导航
-        if (!URLUtil.isNetworkUrl(sourceUrl) || !URLUtil.isNetworkUrl(targetUrl)) {
+        if (!isJumpGuardViolation(context, sourceUrl, targetUrl)) {
             return Verdict(Decision.PROCEED)
         }
-        val sourceDomain = KeyphoneGuardStore.baseDomain(sourceUrl) ?: return Verdict(Decision.PROCEED)
-        val targetDomain = KeyphoneGuardStore.baseDomain(targetUrl) ?: return Verdict(Decision.PROCEED)
-        if (sourceDomain == targetDomain) {
-            return Verdict(Decision.PROCEED)
-        }
-        if (!KeyphoneGuardStore.isJumpEnabled(context, sourceDomain)) {
-            return Verdict(Decision.PROCEED)
-        }
-        val hits = KeyphoneGuardStore.bumpJumpHits(context, sourceDomain)
-        notify("已拦截站外跳转：$targetDomain（累计 $hits 次）")
+        val sourceDomain = KeyphoneGuardStore.baseDomain(sourceUrl)
+        val hits = KeyphoneGuardStore.bumpJumpHits(context, sourceDomain.orEmpty())
+        notify("已拦截站外跳转：${KeyphoneGuardStore.baseDomain(targetUrl)}（累计 $hits 次）")
         return Verdict(Decision.BLOCK)
     }
 

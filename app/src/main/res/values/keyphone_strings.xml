@@ -80,6 +80,8 @@
     <string name="keyphone_guard_section_scheme">协议跳转规则</string>
     <string name="keyphone_guard_section_jump">站内跳转拦截（按域名）</string>
     <string name="keyphone_guard_section_download">下载站点规则</string>
+    <string name="keyphone_guard_section_redirector">跳转中转黑名单（自动学习）</string>
+    <string name="keyphone_guard_empty_redirector">点击广告被拦后，导致跳转的中转路径会自动记录到这里</string>
     <string name="keyphone_guard_empty_scheme">暂无规则 · 拦截或审批外部协议时自动记录</string>
     <string name="keyphone_guard_empty_jump">浏览网页时按 # → 4.跳转拦截 可为当前域名开启</string>
     <string name="keyphone_guard_empty_download">暂无规则</string>

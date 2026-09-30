@@ -29,7 +29,7 @@ import io.github.cctyl.nokia.keycore.ui.KeydroidxBaseActivity
  */
 class KeyphoneGuardListActivity : KeydroidxBaseActivity() {
 
-    private enum class Kind { SCHEME, JUMP, DOWNLOAD }
+    private enum class Kind { SCHEME, JUMP, DOWNLOAD, REDIRECTOR }
 
     private data class RowKey(
         val kind: Kind,
@@ -136,6 +136,25 @@ class KeyphoneGuardListActivity : KeydroidxBaseActivity() {
             }
         }
 
+        // —— 跳转中转黑名单（自动学习） ——
+        container.addView(KeyphoneViews.divider(this))
+        container.addView(
+            KeyphoneViews.sectionLabel(this, getString(R.string.keyphone_guard_section_redirector))
+        )
+        val redirectorRules = KeyphoneGuardStore.redirectorRules(this)
+        if (redirectorRules.isEmpty()) {
+            container.addView(hintRow(getString(R.string.keyphone_guard_empty_redirector)))
+        } else {
+            redirectorRules.forEach { rule ->
+                addRow(
+                    title = rule.display,
+                    subtitle = getString(R.string.keyphone_guard_hits, rule.hits),
+                    iconCode = KeydroidxIcons.ICON_LOCK,
+                    rowKey = RowKey(Kind.REDIRECTOR, rule.key)
+                )
+            }
+        }
+
         val helper = KeydroidxListFocusHelper(scroll ?: return)
         helper.setItems(focusables)
         if (focusables.isNotEmpty()) {
@@ -189,6 +208,25 @@ class KeyphoneGuardListActivity : KeydroidxBaseActivity() {
                 )
                     .setPositiveButton(getString(R.string.keyphone_soft_confirm)) {
                         KeyphoneGuardStore.removeDownloadRule(this, domain)
+                        rebuild()
+                    }
+                    .setNegativeButton(getString(R.string.keyphone_soft_cancel), null)
+                    .show()
+            }
+
+            Kind.REDIRECTOR -> {
+                KeydroidxConfirmDialog(
+                    this,
+                    getString(R.string.keyphone_guard_delete_rule_title),
+                    getString(R.string.keyphone_guard_delete_rule_message)
+                )
+                    .setPositiveButton(getString(R.string.keyphone_soft_confirm)) {
+                        KeyphoneGuardStore.removeRedirector(this, key.key)
+                        Toast.makeText(
+                            this,
+                            R.string.keyphone_guard_rule_deleted,
+                            Toast.LENGTH_SHORT
+                        ).show()
                         rebuild()
                     }
                     .setNegativeButton(getString(R.string.keyphone_soft_cancel), null)
@@ -256,6 +294,7 @@ class KeyphoneGuardListActivity : KeydroidxBaseActivity() {
                     KeyphoneGuardStore.clearSchemeRules(this)
                     KeyphoneGuardStore.clearJumpRules(this)
                     KeyphoneGuardStore.clearDownloadRules(this)
+                    KeyphoneGuardStore.clearRedirectors(this)
                     lastFocusIndex = 0
                     rebuild()
                     Toast.makeText(this, R.string.keyphone_guard_cleared, Toast.LENGTH_SHORT).show()

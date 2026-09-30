@@ -222,6 +222,74 @@ object KeyphoneGuardStore {
     }
 
     // ------------------------------------------------------------------
+    // 跳转中转黑名单（自动学习：导致 302 跳转被拦的中转路径）
+    // ------------------------------------------------------------------
+
+    private const val PREF_REDIRECTOR = "keyphone_guard_redirector"
+
+    /** 中转黑名单键：`host|path`（不含 query——query 里多是一次性的点击令牌）。 */
+    fun redirectorKeyOf(url: String?): String? {
+        val host = hostOf(url) ?: return null
+        val path = try {
+            Uri.parse(url!!.trim()).path.orEmpty()
+        } catch (t: Throwable) {
+            return null
+        }
+        if (path.isBlank()) return null
+        return "$host|$path"
+    }
+
+    /** 请求 URL 是否命中中转黑名单（host 相等——忽略 www 前缀，且 path 前缀匹配）。 */
+    fun isRedirectorBlocked(context: Context, url: String?): Boolean {
+        val key = redirectorKeyOf(url) ?: return false
+        val host = key.substringBefore('|')
+        val path = key.substringAfter('|')
+        val norm = { h: String -> h.removePrefix("www.") }
+        val pref = prefs(context, PREF_REDIRECTOR)
+        for (entryKey in pref.all.keys) {
+            val eHost = entryKey.substringBefore('|')
+            val ePath = entryKey.substringAfter('|', "")
+            // 根路径条目（host|/）等于整站拉黑，一律视为无效数据，不参与匹配
+            if (ePath.length <= 1) {
+                continue
+            }
+            if (norm(eHost) == norm(host) && path.startsWith(ePath)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /** 记录（或 +1）中转路径。 */
+    fun addRedirector(context: Context, url: String) {
+        val key = redirectorKeyOf(url) ?: return
+        val current = decodeRule(prefs(context, PREF_REDIRECTOR).getString(key, null))
+        val hits = (current?.second ?: 0) + 1
+        prefs(context, PREF_REDIRECTOR)
+            .edit()
+            .putString(key, encodeRule(RuleAction.DENY, hits))
+            .apply()
+    }
+
+    /** 中转路径命中次数 +1，返回累计次数。 */
+    fun bumpRedirectorHits(context: Context, url: String): Int {
+        val key = redirectorKeyOf(url) ?: return 0
+        return bump(prefs(context, PREF_REDIRECTOR), key)
+    }
+
+    /** 全部中转黑名单条目。 */
+    fun redirectorRules(context: Context): List<Rule> =
+        rules(context, PREF_REDIRECTOR) { key -> Triple(key, key, key) }
+
+    fun removeRedirector(context: Context, key: String) {
+        prefs(context, PREF_REDIRECTOR).edit().remove(key).apply()
+    }
+
+    fun clearRedirectors(context: Context) {
+        prefs(context, PREF_REDIRECTOR).edit().clear().apply()
+    }
+
+    // ------------------------------------------------------------------
     // 内部：JSON 编解码（`{"a":"allow|deny","c":次数}`）
     // ------------------------------------------------------------------
 

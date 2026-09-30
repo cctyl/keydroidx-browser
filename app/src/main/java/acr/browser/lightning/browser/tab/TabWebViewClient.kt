@@ -5,6 +5,7 @@ import acr.browser.lightning.adblock.AdBlocker
 import acr.browser.lightning.adblock.allowlist.AllowListModel
 import acr.browser.lightning.browser.tab.settings.TabSettings
 import acr.browser.lightning.concurrency.TabCoroutineScope
+import acr.browser.lightning.constant.SCHEME_BLANK
 import acr.browser.lightning.databinding.DialogAuthRequestBinding
 import acr.browser.lightning.databinding.DialogSslWarningBinding
 import acr.browser.lightning.di.FaviconCacheDir
@@ -23,6 +24,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Message
+import android.os.SystemClock
 import android.view.LayoutInflater
 import android.webkit.HttpAuthHandler
 import android.webkit.SslErrorHandler
@@ -140,12 +142,170 @@ class TabWebViewClient @AssistedInject constructor(
     private var zoomScale: Float = 0.0F
     private var urlWithSslError: String? = null
 
+    /** 按键机提交兜底拦截：用户主动导航的一次性放行标记（精确 URL 或任意一次）。 */
+    private var explicitAllowedUrl: String? = null
+    private var allowAnyNextCommit = false
+
+    /** 用户主动导航（地址栏 loadUrl）放行：下一次该 URL 的提交不做站内比对。 */
+    fun allowExplicitNavigation(url: String?) {
+        synchronized(this) {
+            if (url == null) {
+                allowAnyNextCommit = true
+            } else {
+                explicitAllowedUrl = url
+            }
+        }
+    }
+
+    /** 只窥视不消费（shouldInterceptRequest 在 IO 线程调用，消费统一在 onPageStarted）。 */
+    private fun isNavigationPreAllowed(url: String): Boolean =
+        synchronized(this) { allowAnyNextCommit || url == explicitAllowedUrl }
+
+    private fun consumeExplicitAllow(url: String): Boolean {
+        synchronized(this) {
+            if (allowAnyNextCommit || url == explicitAllowedUrl) {
+                explicitAllowedUrl = null
+                allowAnyNextCommit = false
+                return true
+            }
+            return false
+        }
+    }
+
+    /** 最近的主帧请求环形缓冲（时间戳,URL）：用于 302 链的事后溯源。 */
+    private val recentMainFrameRequests = ArrayDeque<Pair<Long, String>>()
+    private val lastRedirectorNotifyAt = HashMap<String, Long>()
+
+    /** 连续回退计数（5s 窗口）：超限熔断回空白页，防重定向环。 */
+    private var bounceCount = 0
+    private var lastBounceAt = 0L
+
+    private fun recordMainFrameRequest(url: String) {
+        synchronized(this) {
+            val now = SystemClock.elapsedRealtime()
+            recentMainFrameRequests.addLast(now to url)
+            while (recentMainFrameRequests.size > 8) {
+                recentMainFrameRequests.removeFirst()
+            }
+        }
+    }
+
+    /** 被拦请求前 2s 内最近的一条主帧请求（即 302 的来源跳板），找不到返回 null。 */
+    private fun recentMainFrameBefore(excludeUrl: String): String? {
+        synchronized(this) {
+            val now = SystemClock.elapsedRealtime()
+            for ((time, url) in recentMainFrameRequests.reversed()) {
+                if (url != excludeUrl && now - time <= 2000L) {
+                    return url
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * 事后溯源：站外跳转被拦时，把导致跳转的中转路径（同域 go.php 之类）记入黑名单，
+     * 下次点击在第一跳请求阶段直接拦截。
+     *
+     * 候选优先级：最近放行的主帧请求 > Referer。
+     * Referer 跨域时会被浏览器降级成 origin（`https://m.biquh.com/`，path 为 "/"），
+     * 一旦收录等于整站拉黑——因此**path 非具体路径（根/空）的候选一律弃用**。
+     *
+     * @param referer 被拦请求的 Referer 头（onPageStarted 阶段没有请求对象，传 null）
+     */
+    private fun captureRedirectorCulprit(
+        view: WebView,
+        referer: String?,
+        requestUrl: String
+    ) {
+        val candidates = listOfNotNull(recentMainFrameBefore(requestUrl), referer)
+        val culprit = candidates.firstOrNull { candidate ->
+            URLUtil.isNetworkUrl(candidate) &&
+                candidate != currentUrl &&
+                hasSpecificPath(candidate) &&
+                KeyphoneGuardStore.baseDomain(candidate) !=
+                KeyphoneGuardStore.baseDomain(requestUrl) &&
+                !KeyphoneGuardStore.isRedirectorBlocked(view.context, candidate)
+        } ?: return
+        KeyphoneGuardStore.addRedirector(view.context, culprit)
+        val key = KeyphoneGuardStore.redirectorKeyOf(culprit) ?: return
+        logger.log(TAG, "Redirector learned: $key")
+        view.post {
+            KeyphoneUrlGuard.notify("已拉黑跳转中转：$key（下次直接拦截）")
+        }
+    }
+
+    /** path 必须是具体路径（非根、非空），否则不允许进入中转黑名单。 */
+    private fun hasSpecificPath(url: String): Boolean {
+        val key = KeyphoneGuardStore.redirectorKeyOf(url) ?: return false
+        return key.substringAfter('|').length > 1
+    }
+
+    /** 中转黑名单命中：计数 + 提示（2s 内同键去重，防止页面里几十个请求刷屏）。 */
+    private fun onRedirectorBlocked(view: WebView, requestUrl: String) {
+        val key = KeyphoneGuardStore.redirectorKeyOf(requestUrl) ?: return
+        val shouldNotify = synchronized(this) {
+            val now = SystemClock.elapsedRealtime()
+            val last = lastRedirectorNotifyAt[key] ?: 0L
+            if (now - last < 2000L) {
+                false
+            } else {
+                lastRedirectorNotifyAt[key] = now
+                true
+            }
+        }
+        if (shouldNotify) {
+            view.post {
+                val hits = KeyphoneGuardStore.bumpRedirectorHits(view.context, requestUrl)
+                KeyphoneUrlGuard.notify("已拦截跳转中转：$key（累计 $hits 次）")
+            }
+        }
+    }
+
     private fun shouldBlockRequest(pageUrl: String, requestUri: Uri) =
         !allowListModel.isUrlAllowedAds(pageUrl) &&
             runBlocking { adBlocker.await().isAd(requestUri) }
 
     override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
+
+        // 按键机站内跳转拦截兜底：302 重定向 / 同域中转不经过 shouldOverrideUrlLoading，
+        // 页面已提交时在此做最终把关。两类命中都回退：
+        // ① 中转黑名单命中（无条件比对——回退重提交时 currentUrl == url，必须也能拦）
+        // ② 跨域违规（仅在与当前页不同时判定）
+        // 连续回退超过上限则熔断回空白页，防止重定向环把用户卡死
+        if (KeyphoneUrlGuard.isActive() && !consumeExplicitAllow(url)) {
+            val redirectorHit = KeyphoneGuardStore.isRedirectorBlocked(view.context, url)
+            val jumpViolation = !redirectorHit && currentUrl != url &&
+                KeyphoneUrlGuard.isJumpGuardViolation(view.context, currentUrl, url)
+            if (redirectorHit || jumpViolation) {
+                logger.log(TAG, "Guard bounced committed navigation: $currentUrl -> $url (redirector=$redirectorHit)")
+                if (jumpViolation) {
+                    captureRedirectorCulprit(view, null, url)
+                }
+                view.stopLoading()
+                view.post {
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastBounceAt > 5000L) {
+                        bounceCount = 0
+                    }
+                    lastBounceAt = now
+                    bounceCount++
+                    if (bounceCount > 6) {
+                        // 熔断：重定向环解不掉，回空白页终止循环
+                        bounceCount = 0
+                        view.loadUrl(SCHEME_BLANK)
+                    } else if (view.canGoBack()) {
+                        view.goBack()
+                    } else {
+                        view.loadUrl(SCHEME_BLANK)
+                    }
+                }
+                return
+            }
+            bounceCount = 0
+        }
+
         searchQuery = if (!url.isSpecialUrl()) {
             url
         } else {
@@ -359,6 +519,44 @@ class TabWebViewClient @AssistedInject constructor(
         view: WebView,
         request: WebResourceRequest
     ): WebResourceResponse? {
+        val requestUrl = request.url.toString()
+
+        // ① 跳转中转黑名单：曾导致站外跳转被拦的中转路径，主帧/子帧请求一律直接掐死
+        if (KeyphoneUrlGuard.isActive() &&
+            KeyphoneGuardStore.isRedirectorBlocked(view.context, requestUrl)
+        ) {
+            logger.log(TAG, "Guard blocked redirector request: $requestUrl")
+            onRedirectorBlocked(view, requestUrl)
+            return WebResourceResponse(
+                BLOCKED_RESPONSE_MIME_TYPE,
+                BLOCKED_RESPONSE_ENCODING,
+                ByteArrayInputStream(emptyResponseByteArray)
+            )
+        }
+
+        // ② 记录主帧请求（供 302 链事后溯源）
+        if (request.isForMainFrame) {
+            recordMainFrameRequest(requestUrl)
+        }
+
+        // ③ 站内跳转拦截（加载前拦截）：302 重定向目标的主帧请求也会经过这里，
+        // 直接回空响应，广告页既不发网络请求也不渲染；回退由 onPageStarted 兜底完成
+        if (request.isForMainFrame &&
+            currentUrl != requestUrl &&
+            !isNavigationPreAllowed(requestUrl) &&
+            KeyphoneUrlGuard.isJumpGuardViolation(view.context, currentUrl, requestUrl)
+        ) {
+            logger.log(TAG, "Guard blocked main-frame request before load: $currentUrl -> $requestUrl")
+            val requestReferer = request.requestHeaders?.entries
+                ?.firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value
+            captureRedirectorCulprit(view, requestReferer, requestUrl)
+            return WebResourceResponse(
+                BLOCKED_RESPONSE_MIME_TYPE,
+                BLOCKED_RESPONSE_ENCODING,
+                ByteArrayInputStream(emptyResponseByteArray)
+            )
+        }
+
         if (shouldBlockRequest(currentUrl, request.url)) {
             val empty = ByteArrayInputStream(emptyResponseByteArray)
             return WebResourceResponse(BLOCKED_RESPONSE_MIME_TYPE, BLOCKED_RESPONSE_ENCODING, empty)

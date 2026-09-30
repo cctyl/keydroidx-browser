@@ -283,6 +283,8 @@ class TabAdapter @AssistedInject constructor(
     }
 
     override suspend fun loadUrl(url: String) {
+        // 按键机提交兜底拦截：用户主动输入/选择的地址放行一次
+        tabWebViewClient.allowExplicitNavigation(url)
         webView().loadUrl(url, requestHeaders)
     }
 
@@ -293,6 +295,7 @@ class TabAdapter @AssistedInject constructor(
     }
 
     override suspend fun goBack() {
+        tabWebViewClient.allowExplicitNavigation(null)
         webView().goBack()
     }
 
@@ -301,6 +304,7 @@ class TabAdapter @AssistedInject constructor(
     override fun canGoBackChanges(): Flow<Boolean> = tabWebViewClient.goBackSharedFlow
 
     override suspend fun goForward() {
+        tabWebViewClient.allowExplicitNavigation(null)
         webView().goForward()
     }
 
