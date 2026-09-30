@@ -142,7 +142,7 @@
     <string name="keyphone_scroll_bottom">已滚动至页尾</string>
 
     <!-- 阅读模式（按键 * 菜单 6）：正文提纯 + 下一页自动拼页 -->
-    <string name="keyphone_reading_enter">已进入阅读模式</string>
+    <string name="keyphone_reading_enter">已进入阅读模式\n1/3 字号 · 7 背景 · 2/8 翻页</string>
     <string name="keyphone_reading_exit">已退出阅读模式</string>
     <string name="keyphone_reading_appended">已拼接第 %1$d 页</string>
     <string name="keyphone_reading_end">已到最后一页</string>
@@ -150,6 +150,15 @@
     <string name="keyphone_reading_failed">进入阅读模式失败</string>
     <string name="keyphone_reading_page_failed">下一页加载失败</string>
     <string name="keyphone_reading_loading">页面加载中，请稍后再试</string>
+
+    <!-- 阅读模式外观：1/3 调字号，7 轮换背景（5 套配色见 keyphone_reading_theme_*） -->
+    <string name="keyphone_reading_font_size">字号 %1$d</string>
+    <string name="keyphone_reading_theme_switch">背景：%1$s</string>
+    <string name="keyphone_reading_theme_cream">米白</string>
+    <string name="keyphone_reading_theme_sepia">护眼黄</string>
+    <string name="keyphone_reading_theme_green">护眼绿</string>
+    <string name="keyphone_reading_theme_night">夜间灰</string>
+    <string name="keyphone_reading_theme_black">夜间纯黑</string>
 
     <!-- 按键机浏览页（顶栏=地址栏，底栏=菜单栏；地址为空时的兜底标题） -->
     <string name="keyphone_browser_title">浏览器</string>

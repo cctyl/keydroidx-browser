@@ -589,6 +589,18 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     /** 已挂载阅读模式 JS 桥的 WebView（WebView 池化复用，同一实例只挂一次） */
     private val readingBridgeHosts = WeakHashMap<WebView, Boolean>()
 
+    /** 最近一条阅读模式提示（见 [showReadingToast]） */
+    private var readingToast: Toast? = null
+
+    /**
+     * 阅读模式提示。Toast 是排队显示的：连按 1 / 3 / 7 时屏幕上会依次补播历史提示，
+     * 出现"实际已到 40px、提示还停在 32"的错觉，故先取消上一条再弹新的。
+     */
+    private fun showReadingToast(message: CharSequence) {
+        readingToast?.cancel()
+        readingToast = Toast.makeText(this, message, Toast.LENGTH_SHORT).also { it.show() }
+    }
+
     /** 当前标签页是否处于阅读模式 */
     private fun isReadingMode(): Boolean {
         val tab = presenter.state.value.tabs.firstOrNull { it.isSelected } ?: return false
@@ -631,7 +643,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             return
         }
         installReadingBridge(webView)
-        webView.evaluateJavascript(keyphoneReadingMode.provideJs()) { rawResult ->
+        probeReadingBridge(webView)
+        webView.evaluateJavascript(readingAppearanceInitJs() + keyphoneReadingMode.provideJs()) { rawResult ->
             val result = decodeJsString(rawResult)
             when (result) {
                 "ok" -> {
@@ -639,14 +652,87 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     updateBackPressedEnabled()
                     // 阅读模式下隐藏鼠标光标层（方向键已改为整屏翻页）
                     updateMouseCursorVisibility()
-                    Toast.makeText(this, R.string.keyphone_reading_enter, Toast.LENGTH_SHORT).show()
+                    showReadingToast(getString(R.string.keyphone_reading_enter))
                 }
-                "empty" -> Toast.makeText(this, R.string.keyphone_reading_no_content, Toast.LENGTH_SHORT).show()
+                "empty" -> showReadingToast(getString(R.string.keyphone_reading_no_content))
                 else -> {
                     KeydroidxLog.w(TAG, "进入阅读模式失败: result=$result url=$url")
-                    Toast.makeText(this, R.string.keyphone_reading_failed, Toast.LENGTH_SHORT).show()
+                    showReadingToast(getString(R.string.keyphone_reading_failed))
                 }
             }
+        }
+    }
+
+    /**
+     * 进入阅读模式前注入外观偏好：脚本每次注入都会回到默认主题/字号，
+     * 故把上次选择的背景与字号作为 `window.__keyphone_rm_init__` 与脚本同批执行（早于 enter()）。
+     */
+    private fun readingAppearanceInitJs(): String {
+        val theme = KeyphoneReadingPrefs.themeIndex(this)
+        val font = KeyphoneReadingPrefs.fontSize(this)
+        return "window.__keyphone_rm_init__={theme:$theme,font:$font};\n"
+    }
+
+    /** 背景主题中文名（序号与 KeyphoneReadingMode.js 内 THEMES 表一致） */
+    private fun readingThemeName(index: Int): String = when (index) {
+        0 -> getString(R.string.keyphone_reading_theme_cream)
+        1 -> getString(R.string.keyphone_reading_theme_sepia)
+        2 -> getString(R.string.keyphone_reading_theme_green)
+        3 -> getString(R.string.keyphone_reading_theme_night)
+        4 -> getString(R.string.keyphone_reading_theme_black)
+        else -> index.toString()
+    }
+
+    /**
+     * 按键 1 / 3：减小 / 增大正文字号。
+     *
+     * 新字号由脚本**返回值**带回（不用 JS 桥，见 [probeReadingBridge]），宿主据此落盘并提示；
+     * 已到档位边界时脚本返回原值，提示数字不再变化即为"到底了"。
+     */
+    private fun adjustReadingFont(delta: Int) {
+        val webView = currentWebView()
+        if (webView == null) {
+            KeydroidxLog.w(TAG, "阅读模式调整字号跳过：WebView 不可用 delta=$delta")
+            return
+        }
+        val script = "window.__keyphone_rm__ && window.__keyphone_rm__.font(" + delta + ");"
+        try {
+            webView.evaluateJavascript(script) { rawResult ->
+                val size = decodeJsString(rawResult).toIntOrNull()
+                if (size == null) {
+                    KeydroidxLog.w(TAG, "阅读模式字号回传异常: $rawResult")
+                    return@evaluateJavascript
+                }
+                KeyphoneReadingPrefs.setFontSize(this, size)
+                showReadingToast(getString(R.string.keyphone_reading_font_size, size))
+            }
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "阅读模式调整字号失败 delta=$delta", t)
+        }
+    }
+
+    /**
+     * 按键 7：轮换阅读背景（米白 → 护眼黄 → 护眼绿 → 夜间灰 → 夜间纯黑）。
+     * 新主题序号由脚本返回值带回，主题自带配套字色，正文颜色随背景一起变。
+     */
+    private fun cycleReadingTheme() {
+        val webView = currentWebView()
+        if (webView == null) {
+            KeydroidxLog.w(TAG, "阅读模式切换背景跳过：WebView 不可用")
+            return
+        }
+        try {
+            webView.evaluateJavascript(READING_JS_THEME) { rawResult ->
+                val index = decodeJsString(rawResult).toIntOrNull()
+                if (index == null) {
+                    KeydroidxLog.w(TAG, "阅读模式背景回传异常: $rawResult")
+                    return@evaluateJavascript
+                }
+                KeyphoneReadingPrefs.setThemeIndex(this, index)
+                showReadingToast(getString(R.string.keyphone_reading_theme_switch, readingThemeName(index)))
+            }
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "阅读模式切换背景失败", t)
         }
     }
 
@@ -684,6 +770,25 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
     }
 
+    /**
+     * 诊断：读回页面里桥对象的可见性。
+     *
+     * 实测本机 WebView 对**已加载完成**的页面 `addJavascriptInterface` 不生效
+     * （`window.__keyphoneReadingBridge__` 始终 undefined，事件全部静默丢失）。
+     * 因此阅读模式的字号 / 背景改为「脚本回传 + evaluateJavascript 回调」，不依赖桥；
+     * 这里保留一行日志，便于以后换设备/换 WebView 时定位桥是否可用。
+     */
+    private fun probeReadingBridge(webView: WebView) {
+        try {
+            webView.evaluateJavascript(
+                "(function(){var b=window['" + READING_BRIDGE_NAME + "'];" +
+                    "return b?typeof b.onEvent:'missing';})()"
+            ) { rawResult -> KeydroidxLog.d(TAG, "阅读模式 JS 桥探测: ${decodeJsString(rawResult)}") }
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "阅读模式 JS 桥探测失败", t)
+        }
+    }
+
     /** 阅读模式 JS 事件回调（已在主线程） */
     internal fun onReadingBridgeEvent(type: String, payload: String) {
         when (type) {
@@ -691,25 +796,28 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             "append" -> {
                 val page = payload.toIntOrNull() ?: 0
                 KeydroidxLog.d(TAG, "阅读模式已拼接第 $page 页")
-                Toast.makeText(this, getString(R.string.keyphone_reading_appended, page), Toast.LENGTH_SHORT)
-                    .show()
+                showReadingToast(getString(R.string.keyphone_reading_appended, page))
             }
             "end" -> {
                 KeydroidxLog.d(TAG, "阅读模式已到最后一页")
-                Toast.makeText(this, R.string.keyphone_reading_end, Toast.LENGTH_SHORT).show()
+                showReadingToast(getString(R.string.keyphone_reading_end))
             }
             "fail" -> {
                 KeydroidxLog.w(TAG, "阅读模式下一页加载失败: $payload")
-                Toast.makeText(this, R.string.keyphone_reading_page_failed, Toast.LENGTH_SHORT).show()
+                showReadingToast(getString(R.string.keyphone_reading_page_failed))
             }
             "link" -> {
                 // 阅读模式不参与跳转：正文里的残留链接（书名 / 作者 / 目录）被点击时
                 // 既不退出阅读态也不导航，避免误点后方向键回落到鼠标模式而"完全没反应"
                 KeydroidxLog.d(TAG, "阅读模式忽略正文链接点击: $payload")
             }
+            "font", "theme" ->
+                // 字号 / 背景不走桥（见 adjustReadingFont）：桥事件在部分 WebView 上收不到，
+                // 真收到说明该设备桥可用，此时忽略避免与脚本返回值重复提示
+                KeydroidxLog.d(TAG, "阅读模式忽略桥上的外观事件: type=$type payload=$payload")
             "exit" -> {
                 KeydroidxLog.d(TAG, "阅读模式已退出")
-                Toast.makeText(this, R.string.keyphone_reading_exit, Toast.LENGTH_SHORT).show()
+                showReadingToast(getString(R.string.keyphone_reading_exit))
             }
             else -> KeydroidxLog.w(TAG, "未知的阅读模式事件: $type")
         }
@@ -726,10 +834,14 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     /**
-     * 阅读模式按键路由：上/下方向键整屏翻页（长按连翻），左右方向键、数字键与确认键直接消费
-     * （阅读模式下光标层已隐藏，热区跳转与"所见即点"无意义）。
+     * 阅读模式按键路由：
+     * - 上/下方向键、数字键 2 / 8：整屏翻页（长按连翻）
+     * - 数字键 1 / 3：减小 / 增大正文字号
+     * - 数字键 7：轮换背景主题（米白 → 护眼黄 → 护眼绿 → 夜间灰 → 夜间纯黑）
+     * - 左右方向键、确认键、其余数字键：直接消费（阅读模式下光标层已隐藏，热区跳转与"所见即点"无意义）
      *
-     * 消费 DOWN 必须消费同键 UP/REPEAT，因此这里不写 [lastConsumedDownKeyCode]（与标定模式同做法）。
+     * 消费 DOWN 必须消费同键 UP/REPEAT，因此这里不写 [lastConsumedDownKeyCode]（与标定模式同做法）；
+     * 而 1 / 3 / 7 属执行类动作，长按连发会一路冲到底，故过滤 repeat 只在首次 DOWN 生效。
      * 返回 false 的按键继续走既有分发链，保证 `*` / `#` 菜单、左右软键与返回键不受影响。
      */
     private fun handleReadingModeKeys(event: KeyEvent): Boolean {
@@ -744,6 +856,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         val digit = keyDigitOf(keyCode)
         // 数字键 2 / 8 也可翻页：阅读模式没有光标，2 上翻、8 下翻比方向键更顺手
         val isDigitScroll = digit == 2 || digit == 8
+        // 1 减小字号、3 增大字号、7 轮换背景
+        val isFontKey = digit == 1 || digit == 3
+        val isThemeKey = digit == 7
         val isScrollKey = isUpKey || isDownKey || isDigitScroll
         if (!isScrollKey && !isHorizontalKey && !isConfirmKey && digit !in 1..9) {
             return false
@@ -777,6 +892,13 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 }
             } catch (t: Throwable) {
                 KeydroidxLog.e(TAG, "阅读模式翻页失败 keyCode=$keyCode", t)
+            }
+        } else if (event.repeatCount == 0 && (isFontKey || isThemeKey)) {
+            // 执行类动作过滤长按连发：字体档位 / 主题数量都很有限，连发只会一闪而过
+            when {
+                digit == 1 -> adjustReadingFont(-1)
+                digit == 3 -> adjustReadingFont(1)
+                else -> cycleReadingTheme()
             }
         }
         return true
@@ -3428,6 +3550,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
         /** 阅读模式：主动催拼接（方向键滚动不派发页面 scroll 事件，需宿主推一下） */
         private const val READING_JS_APPEND = "window.__keyphone_rm__ && window.__keyphone_rm__.append();"
+
+        /** 阅读模式：按键 7 轮换背景主题（脚本返回新序号，字号脚本按 Δ 现拼） */
+        private const val READING_JS_THEME = "window.__keyphone_rm__ && window.__keyphone_rm__.theme();"
 
         /** 阅读模式：距页尾小于「视口高度 × 该系数」时主动催拼接（与 JS 侧预读窗口对齐） */
         private const val READING_PRE_READ_RATIO = 1.4f

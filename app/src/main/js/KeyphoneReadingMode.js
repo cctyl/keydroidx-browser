@@ -19,6 +19,14 @@
  *   "link"   user tapped a link inside the article (payload = absolute url)
  *   "exit"   reading mode left, original DOM restored
  *
+ * Keys 1 / 3 (font size) and 7 (background theme) do NOT use the bridge: on this device a
+ * post-load addJavascriptInterface() never becomes visible to the page, so the host calls
+ * window.__keyphone_rm__.font(delta) / .theme() and reads the new value from the
+ * evaluateJavascript() result instead (that is what lets it persist the choice).
+ * The appearance is handed over the same way:
+ *   window.__keyphone_rm_init__ = {theme: <int>, font: <px>};
+ * evaluated together with this file, so a new chapter keeps the previous look.
+ *
  * IMPORTANT: keep this file ASCII only. Mezzanine embeds the file content into a
  * generated string literal at build time and the build machine default charset is not
  * guaranteed to be UTF-8, so CJK keywords are written as \uXXXX escapes (they are
@@ -56,6 +64,11 @@
     var END_ID = '__krm_end__';
     var FAIL_ID = '__krm_fail__';
     var BRIDGE_NAME = '__keyphoneReadingBridge__';
+    // Reader viewport: without a viewport meta the WebView lays the page out ~980px wide and
+    // then scales it down to the physical screen (on a 320px keypad screen that is ~0.33x),
+    // so a 26px stylesheet size would render as ~8px and font steps would look identical.
+    // Forcing device-width + scale 1 makes the reader font sizes real pixels.
+    var READER_VIEWPORT = 'width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no';
 
     /* ------------------------------------------------------------------ *
      * patterns and selector tables
@@ -121,41 +134,83 @@
         '\u672c\u7ae0\u5b8c', '\u8fd4\u56de'
     ];
 
-    var READER_CSS = [
-        'html,body{background:#F4F4EE!important;color:#222!important;}',
-        'body{overflow-x:hidden!important;}',
-        '#' + ROOT_ID + '{box-sizing:border-box!important;max-width:100%!important;',
-        'padding:10px 10px 30px 10px!important;font-family:sans-serif!important;',
-        'font-size:16px!important;line-height:1.8!important;word-wrap:break-word!important;}',
-        '#' + ROOT_ID + ' p{' + 'color:#222!important;background:transparent!important;',
-        'font-size:16px!important;line-height:1.8!important;margin:0 0 0.8em 0!important;',
-        'text-indent:0!important;}',
-        '#' + ROOT_ID + ' div,#' + ROOT_ID + ' td,#' + ROOT_ID + ' span,#' + ROOT_ID + ' li{',
-        'color:#222!important;background:transparent!important;font-size:16px!important;',
-        'line-height:1.8!important;}',
-        '#' + ROOT_ID + ' h1,#' + ROOT_ID + ' h2,#' + ROOT_ID + ' h3{',
-        'color:#111!important;font-size:18px!important;line-height:1.6!important;',
-        'margin:0.7em 0!important;}',
-        '#' + ROOT_ID + ' a{color:#0B62C4!important;text-decoration:none!important;}',
-        '#' + ROOT_ID + ' img,#' + ROOT_ID + ' video,#' + ROOT_ID + ' audio,',
-        '#' + ROOT_ID + ' iframe,#' + ROOT_ID + ' canvas{display:none!important;}',
-        '[' + SEP_ATTR + ']{text-align:center!important;color:#333!important;',
-        'font-size:14px!important;font-weight:bold!important;',
-        'margin:28px 0 18px 0!important;padding:10px 0!important;',
-        'border-top:3px solid #9a9a90!important;border-bottom:3px solid #9a9a90!important;',
-        'letter-spacing:1px!important;word-break:break-all!important;}',
-        '#' + LOADING_ID + '{text-align:center!important;color:#777!important;',
-        'font-size:13px!important;margin:16px 0 24px 0!important;padding:6px 0!important;}',
-        '#' + END_ID + '{text-align:center!important;color:#999!important;',
-        'font-size:13px!important;margin:22px 0 30px 0!important;}',
-        '#' + FAIL_ID + '{text-align:center!important;color:#b25a00!important;',
-        'font-size:13px!important;margin:16px 0 24px 0!important;padding:6px 0!important;}',
-        '.krm-spin{display:inline-block!important;width:12px!important;height:12px!important;',
-        'border:2px solid #c8c8c0!important;border-top-color:#666!important;',
-        'border-radius:50%!important;vertical-align:middle!important;',
-        'animation:krm-spin 0.9s linear infinite!important;}',
-        '@keyframes krm-spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}'
-    ].join('');
+    /* ------------------------------------------------------------------ *
+     * appearance: background themes (key 7) and font sizes (keys 1 / 3)
+     * ------------------------------------------------------------------ */
+    // Every theme carries both a background and a matching text colour, so a dark
+    // background never ends up with dark text (and vice versa):
+    //   bg = page background, text = body text, head = headings, link = anchors,
+    //   rule = separator rules, ruleText = separator caption, dim = hint text,
+    //   fail = "next page failed" text.
+    var THEMES = [
+        // cream (default, closest to plain paper)
+        { bg: '#F4F4EE', text: '#222222', head: '#111111', link: '#0B62C4', rule: '#B9B9AF', ruleText: '#444444', dim: '#7A7A72', fail: '#B25A00' },
+        // sepia / eye-care yellow
+        { bg: '#EAE0C8', text: '#3E3626', head: '#2A2418', link: '#8A6A2F', rule: '#C6B994', ruleText: '#6B5F45', dim: '#877B60', fail: '#A2570B' },
+        // eye-care green
+        { bg: '#CCE8CF', text: '#22331E', head: '#16240F', link: '#2F6B3A', rule: '#9CBB9C', ruleText: '#2F4A2F', dim: '#6C8069', fail: '#8A5A00' },
+        // night grey
+        { bg: '#1B1B1B', text: '#BDBDBD', head: '#DCDCDC', link: '#7FB2E5', rule: '#4A4A4A', ruleText: '#A9B2BB', dim: '#8A8A8A', fail: '#E0A860' },
+        // night black (OLED friendly)
+        { bg: '#000000', text: '#B0B0B0', head: '#D2D2D2', link: '#6FA8DC', rule: '#333333', ruleText: '#8F8F8F', dim: '#7A7A7A', fail: '#D9A05B' }
+    ];
+    // 14 -> 40 px. Fine steps of 2 while the text is still small, coarser steps of 4 at the
+    // top so the largest size stays a few key presses away (reading while the phone sits on
+    // a desk, or for low vision). The host persists the px value (see module header).
+    var FONT_SIZES = [14, 16, 18, 20, 22, 24, 28, 32, 36, 40];
+    var DEFAULT_THEME_INDEX = 0;
+    var DEFAULT_FONT_INDEX = 1;
+
+    /** Stylesheet for the current theme + font size (rebuilt on every restyle). */
+    function buildCss() {
+        var t = THEMES[themeIndex] || THEMES[0];
+        var fs = FONT_SIZES[fontIndex];
+        var hs = fs + 3;                  // headings slightly larger than body text
+        // captions / hints stay secondary and are capped: at 40px body text an uncapped
+        // "loading next chapter" line would overflow the width and wrap awkwardly
+        var ss = Math.min(Math.max(12, fs - 2), 28);   // separator caption
+        var ls = Math.min(Math.max(11, fs - 3), 26);   // hint / loading / end text
+        return [
+            'html,body{background:' + t.bg + '!important;color:' + t.text + '!important;}',
+            'body{overflow-x:hidden!important;}',
+            '#' + ROOT_ID + '{box-sizing:border-box!important;max-width:100%!important;',
+            'padding:10px 10px 30px 10px!important;font-family:sans-serif!important;',
+            'font-size:' + fs + 'px!important;line-height:1.8!important;word-wrap:break-word!important;}',
+            '#' + ROOT_ID + ' p{color:' + t.text + '!important;background:transparent!important;',
+            'font-size:' + fs + 'px!important;line-height:1.8!important;margin:0 0 0.8em 0!important;',
+            'text-indent:0!important;}',
+            '#' + ROOT_ID + ' div,#' + ROOT_ID + ' td,#' + ROOT_ID + ' span,#' + ROOT_ID + ' li{',
+            'color:' + t.text + '!important;background:transparent!important;',
+            'font-size:' + fs + 'px!important;line-height:1.8!important;}',
+            '#' + ROOT_ID + ' h1,#' + ROOT_ID + ' h2,#' + ROOT_ID + ' h3{',
+            'color:' + t.head + '!important;font-size:' + hs + 'px!important;line-height:1.6!important;',
+            'margin:0.7em 0!important;}',
+            '#' + ROOT_ID + ' a{color:' + t.link + '!important;text-decoration:none!important;}',
+            '#' + ROOT_ID + ' img,#' + ROOT_ID + ' video,#' + ROOT_ID + ' audio,',
+            '#' + ROOT_ID + ' iframe,#' + ROOT_ID + ' canvas{display:none!important;}',
+            // Hint boxes / separator are children of the reader root, so every rule below is
+            // scoped with an extra #root (or the id) to outrank "#root div / #root span"
+            // above - otherwise their colour and font size would be silently overridden.
+            '#' + ROOT_ID + ' [' + SEP_ATTR + ']{text-align:center!important;',
+            'color:' + t.ruleText + '!important;',
+            'font-size:' + ss + 'px!important;font-weight:bold!important;',
+            'margin:28px 0 18px 0!important;padding:10px 0!important;',
+            'border-top:3px solid ' + t.rule + '!important;border-bottom:3px solid ' + t.rule + '!important;',
+            'letter-spacing:1px!important;word-break:break-all!important;}',
+            '#' + ROOT_ID + ' #' + LOADING_ID + ',#' + ROOT_ID + ' #' + LOADING_ID + ' span{',
+            'text-align:center!important;color:' + t.dim + '!important;',
+            'font-size:' + ls + 'px!important;margin:16px 0 24px 0!important;padding:6px 0!important;}',
+            '#' + ROOT_ID + ' #' + END_ID + '{text-align:center!important;color:' + t.dim + '!important;',
+            'font-size:' + ls + 'px!important;margin:22px 0 30px 0!important;}',
+            '#' + ROOT_ID + ' #' + FAIL_ID + '{text-align:center!important;color:' + t.fail + '!important;',
+            'font-size:' + ls + 'px!important;margin:16px 0 24px 0!important;padding:6px 0!important;}',
+            '.krm-spin{display:inline-block!important;width:12px!important;height:12px!important;',
+            'border:2px solid ' + t.rule + '!important;border-top-color:' + t.dim + '!important;',
+            'border-radius:50%!important;vertical-align:middle!important;',
+            'animation:krm-spin 0.9s linear infinite!important;}',
+            '@keyframes krm-spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}'
+        ].join('');
+    }
 
     /* ------------------------------------------------------------------ *
      * state
@@ -175,6 +230,8 @@
     var loadTimer = null;
     var pumpTimer = null;
     var endNotified = false;
+    var themeIndex = DEFAULT_THEME_INDEX;
+    var fontIndex = DEFAULT_FONT_INDEX;
 
     /* ------------------------------------------------------------------ *
      * helpers
@@ -466,8 +523,208 @@
         var style = document.createElement('style');
         style.id = STYLE_ID;
         style.type = 'text/css';
-        style.textContent = READER_CSS;
+        style.textContent = buildCss();
         (document.head || document.documentElement).appendChild(style);
+    }
+
+    /**
+     * Viewport state of the page before reading mode: the content of its viewport meta(s)
+     * plus the layout width Chromium is currently using (see restoreViewport).
+     */
+    function collectViewport() {
+        var state = { contents: [], layoutWidth: 0 };
+        try {
+            var head = document.head || document.documentElement;
+            var metas = head ? head.querySelectorAll('meta[name="viewport"]') : [];
+            for (var i = 0; i < metas.length; i++) {
+                state.contents.push(String(metas[i].getAttribute('content') || ''));
+            }
+            state.layoutWidth = document.documentElement.clientWidth || 0;
+        } catch (e) {
+            state.contents = [];
+        }
+        return state;
+    }
+
+    /**
+     * Switch the page to the reader viewport (see READER_VIEWPORT). The existing meta is
+     * REWRITTEN rather than replaced: Chromium re-applies the viewport when the content
+     * changes, while a removed meta is simply forgotten and the layout would stay at the
+     * reader's device width after leaving reading mode.
+     */
+    function applyViewport() {
+        try {
+            var head = document.head || document.documentElement;
+            if (!head) {
+                return;
+            }
+            var meta = head.querySelector('meta[name="viewport"]');
+            if (!meta) {
+                meta = document.createElement('meta');
+                meta.setAttribute('name', 'viewport');
+                head.appendChild(meta);
+            }
+            meta.setAttribute('content', READER_VIEWPORT);
+        } catch (e) {
+            // viewport rewrite failed: reader still works, just scaled by the page viewport
+        }
+    }
+
+    /**
+     * Undo the reader viewport by writing the original state back:
+     *   - the page had viewport meta(s): the saved content is written back;
+     *   - the page had none: "width=<original layout width>" reproduces the previous layout
+     *     (a wide, zoomed-out layout viewport is rebuilt from that width with the same scale).
+     */
+    function restoreViewport(state) {
+        var content = null;
+        if (state && state.contents && state.contents.length > 0) {
+            content = state.contents[0];
+        } else if (state && state.layoutWidth > 0) {
+            content = 'width=' + state.layoutWidth;
+        }
+        if (content === null) {
+            return;
+        }
+        try {
+            var head = document.head || document.documentElement;
+            if (!head) {
+                return;
+            }
+            var meta = head.querySelector('meta[name="viewport"]');
+            if (!meta) {
+                meta = document.createElement('meta');
+                meta.setAttribute('name', 'viewport');
+                head.appendChild(meta);
+            }
+            meta.setAttribute('content', content);
+        } catch (e) {
+            // restore failed: the reader viewport stays until the page is reloaded
+        }
+    }
+
+    /**
+     * First child of the reader that is still (partly) below the top edge: scroll anchor for
+     * a reflow. getBoundingClientRect() is viewport relative, so it must not be compared
+     * against pageYOffset (document relative) - that mismatch picks a child far below the
+     * fold and the compensation then scrolls to the wrong place.
+     */
+    function topVisibleChild() {
+        if (!root) {
+            return null;
+        }
+        var children = root.children;
+        for (var i = 0; i < children.length; i++) {
+            if (children[i].getBoundingClientRect().bottom > 4) {
+                return children[i];
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Re-apply the stylesheet after a theme / font change. A font change reflows the whole
+     * article, so the child at the top of the viewport is used as an anchor and the scroll
+     * offset is corrected by however much it drifted - without this the reader silently
+     * jumps to another paragraph when the text size changes.
+     *
+     * The correction is RELATIVE (scrollBy): a WebView with scroll anchoring already
+     * compensates the reflow by itself, which leaves the anchor in place and makes the
+     * measured drift ~0. An absolute scrollTo(pageYOffset + delta) would use a stale
+     * pageYOffset and undo the browser's compensation, throwing the reader off by a screen.
+     */
+    function restyle() {
+        var style = document.getElementById(STYLE_ID);
+        if (!style) {
+            return;
+        }
+        var anchor = topVisibleChild();
+        var anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
+        style.textContent = buildCss();
+        if (!anchor || !anchor.parentNode) {
+            return;
+        }
+        var delta = anchor.getBoundingClientRect().top - anchorTop;
+        if (delta) {
+            try {
+                window.scrollBy(0, delta);
+            } catch (e) {
+                // scroll compensation failed - viewport may shift slightly
+            }
+        }
+    }
+
+    /** Index in FONT_SIZES closest to the px value stored by the host. */
+    function nearestFontIndex(size) {
+        var best = DEFAULT_FONT_INDEX;
+        var bestDiff = -1;
+        for (var i = 0; i < FONT_SIZES.length; i++) {
+            var diff = Math.abs(FONT_SIZES[i] - size);
+            if (bestDiff < 0 || diff < bestDiff) {
+                bestDiff = diff;
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Appearance handed over by the host (see module header). Values are validated here so
+     * a stale / hand-edited preference can never leave the reader with an unusable layout.
+     */
+    function initAppearance() {
+        var prefs = null;
+        try {
+            prefs = window.__keyphone_rm_init__;
+        } catch (e) {
+            prefs = null;
+        }
+        if (!prefs) {
+            return;
+        }
+        var theme = parseInt(prefs.theme, 10);
+        if (!isNaN(theme)) {
+            themeIndex = Math.min(THEMES.length - 1, Math.max(0, theme));
+        }
+        var size = parseInt(prefs.font, 10);
+        if (!isNaN(size)) {
+            fontIndex = nearestFontIndex(size);
+        }
+    }
+
+    /**
+     * Keys 1 / 3: shrink / grow the body text. Returns the resulting px size - that return
+     * value is the channel the host reads (bridge-free, see module header); it is returned
+     * unchanged when a bound is reached, so the user sees the value stop changing.
+     */
+    function changeFont(delta) {
+        if (!active) {
+            return FONT_SIZES[fontIndex];
+        }
+        var next = Math.min(FONT_SIZES.length - 1, Math.max(0, fontIndex + (delta > 0 ? 1 : -1)));
+        if (next !== fontIndex) {
+            fontIndex = next;
+            restyle();
+        }
+        return FONT_SIZES[fontIndex];
+    }
+
+    /**
+     * Key 7: cycle the reading background (cream / sepia / green / night / black).
+     * Returns the new theme index for the host to persist.
+     */
+    function cycleTheme(step) {
+        if (!active) {
+            return themeIndex;
+        }
+        var count = THEMES.length;
+        var next = (themeIndex + (step || 1)) % count;
+        if (next < 0) {
+            next += count;
+        }
+        themeIndex = next;
+        restyle();
+        return themeIndex;
     }
 
     function createPage(html, seq, sourceUrl) {
@@ -880,7 +1137,8 @@
             bodyClass: document.body.getAttribute('class') || '',
             bodyStyle: document.body.getAttribute('style') || '',
             title: document.title,
-            scrollY: window.pageYOffset || document.documentElement.scrollTop || 0
+            scrollY: window.pageYOffset || document.documentElement.scrollTop || 0,
+            viewport: collectViewport()
         };
 
         try {
@@ -894,6 +1152,9 @@
         root = document.createElement('div');
         root.id = ROOT_ID;
         document.body.appendChild(root);
+        // device-width viewport: without it the reader font sizes are scaled down by the
+        // page's narrow-screen layout (see READER_VIEWPORT)
+        applyViewport();
 
         pages = [];
         pageSeq = 1;
@@ -986,6 +1247,7 @@
                 if (snapshot.title) {
                     document.title = snapshot.title;
                 }
+                restoreViewport(snapshot.viewport);
                 var targetY = snapshot.scrollY || 0;
                 setTimeout(function () {
                     try {
@@ -1020,8 +1282,17 @@
         },
         nextUrl: function () {
             return nextUrl;
+        },
+        font: changeFont,
+        theme: cycleTheme,
+        fontSize: function () {
+            return FONT_SIZES[fontIndex];
+        },
+        themeIndex: function () {
+            return themeIndex;
         }
     };
 
+    initAppearance();
     return enter();
 })();
