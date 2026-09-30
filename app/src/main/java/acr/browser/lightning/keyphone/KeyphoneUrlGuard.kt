@@ -88,6 +88,12 @@ object KeyphoneUrlGuard {
     /** 同一规则 5s 内的重复请求合并为一次弹窗。 */
     private const val ASK_MERGE_MS = 5_000L
 
+    /** 站外跳转拦截的计数/提示节流窗口（同一「来源域→目标域」内）。 */
+    private const val JUMP_BLOCK_REPORT_MS = 3_000L
+
+    /** 站外跳转拦截的最近上报时刻：键 = "来源域|目标域"。 */
+    private val lastJumpBlockAt = HashMap<String, Long>()
+
     @Volatile
     private var host: Host? = null
 
@@ -247,9 +253,25 @@ object KeyphoneUrlGuard {
         if (!isJumpGuardViolation(context, sourceUrl, targetUrl)) {
             return Verdict(Decision.PROCEED)
         }
+        // 广告站常以 JS 定时器反复发起跳转，若每次都计数落盘 + 弹提示，会把主线程/磁盘拖住。
+        // 这里按「来源域→目标域」节流：3s 内只记一次、提示一次，其余静默拦截。
         val sourceDomain = KeyphoneGuardStore.baseDomain(sourceUrl)
-        val hits = KeyphoneGuardStore.bumpJumpHits(context, sourceDomain.orEmpty())
-        notify("已拦截站外跳转：${KeyphoneGuardStore.baseDomain(targetUrl)}（累计 $hits 次）")
+        val targetDomain = KeyphoneGuardStore.baseDomain(targetUrl) ?: "-"
+        val key = "${sourceDomain.orEmpty()}|$targetDomain"
+        val now = SystemClock.elapsedRealtime()
+        val shouldReport = synchronized(askLock) {
+            val last = lastJumpBlockAt[key] ?: 0L
+            if (now - last < JUMP_BLOCK_REPORT_MS) {
+                false
+            } else {
+                lastJumpBlockAt[key] = now
+                true
+            }
+        }
+        if (shouldReport) {
+            val hits = KeyphoneGuardStore.bumpJumpHits(context, sourceDomain.orEmpty())
+            notify("已拦截站外跳转：$targetDomain（累计 $hits 次）")
+        }
         return Verdict(Decision.BLOCK)
     }
 

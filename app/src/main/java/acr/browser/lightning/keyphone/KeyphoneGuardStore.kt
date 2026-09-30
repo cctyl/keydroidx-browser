@@ -125,22 +125,32 @@ object KeyphoneGuardStore {
     // 站内跳转拦截开关（按来源域名）
     // ------------------------------------------------------------------
 
+    /** 站内开关判定的内存缓存（键 = 域名）：热路径调用频繁，避免每次都读 SharedPreferences。 */
+    private val jumpEnabledCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
     /**
      * 站内跳转拦截是否生效：**默认开启**——无记录的域名一律视为开启，
      * 只有用户手动关闭过的域名（存有 `{"on":false}` 记录）才放行站外跳转。
+     *
+     * 走内存缓存：本函数在每次导航/提交/请求判定中都会被调用（主线程与 IO 线程），
+     * 直接读 SharedPreferences 会在主线程产生磁盘访问（StrictMode 已告警），故缓存结果。
      */
     fun isJumpEnabled(context: Context, domain: String?): Boolean {
         if (domain.isNullOrEmpty()) return false
-        val raw = prefs(context, PREF_JUMP).getString(domain, null) ?: return true
-        return try {
-            JSONObject(raw).optBoolean("on", true)
+        jumpEnabledCache[domain]?.let { return it }
+        val enabled = try {
+            val raw = prefs(context, PREF_JUMP).getString(domain, null)
+            if (raw == null) true else JSONObject(raw).optBoolean("on", true)
         } catch (t: Throwable) {
             true
         }
+        jumpEnabledCache[domain] = enabled
+        return enabled
     }
 
     /** 开关切换：保留既有命中次数。 */
     fun setJumpEnabled(context: Context, domain: String, enabled: Boolean) {
+        jumpEnabledCache[domain] = enabled
         val pref = prefs(context, PREF_JUMP)
         val hits = try {
             pref.getString(domain, null)?.let { JSONObject(it).optInt("c", 0) } ?: 0
@@ -185,6 +195,7 @@ object KeyphoneGuardStore {
 
     fun clearJumpRules(context: Context) {
         prefs(context, PREF_JUMP).edit().clear().apply()
+        jumpEnabledCache.clear()
     }
 
     // ------------------------------------------------------------------
@@ -223,70 +234,168 @@ object KeyphoneGuardStore {
 
     // ------------------------------------------------------------------
     // 跳转中转黑名单（自动学习：导致 302 跳转被拦的中转路径）
+    //
+    // 两级学习：首次命中仅会话内生效（重启即失效），同一 key 累计 ≥2 次才落盘持久。
+    // 避免一次性误学把整站目录永久锁死（曾把用户点击的章节/目录学成规则）。
     // ------------------------------------------------------------------
 
     private const val PREF_REDIRECTOR = "keyphone_guard_redirector"
+    private const val PREF_META = "keyphone_guard_meta"
+    private const val META_REDIRECTOR_VERSION = "redirector_version"
 
-    /** 中转黑名单键：`host|path`（不含 query——query 里多是一次性的点击令牌）。 */
+    /**
+     * 中转黑名单数据版本：升到 2 时清空旧的自动学习数据。
+     * 旧版本会把用户点击的合法章节/目录误学成中转规则，导致整站被锁死。
+     */
+    private const val REDIRECTOR_DATA_VERSION = 2
+
+    /** 同一中转 key 累计学习次数达到该值才落盘持久。 */
+    private const val REDIRECTOR_PERSIST_AFTER_HITS = 2
+
+    /** 会话内的中转拦截（首次学习，不落盘）。 */
+    private val sessionRedirectors = HashSet<String>()
+    private val sessionRedirectorHits = HashMap<String, Int>()
+
+    private val migrated = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** 一次性迁移：清空旧版本误学的中转规则（每进程只执行一次）。 */
+    private fun ensureMigrated(context: Context) {
+        if (migrated.get() || !migrated.compareAndSet(false, true)) return
+        try {
+            val meta = prefs(context, PREF_META)
+            if (meta.getInt(META_REDIRECTOR_VERSION, 0) >= REDIRECTOR_DATA_VERSION) return
+            prefs(context, PREF_REDIRECTOR).edit().clear().apply()
+            meta.edit().putInt(META_REDIRECTOR_VERSION, REDIRECTOR_DATA_VERSION).apply()
+        } catch (t: Throwable) {
+            // 迁移失败不影响拦截功能本身
+        }
+    }
+
+    /** 中转黑名单键：`eTLD+1|path`（不含 query——query 里多是一次性的点击令牌）。 */
     fun redirectorKeyOf(url: String?): String? {
         val host = hostOf(url) ?: return null
+        val normHost = baseDomain(host) ?: host
         val path = try {
             Uri.parse(url!!.trim()).path.orEmpty()
         } catch (t: Throwable) {
             return null
         }
         if (path.isBlank()) return null
-        return "$host|$path"
+        return "$normHost|$path"
     }
 
-    /** 请求 URL 是否命中中转黑名单（host 相等——忽略 www 前缀，且 path 前缀匹配）。 */
+    /** path 边界匹配：完全相等或作为目录前缀；`/go.php` 命中 `/go.php/x`，不命中 `/go.php5`。 */
+    private fun pathMatches(path: String, entry: String): Boolean {
+        val p = path.trimEnd('/')
+        val e = entry.trimEnd('/')
+        if (e.isEmpty()) return false
+        return p == e || p.startsWith("$e/")
+    }
+
+    private fun entryMatches(entryKey: String, host: String, path: String): Boolean {
+        val eHost = entryKey.substringBefore('|')
+        val ePath = entryKey.substringAfter('|', "")
+        // 根路径条目（host|/）等于整站拉黑，一律视为无效数据，不参与匹配
+        if (ePath.length <= 1) return false
+        return eHost == host && pathMatches(path, ePath)
+    }
+
+    /** 请求 URL 是否命中中转黑名单（会话内 + 持久化）。 */
     fun isRedirectorBlocked(context: Context, url: String?): Boolean {
         val key = redirectorKeyOf(url) ?: return false
+        if (isSessionRedirectorBlocked(key)) return true
+        ensureMigrated(context)
         val host = key.substringBefore('|')
         val path = key.substringAfter('|')
-        val norm = { h: String -> h.removePrefix("www.") }
-        val pref = prefs(context, PREF_REDIRECTOR)
-        for (entryKey in pref.all.keys) {
-            val eHost = entryKey.substringBefore('|')
-            val ePath = entryKey.substringAfter('|', "")
-            // 根路径条目（host|/）等于整站拉黑，一律视为无效数据，不参与匹配
-            if (ePath.length <= 1) {
-                continue
-            }
-            if (norm(eHost) == norm(host) && path.startsWith(ePath)) {
-                return true
-            }
+        for (entryKey in prefs(context, PREF_REDIRECTOR).all.keys) {
+            if (entryMatches(entryKey, host, path)) return true
         }
         return false
     }
 
-    /** 记录（或 +1）中转路径。 */
-    fun addRedirector(context: Context, url: String) {
-        val key = redirectorKeyOf(url) ?: return
+    /** 收录 [culpritUrl] 后，[victimUrl] 是否也会被同一规则命中（会锁死当前页，则不应收录）。 */
+    fun wouldBlockAfterLearning(culpritUrl: String, victimUrl: String?): Boolean {
+        val culpritKey = redirectorKeyOf(culpritUrl) ?: return false
+        val victimKey = redirectorKeyOf(victimUrl) ?: return false
+        return entryMatches(
+            culpritKey,
+            victimKey.substringBefore('|'),
+            victimKey.substringAfter('|')
+        )
+    }
+
+    private fun isSessionRedirectorBlocked(key: String): Boolean {
+        val host = key.substringBefore('|')
+        val path = key.substringAfter('|')
+        synchronized(sessionRedirectors) {
+            return sessionRedirectors.any { entryMatches(it, host, path) }
+        }
+    }
+
+    /**
+     * 记录一次学习：首次仅会话内生效，累计 ≥ [REDIRECTOR_PERSIST_AFTER_HITS] 次才落盘持久。
+     * @return true 表示本次已持久化
+     */
+    fun addRedirector(context: Context, url: String): Boolean {
+        val key = redirectorKeyOf(url) ?: return false
+        ensureMigrated(context)
+        val hits = synchronized(sessionRedirectors) {
+            sessionRedirectors.add(key)
+            val h = (sessionRedirectorHits[key] ?: 0) + 1
+            sessionRedirectorHits[key] = h
+            h
+        }
+        if (hits < REDIRECTOR_PERSIST_AFTER_HITS) return false
         val current = decodeRule(prefs(context, PREF_REDIRECTOR).getString(key, null))
-        val hits = (current?.second ?: 0) + 1
+        val persisted = (current?.second ?: 0) + 1
         prefs(context, PREF_REDIRECTOR)
             .edit()
-            .putString(key, encodeRule(RuleAction.DENY, hits))
+            .putString(key, encodeRule(RuleAction.DENY, persisted))
             .apply()
+        return true
     }
 
-    /** 中转路径命中次数 +1，返回累计次数。 */
-    fun bumpRedirectorHits(context: Context, url: String): Int {
+    /** 中转路径累计命中次数（会话 + 持久，只读，避免每次请求都写盘）。 */
+    fun redirectorHits(context: Context, url: String): Int {
         val key = redirectorKeyOf(url) ?: return 0
-        return bump(prefs(context, PREF_REDIRECTOR), key)
+        val session = synchronized(sessionRedirectors) { sessionRedirectorHits[key] ?: 0 }
+        val persisted = decodeRule(prefs(context, PREF_REDIRECTOR).getString(key, null))?.second ?: 0
+        return session + persisted
     }
 
-    /** 全部中转黑名单条目。 */
-    fun redirectorRules(context: Context): List<Rule> =
-        rules(context, PREF_REDIRECTOR) { key -> Triple(key, key, key) }
+    /** 全部中转黑名单条目（含仅会话内生效的条目）。 */
+    fun redirectorRules(context: Context): List<Rule> {
+        ensureMigrated(context)
+        val persistent = rules(context, PREF_REDIRECTOR) { key -> Triple(key, key, key) }
+        val existing = persistent.mapTo(HashSet()) { it.key }
+        val sessionOnly = synchronized(sessionRedirectors) {
+            sessionRedirectors.filter { it !in existing }.map { key ->
+                Rule(
+                    key = key,
+                    display = key,
+                    source = key,
+                    action = RuleAction.DENY,
+                    hits = sessionRedirectorHits[key] ?: 1
+                )
+            }
+        }
+        return persistent + sessionOnly
+    }
 
     fun removeRedirector(context: Context, key: String) {
         prefs(context, PREF_REDIRECTOR).edit().remove(key).apply()
+        synchronized(sessionRedirectors) {
+            sessionRedirectors.remove(key)
+            sessionRedirectorHits.remove(key)
+        }
     }
 
     fun clearRedirectors(context: Context) {
         prefs(context, PREF_REDIRECTOR).edit().clear().apply()
+        synchronized(sessionRedirectors) {
+            sessionRedirectors.clear()
+            sessionRedirectorHits.clear()
+        }
     }
 
     // ------------------------------------------------------------------

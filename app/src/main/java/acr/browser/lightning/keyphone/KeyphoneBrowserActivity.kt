@@ -541,6 +541,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     /** 打开网址：若当前标签是主页空白页直接在当前标签加载，否则新建标签页加载 */
     private fun openUrlInNewTab(url: String) {
+        KeydroidxLog.d(TAG, "openUrlInNewTab: $url")
         if (isFindMode) {
             exitFindMode()
         }
