@@ -493,6 +493,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
         // 内容区切换
         if (isHomeSelected) {
+            // 任何切回主页的路径（点顶栏主页标签、按键机主页键、关闭网页标签等）
+            // 都要重新拉一次书签/历史：书签可能在其他标签页或书签页被增删改。
+            loadHomeData()
             if (isFindMode) {
                 exitFindMode()
             }
@@ -2897,6 +2900,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                         folder = Bookmark.Folder.Root
                     )
                 )
+                // 书签落库后必须立刻回灌主页内存数据与宫格 View，
+                // 否则回到主页时仍渲染旧列表，重复添加就会命中「已在首页」。
+                if (added) {
+                    loadHomeData()
+                }
                 Toast.makeText(
                     this@KeyphoneBrowserActivity,
                     if (added) R.string.keyphone_added_home else R.string.keyphone_already_home,
