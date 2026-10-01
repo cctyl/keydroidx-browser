@@ -24,10 +24,12 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.os.Bundle
 import android.os.Message
+import android.util.Log
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import androidx.activity.result.ActivityResult
 import androidx.core.graphics.createBitmap
@@ -74,6 +76,7 @@ class TabAdapter @AssistedInject constructor(
     private val previewModel: PreviewModel,
     private val coroutineDispatchers: CoroutineDispatchers,
     private val connectivityProvider: ConnectivityProvider,
+    private val rendererBusyProvider: acr.browser.lightning.di.RendererBusyProvider,
 ) : TabModel {
 
     @AssistedFactory
@@ -171,6 +174,18 @@ class TabAdapter @AssistedInject constructor(
             connectivityProvider.hasInternetAccess.collectLatest {
                 setNetworkAvailable(it)
             }
+        }
+
+        // 渲染进程死亡回调（API 26+，经由 WebViewClient.onRenderProcessGone）。
+        // 不处理时系统默认会连 App 进程一起杀（网页崩 → 浏览器闪退）。
+        tabWebViewClient.renderProcessGoneHandler = { view, detail ->
+            Log.w(
+                "TabAdapter",
+                "渲染进程死亡 tab=$id didCrash=${detail.didCrash()} url=${urlStateFlow.value}"
+            )
+            _acquiredWebView = null
+            runCatching { view.destroy() }
+            true // 返回 false 系统会连 App 进程一起杀；返回 true 由宿主接管（下次 webView() 重建）
         }
     }
 
@@ -465,17 +480,19 @@ class TabAdapter @AssistedInject constructor(
     }
 
     override suspend fun freeze() {
+        // 先从视图树摘除（本地操作，不等渲染进程）：即使后续 WebView 销毁因渲染进程繁忙
+        // 而卡住，用户视角的标签也已消失、可切到其它标签
+        if (priority == Priority.HIGH) {
+            tabPager.clearTab(id)
+        } else {
+            tabPager.removeTab(id)
+        }
         webViewIfInitialized()?.apply {
             stopLoading()
             onPause()
             clearHistory()
             removeAllViews()
             destroy()
-        }
-        if (priority == Priority.HIGH) {
-            tabPager.clearTab(id)
-        } else {
-            tabPager.removeTab(id)
         }
     }
 
@@ -526,6 +543,11 @@ class TabAdapter @AssistedInject constructor(
         width: Int = view.width,
         height: Int = view.height
     ): Bitmap? = withContext(coroutineDispatchers.main) {
+        // 渲染进程繁忙时跳过截图：view.draw(canvas) 会同步等渲染进程，DOM 巨大时拖死主线程。
+        // 保留旧预览即可，待页面恢复后下次刷新补上。
+        if (rendererBusyProvider.isRendererBusy()) {
+            return@withContext null
+        }
         // Ensure the view has been laid out
         if (width == 0 || height == 0) {
             return@withContext null

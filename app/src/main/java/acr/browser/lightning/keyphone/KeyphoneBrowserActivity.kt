@@ -120,6 +120,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     @Inject
     internal lateinit var keyphoneScroll: KeyphoneScroll
 
+    @Inject
+    internal lateinit var rendererBusyHolder: acr.browser.lightning.di.RendererBusyHolder
+
     /** 顶部标签栏 */
     private var tabBarScroll: HorizontalScrollView? = null
     private var tabBarContainer: LinearLayout? = null
@@ -278,6 +281,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             .inject(this)
 
         super.onCreate(savedInstanceState)
+        // 把渲染繁忙预判注入 app 作用域 holder，供 TabsRepository/TabAdapter 走降级路径
+        rendererBusyHolder.provider = { isRendererLikelyBusy() }
         onBackPressedDispatcher.addCallback(this, backPressedCallback)
 
         presenter.onViewAttached(this)
@@ -343,7 +348,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             cursorView = cursorView,
             webViewProvider = { currentWebView() },
             ensureScrollModule = { ensureCursorScrollModule(it) },
-            pageBusyProvider = { pageBusy }
+            pageBusyProvider = { isRendererLikelyBusy() }
         )
 
         quickMenuOverlay = findViewById(R.id.keyphone_quick_menu_overlay)
@@ -455,6 +460,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     override fun onDestroy() {
         super.onDestroy()
+        // 复位，避免 holder 持有已销毁 Activity 的 lambda（其它浏览器 Activity 默认 false）
+        rendererBusyHolder.provider = { false }
         presenter.onViewDetached()
     }
 
@@ -2602,6 +2609,15 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
     }
 
+    /** 事前预判：渲染进程很可能繁忙时返回真。
+     *  在 `pageBusy` 正式置位（阈值 1500ms）之前，只要上一次 ping 已发出且超过 PREEMPT(800ms)
+     *  未回，就认为渲染进程大概率卡住了——此刻任何会同步阻塞主线程的 WebView 调用都应跳过。 */
+    private fun isRendererLikelyBusy(): Boolean {
+        if (pageBusy) return true
+        if (!pagePingPending) return false
+        return SystemClock.elapsedRealtime() - pagePingSentAt >= PAGE_BUSY_PREEMPT_MS
+    }
+
     // endregion
 
     private fun deleteBookmark(bookmark: Bookmark.Entry) {
@@ -3635,7 +3651,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
      */
     private fun ensureCursorScrollModule(webView: WebView) {
         // 页面无响应时不碰 WebView：跨进程调用会把 UI 线程堵在等渲染进程上
-        if (pageBusy) return
+        if (isRendererLikelyBusy()) return
         val key = "${selectedTabId() ?: -1}:${webView.url.orEmpty()}"
         if (key == scrollModuleKey) return
         try {
@@ -3653,10 +3669,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private fun dispatchCursorTouch(action: Int) {
         val controller = mouseController ?: return
         val webView = currentWebView() ?: return
-        if (pageBusy) {
-            // 页面无响应：不派发触摸（避免把 UI 线程堵在渲染进程上），也不留下悬挂的按压态
+        if (isRendererLikelyBusy()) {
+            // 渲染进程很可能繁忙：不派发触摸（避免把 UI 线程堵在渲染进程上），也不留下悬挂的按压态。
+            // 立即置 pageBusy 让软键栏中键提示尽快出现，不必等阈值 1500ms 自然触发
             mouseTouchDown = false
-            KeydroidxLog.d(TAG, "页面繁忙，跳过光标触摸派发 action=$action")
+            setPageBusy(true)
+            KeydroidxLog.d(TAG, "渲染进程可能繁忙，跳过光标触摸派发 action=$action")
             return
         }
         try {
@@ -3829,6 +3847,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     private fun probeWebInput() {
         val webView = currentWebView() ?: return
+        // 渲染进程繁忙时不发 evaluateJavascript：跨进程调用会同步阻塞主线程
+        if (isRendererLikelyBusy()) return
         webInputProbeAttempt++
         webView.evaluateJavascript(webInputProbeJs) { result ->
             val parsed = parseWebInputProbe(result)
@@ -4237,11 +4257,16 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         /** 整分定时的小余量，避免恰好卡在边界上被系统判为提前唤醒 */
         private const val BOTTOM_CLOCK_SLACK_MS = 200L
 
-        /** 页面心跳间隔：每 tick 发一次 ping；上一次没回来时不重复发，不会堆积 */
-        private const val PAGE_BUSY_TICK_MS = 1000L
+        /** 页面心跳间隔：每 tick 发一次 ping；上一次没回来时不重复发，不会堆积。
+         *  加密到 400ms：把「事前预判」窗口压到亚秒级，让光标点击在渲染进程刚卡住时就被拦下 */
+        private const val PAGE_BUSY_TICK_MS = 400L
 
-        /** ping 超过此时长仍未回来，即判定「页面繁忙」 */
+        /** ping 超过此时长仍未回来，即判定「页面繁忙」（驱动软键栏中键提示） */
         private const val PAGE_BUSY_THRESHOLD_MS = 1500L
+
+        /** 事前预判阈值：ping 发出后超过此时长未回，即视为渲染进程很可能繁忙，
+         *  在它真正判忙之前就拦下会同步阻塞主线程的调用（dispatchTouchEvent / evaluateJavascript） */
+        private const val PAGE_BUSY_PREEMPT_MS = 800L
 
         /** 心跳脚本：只求值、不改页面（副作用为零） */
         private const val PAGE_BUSY_PING_JS = "1"

@@ -258,6 +258,17 @@ object KeyphoneGuardStore {
 
     private val migrated = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    /** 持久化中转条目 key 的内存缓存，避免每次请求都 getAll() 拷贝；写时失效。 */
+    @Volatile
+    private var redirectorKeysCache: Set<String>? = null
+
+    private fun redirectorKeys(context: Context): Set<String> {
+        redirectorKeysCache?.let { return it }
+        val keys = prefs(context, PREF_REDIRECTOR).all.keys
+        redirectorKeysCache = keys
+        return keys
+    }
+
     /** 一次性迁移：清空旧版本误学的中转规则（每进程只执行一次）。 */
     private fun ensureMigrated(context: Context) {
         if (migrated.get() || !migrated.compareAndSet(false, true)) return
@@ -265,6 +276,7 @@ object KeyphoneGuardStore {
             val meta = prefs(context, PREF_META)
             if (meta.getInt(META_REDIRECTOR_VERSION, 0) >= REDIRECTOR_DATA_VERSION) return
             prefs(context, PREF_REDIRECTOR).edit().clear().apply()
+            redirectorKeysCache = null
             meta.edit().putInt(META_REDIRECTOR_VERSION, REDIRECTOR_DATA_VERSION).apply()
         } catch (t: Throwable) {
             // 迁移失败不影响拦截功能本身
@@ -307,7 +319,9 @@ object KeyphoneGuardStore {
         ensureMigrated(context)
         val host = key.substringBefore('|')
         val path = key.substringAfter('|')
-        for (entryKey in prefs(context, PREF_REDIRECTOR).all.keys) {
+        // 用内存缓存替代 prefs(...).all.keys：getAll() 每次返回一份新拷贝，
+        // 在 shouldInterceptRequest 每个子资源都查一次时是可观的分配开销
+        for (entryKey in redirectorKeys(context)) {
             if (entryMatches(entryKey, host, path)) return true
         }
         return false
@@ -352,6 +366,7 @@ object KeyphoneGuardStore {
             .edit()
             .putString(key, encodeRule(RuleAction.DENY, persisted))
             .apply()
+        redirectorKeysCache = null
         return true
     }
 
@@ -384,6 +399,7 @@ object KeyphoneGuardStore {
 
     fun removeRedirector(context: Context, key: String) {
         prefs(context, PREF_REDIRECTOR).edit().remove(key).apply()
+        redirectorKeysCache = null
         synchronized(sessionRedirectors) {
             sessionRedirectors.remove(key)
             sessionRedirectorHits.remove(key)
@@ -392,6 +408,7 @@ object KeyphoneGuardStore {
 
     fun clearRedirectors(context: Context) {
         prefs(context, PREF_REDIRECTOR).edit().clear().apply()
+        redirectorKeysCache = null
         synchronized(sessionRedirectors) {
             sessionRedirectors.clear()
             sessionRedirectorHits.clear()

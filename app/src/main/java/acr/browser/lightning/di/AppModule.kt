@@ -243,6 +243,11 @@ class AppModule {
     fun providesKeyphoneScroll(): KeyphoneScroll = mezzanine()
 
     @Provides
+    @Singleton
+    fun providesRendererBusyProvider(holder: RendererBusyHolder): RendererBusyProvider =
+        RendererBusyProvider { holder.provider() }
+
+    @Provides
     fun providesCleanupList(
         faviconCleanup: FaviconCleanup,
         bookmarkCleanup: BookmarkCleanup,

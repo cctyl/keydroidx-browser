@@ -9,6 +9,7 @@ import acr.browser.lightning.constant.SCHEME_BOOKMARKS
 import acr.browser.lightning.constant.SCHEME_HISTORY
 import acr.browser.lightning.constant.SCHEME_HOMEPAGE
 import acr.browser.lightning.di.InitialAction
+import acr.browser.lightning.di.RendererBusyProvider
 import acr.browser.lightning.extensions.activeTabLimit
 import acr.browser.lightning.ids.ViewIdGenerator
 import acr.browser.lightning.pool.LimitedObjectPool
@@ -22,6 +23,7 @@ import acr.browser.lightning.utils.isFileUrl
 import android.app.ActivityManager
 import android.webkit.WebView
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -56,6 +58,7 @@ class TabsRepository @Inject constructor(
     private val bookmarkPageInitializer: BookmarkPageInitializer,
     private val historyPageInitializer: HistoryPageInitializer,
     private val appCoroutineScope: AppCoroutineScope,
+    private val rendererBusyProvider: RendererBusyProvider,
 ) : BrowserContract.Model {
 
     private val isInitialized = CompletableDeferred<Unit>()
@@ -87,22 +90,48 @@ class TabsRepository @Inject constructor(
 
     override suspend fun deleteTab(id: Int): Unit = withContext(coroutineDispatchers.main) {
         val tab = tabsList.forId(id)
-        recentTabModel.addClosedTab(tab.save())
-        tab.destroy()
-        tabsList = tabsList - tab
-
-        tabsListStateFlow.emit(tabsList)
-        scheduleSaveTabs()
+        // 渲染进程繁忙时：save()/destroy() 都会同步跨进程阻塞主线程。
+        // 先把标签从列表移除、刷新 UI（用户立即看到标签消失，presenter 随即切到相邻标签，
+        // busy WebView 被 TabPager 本地 removeView 摘下——本地操作不等渲染进程）；
+        // 把 save()+destroy() 推迟到下一轮主线程循环，此刻按键已返回、用户已拿回控制权，
+        // 即便推迟后的销毁仍短暂阻塞，影响也远小于现在卡死整壳。
+        if (rendererBusyProvider.isRendererBusy()) {
+            tabsList = tabsList - tab
+            tabsListStateFlow.emit(tabsList)
+            scheduleSaveTabs()
+            // save()/destroy() 是 suspend 且会跨进程阻塞：推迟到下一轮主线程循环执行，
+            // 此刻按键已返回、用户已拿回控制权
+            appCoroutineScope.launch(coroutineDispatchers.main) {
+                runCatching {
+                    recentTabModel.addClosedTab(tab.save())
+                    tab.destroy()
+                }
+            }
+        } else {
+            recentTabModel.addClosedTab(tab.save())
+            tab.destroy()
+            tabsList = tabsList - tab
+            tabsListStateFlow.emit(tabsList)
+            scheduleSaveTabs()
+        }
     }
 
     override suspend fun deleteAllTabs(): Unit = withContext(coroutineDispatchers.main) {
         isInitialized.await()
-
-        tabsList.forEach { it.destroy() }
-        tabsList = emptyList()
-
-        tabsListStateFlow.emit(tabsList)
-        scheduleSaveTabs()
+        if (rendererBusyProvider.isRendererBusy()) {
+            val toDestroy = tabsList
+            tabsList = emptyList()
+            tabsListStateFlow.emit(tabsList)
+            scheduleSaveTabs()
+            appCoroutineScope.launch(coroutineDispatchers.main) {
+                toDestroy.forEach { runCatching { it.destroy() } }
+            }
+        } else {
+            tabsList.forEach { it.destroy() }
+            tabsList = emptyList()
+            tabsListStateFlow.emit(tabsList)
+            scheduleSaveTabs()
+        }
     }
 
     override suspend fun createTab(

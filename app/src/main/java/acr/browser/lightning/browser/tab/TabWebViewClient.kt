@@ -95,6 +95,24 @@ class TabWebViewClient @AssistedInject constructor(
     }
 
     /**
+     * 渲染进程死亡回调（API 26+ 的 `WebViewClient.onRenderProcessGone`）。
+     * 不处理时系统默认会连 App 进程一起杀。由 [TabAdapter] 在 setup() 时注入具体处理：
+     * destroy 掉崩溃的 WebView、清空池引用、返回 true 告知系统「已接管」。
+     * 未注入时默认返回 true（保住 App 进程）并记日志。
+     */
+    var renderProcessGoneHandler: ((WebView, android.webkit.RenderProcessGoneDetail) -> Boolean)? = null
+
+    override fun onRenderProcessGone(
+        view: WebView,
+        detail: android.webkit.RenderProcessGoneDetail
+    ): Boolean {
+        return renderProcessGoneHandler?.invoke(view, detail) ?: run {
+            logger.log(TAG, "渲染进程死亡（未注入处理）：didCrash=${detail.didCrash()}")
+            true
+        }
+    }
+
+    /**
      * Emits changes to the current URL.
      */
     val urlSharedFlow: MutableSharedFlow<String> = MutableSharedFlow()
