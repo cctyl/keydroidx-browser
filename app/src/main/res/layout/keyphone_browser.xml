@@ -97,8 +97,10 @@
         android:background="@color/keydroidx_bottom_text"
         android:visibility="invisible" />
 
-    <!-- 主内容区：主页、Web 页面宿主与快捷菜单浮层 -->
+    <!-- 主内容区：主页、Web 页面宿主与快捷菜单浮层；shellOverlay（独立 Surface 光标/菜单）也挂在这里，
+         与 browserFrameHost 共用坐标系，光标位置零偏移 -->
     <FrameLayout
+        android:id="@+id/keyphone_content_frame"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1">

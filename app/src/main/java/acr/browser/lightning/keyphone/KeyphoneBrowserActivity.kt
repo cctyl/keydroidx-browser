@@ -331,9 +331,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             )
         )
 
-        // 外壳覆盖层：独立 Surface 自绘光标与快捷菜单，WebView 渲染进程再烧也不卡光标
+        // 外壳覆盖层：独立 Surface 自绘光标与快捷菜单，WebView 渲染进程再烧也不卡光标。
+        // 挂进 keyphone_content_frame（与 browserFrameHost 同坐标系）而非 content 根容器，
+        // 否则光标整体向上错位 headerH（tab栏+地址栏高度），顶部越界/底部盲区/点击错位全由此来
         val overlay = KeyphoneShellOverlay(this).apply { setCursorVisible(false) }
-        (window.decorView.findViewById(android.R.id.content) as? FrameLayout)?.addView(
+        findViewById<FrameLayout>(R.id.keyphone_content_frame)?.addView(
             overlay,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
