@@ -151,6 +151,11 @@
     <string name="keyphone_reading_no_content">未识别到正文内容</string>
     <string name="keyphone_reading_failed">进入阅读模式失败</string>
     <string name="keyphone_reading_page_failed">下一页加载失败</string>
+
+    <!-- 阅读模式首次进入的按键引导（只在第一次进入时弹一次） -->
+    <string name="keyphone_reading_guide_title">阅读模式按键</string>
+    <string name="keyphone_reading_guide_message">2 / 8 或上下方向键：整屏翻页\n1 / 3：减小 / 增大字号\n7：切换背景（米白·护眼黄·护眼绿·夜间灰·纯黑）\n读到章末自动拼接下一章\n* 菜单 6：退出（停在最后读到的那一章）\n随时可在 左软键菜单 → 帮助 里再看</string>
+    <string name="keyphone_reading_guide_ok">知道了</string>
     <string name="keyphone_reading_loading">页面加载中，请稍后再试</string>
 
     <!-- 阅读模式外观：1/3 调字号，7 轮换背景（5 套配色见 keyphone_reading_theme_*） -->
@@ -200,6 +205,20 @@
     <string name="keyphone_opt_downloads">下载</string>
     <string name="keyphone_opt_settings">设置</string>
     <string name="keyphone_opt_exit">退出浏览器</string>
+
+    <!-- 帮助（选项页入口 → 分类列表 → 各功能讲解页） -->
+    <string name="keyphone_opt_help">帮助</string>
+    <string name="keyphone_help_title">帮助</string>
+    <string name="keyphone_help_section_topics">功能讲解</string>
+    <string name="keyphone_help_reading">阅读模式</string>
+    <string name="keyphone_help_reading_subtitle">翻页 / 字号 / 背景 / 自动拼章</string>
+    <string name="keyphone_help_reading_body">入口：浏览网页时按 * 键打开页面菜单，选「6.阅读模式」进入；再选一次或按返回键退出。\n\n翻页：按 2 / 8 或上下方向键整屏翻页，长按可以连续翻。\n\n字号：按 1 减小、按 3 增大，共 10 档（14~40px）；下次进入阅读模式保持上次选择。\n\n背景：按 7 轮换 米白 → 护眼黄 → 护眼绿 → 夜间灰 → 夜间纯黑，正文颜色随背景一起换，同样是下次进入保持。\n\n自动拼章：读到章末会自动抓取下一章接在后面，不需要任何操作；已经是最后一章时提示「已到最后一页」。\n\n退出：按 * 打开菜单再选「6」退出阅读模式。读过多章时会退到最后读到的那一章（地址栏、历史记录、下次打开浏览器都停在那一章）；只读了进入时那一章则原地还原，不会重新加载页面。\n\n历史记录：阅读模式里读过的每一章都会记进历史记录，回主页能看到，也可以直接点开其中任意一章。</string>
+    <string name="keyphone_help_cursor">方向键与光标</string>
+    <string name="keyphone_help_cursor_subtitle">光标移动 · 1~9 跳跃 · 确认点击</string>
+    <string name="keyphone_help_cursor_body">打开网页后，方向键移动屏幕上的光标（按住不放可连续移动），光标所在位置就是确认键的点击点。\n\n1~9 九宫格跳跃：把屏幕看成九宫格，按数字键光标就跳到对应那一格（1 左上、2 上中、3 右上、4 左中、5 正中、6 右中、7 左下、8 下中、9 右下）。落点在格内偏向该键对应的角落，顶栏 / 底栏的按钮更容易打到；只移动不点击。\n\n确认键：点击光标所在位置（所见即所点）；按住不放相当于对网页元素长按（例如长按链接）。\n\n0 键：循环切换下一个标签页。\n\n光标不见了？打开菜单、进入阅读模式、页内查找或自由复制时光标会临时隐藏，回到普通网页态按方向键就会重新出现。\n\n某些站点默认位置不准，可以用 # 菜单 7「专属按键适配」为这个网址逐键标定落点。</string>
+    <string name="keyphone_help_menu">菜单与按键</string>
+    <string name="keyphone_help_menu_subtitle">* 页面菜单 · # 全局菜单</string>
+    <string name="keyphone_help_menu_body">* 页面菜单（针对当前网页 / 窗口）：\n1 刷新页面 · 2 添加书签 · 3 复制链接 · 4 分享 · 5 页内查找 · 6 阅读模式（进入 / 退出）· 7 清空标签页 · 0 新建标签页 · * 关闭窗口。\n\n# 全局菜单（常用工具）：\n1 输入网址 · 2 快捷搜索 · 3 书签历史 · 4 跳转拦截 · 5 页首 / 页尾 · 6 自由复制 · 7 专属按键适配 · * 无图切换 · # 切换全屏。\n\n菜单打开后：方向键移动高亮，确认键执行，也可以直接按对应数字键直达；页面菜单里按 # 可以切到全局菜单；RSK / 返回关闭菜单。\n\n页内查找（* 菜单 5）：LSK 上一个、确认键下一个、RSK 退出。\n\n自由复制（# 菜单 6）：左右方向键移动选择点，确认键开始选择，再按一次确认键复制；LSK 重置选择，RSK 退出。\n\n专属按键适配（# 菜单 7）：先选站点，再按 1~9 选要标定的键，用方向键把光标移到目标位置，按其他任意键保存并切到下一个键，RSK 完成；LSK 把该键写回默认九宫格落点。</string>
 
     <!-- 退出确认 -->
     <string name="keyphone_exit_title">退出浏览器</string>

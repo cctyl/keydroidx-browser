@@ -133,6 +133,7 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         OptionEntry.Option(KeydroidxIcons.ICON_SETTINGS, R.string.keyphone_opt_settings) {
             relay(ACTION_SETTINGS)
         },
+        OptionEntry.Option(KeydroidxIcons.ICON_HELP, R.string.keyphone_opt_help) { launchHelp() },
         OptionEntry.Option(KeydroidxIcons.ICON_POWER, R.string.keyphone_opt_exit) {
             relay(ACTION_EXIT)
         }
@@ -163,6 +164,7 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         OptionEntry.Section(R.string.keyphone_section_system),
         OptionEntry.Option(KeydroidxIcons.ICON_LOCK, R.string.keyphone_opt_guard) { launchGuardRules() },
         OptionEntry.Option(KeydroidxIcons.ICON_SETTINGS, R.string.keyphone_opt_settings) { launchSettings() },
+        OptionEntry.Option(KeydroidxIcons.ICON_HELP, R.string.keyphone_opt_help) { launchHelp() },
         OptionEntry.Option(KeydroidxIcons.ICON_POWER, R.string.keyphone_opt_exit) { confirmExit() }
     )
 
@@ -239,6 +241,20 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
             startActivity(Intent(this, KeyphoneGuardListActivity::class.java))
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "打开安全拦截规则页失败", t)
+        }
+    }
+
+    /**
+     * 帮助页（分类讲解按键功能）。
+     *
+     * 本页与模式无关：首页模式与页面模式都直接本地拉起，不需要回传浏览页执行
+     * （对比「设置」在页面模式下由浏览页转发给 `SettingsActivity`）。
+     */
+    private fun launchHelp() {
+        try {
+            startActivity(Intent(this, KeyphoneHelpActivity::class.java))
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "打开帮助页失败", t)
         }
     }
 

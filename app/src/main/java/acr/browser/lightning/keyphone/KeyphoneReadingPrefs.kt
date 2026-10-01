@@ -19,6 +19,7 @@ object KeyphoneReadingPrefs {
     private const val PREFS_NAME = "keyphone_reading"
     private const val KEY_THEME = "theme_index"
     private const val KEY_FONT = "font_size"
+    private const val KEY_GUIDE_SHOWN = "guide_shown"
 
     /** 主题数量：米白 / 护眼黄 / 护眼绿 / 夜间灰 / 夜间纯黑（JS 侧 THEMES 表长度） */
     const val THEME_COUNT = 5
@@ -34,6 +35,9 @@ object KeyphoneReadingPrefs {
      */
     private var cachedTheme = -1
     private var cachedFont = -1
+
+    /** 按键使用引导是否已展示过（-1 未加载 / 0 未展示 / 1 已展示），同样缓存避免主线程读盘 */
+    private var cachedGuideShown = -1
 
     /** 背景主题序号，越界自动回落到米白 */
     fun themeIndex(context: Context): Int {
@@ -78,6 +82,28 @@ object KeyphoneReadingPrefs {
             prefs(context).edit().putInt(KEY_FONT, value).apply()
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "保存阅读模式字号偏好失败: $value", t)
+        }
+    }
+
+    /** 是否已经展示过阅读模式按键引导（只在首次进入阅读模式时弹一次） */
+    fun guideShown(context: Context): Boolean {
+        if (cachedGuideShown < 0) {
+            cachedGuideShown = try {
+                if (prefs(context).getBoolean(KEY_GUIDE_SHOWN, false)) 1 else 0
+            } catch (t: Throwable) {
+                KeydroidxLog.e(TAG, "读取阅读模式引导标记失败", t)
+                0
+            }
+        }
+        return cachedGuideShown == 1
+    }
+
+    fun setGuideShown(context: Context) {
+        cachedGuideShown = 1
+        try {
+            prefs(context).edit().putBoolean(KEY_GUIDE_SHOWN, true).apply()
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "保存阅读模式引导标记失败", t)
         }
     }
 

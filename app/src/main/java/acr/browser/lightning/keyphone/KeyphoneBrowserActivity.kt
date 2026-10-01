@@ -704,7 +704,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     updateBackPressedEnabled()
                     // 阅读模式下隐藏鼠标光标层（方向键已改为整屏翻页）
                     updateMouseCursorVisibility()
-                    showReadingToast(getString(R.string.keyphone_reading_enter))
+                    // 首次进入弹按键使用引导；弹了就不必再叠一个进模式提示
+                    if (!showReadingGuideIfNeeded()) {
+                        showReadingToast(getString(R.string.keyphone_reading_enter))
+                    }
                 }
                 "empty" -> showReadingToast(getString(R.string.keyphone_reading_no_content))
                 else -> {
@@ -712,6 +715,35 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     showReadingToast(getString(R.string.keyphone_reading_failed))
                 }
             }
+        }
+    }
+
+    /**
+     * 首次进入阅读模式时弹一次按键使用引导（见 [KeyphoneReadingPrefs.guideShown]）。
+     *
+     * 用 SDK 的确认弹窗承载而不是 Toast：这份说明有 5 行按键清单，Toast 会自动消失且会排队，
+     * 弹窗能停住等用户看完（左软键「知道了」/确认键关闭，右软键同样关闭）。
+     * 返回是否真的弹了，供调用方决定要不要再弹一条进模式提示。
+     */
+    private fun showReadingGuideIfNeeded(): Boolean {
+        if (KeyphoneReadingPrefs.guideShown(this)) {
+            return false
+        }
+        KeyphoneReadingPrefs.setGuideShown(this)
+        return try {
+            KeydroidxConfirmDialog(
+                this,
+                getString(R.string.keyphone_reading_guide_title),
+                getString(R.string.keyphone_reading_guide_message)
+            )
+                .setPositiveButton(getString(R.string.keyphone_reading_guide_ok)) { }
+                .setNegativeButton("") { }
+                .show()
+            KeydroidxLog.d(TAG, "首次进入阅读模式：展示按键使用引导")
+            true
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "展示阅读模式按键引导失败", t)
+            false
         }
     }
 
