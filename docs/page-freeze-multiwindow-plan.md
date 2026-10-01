@@ -1,6 +1,9 @@
 # 浏览器卡死根治方案：WebView 请出壳窗口（同进程三窗口架构）
 
-> 状态：方案（待实施）。本文基于 2026-10-01 复现日志的实测证据，不依赖任何设备特定行为，对通用设备同样适用。
+> 状态：**spike 已实施（commit 见 git log），待用户复现验证**；第二步（覆盖层窗口）验证通过后再做。
+> 本文基于 2026-10-01 复现日志的实测证据，不依赖任何设备特定行为，对通用设备同样适用。
+> 实施记录：spike 只把 WebView 挪进独立 Panel 窗口（`KeyphoneAuxWindows.kt`），overlay 一并放入该窗口（独立 surface 不受窗口帧卡影响）。
+> 踩坑记录：`onInitViews` 阶段 `decorView.windowToken` 尚为空，`addView` 需推迟到 token 就绪（decor.post），否则 `BadTokenException`。
 > 前置阅读：`docs/page-freeze-solution.md`（根因诊断、独立 Surface 方案及为何不足）。
 
 ## 一、为什么独立 Surface 还不够（本次复现铁证）
