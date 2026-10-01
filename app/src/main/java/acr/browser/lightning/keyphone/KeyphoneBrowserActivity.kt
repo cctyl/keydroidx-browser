@@ -49,6 +49,8 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.lifecycleScope
 import io.github.cctyl.nokia.common.log.KeydroidxLog
 import io.github.cctyl.nokia.common.model.KeydroidxKeyAction
@@ -344,6 +346,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         quickMenuCard?.background = cardBg
         quickMenuOverlay?.setOnClickListener { hideQuickMenu() }
 
+        registerWebPromptLifecycle()
         updateTabMode()
         loadHomeData()
     }
@@ -351,6 +354,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     override fun onResume() {
         super.onResume()
         KeyphoneUrlGuard.attach(guardHost)
+        // 只有当前挂在浏览容器里的 WebView 才算「可见页」：后台标签页的弹窗一律静默处理，
+        // 否则广告站的后台标签能随时把确认框盖到用户正在看的页面上
+        KeyphoneJsDialogs.attach(jsDialogHost) { view -> view === currentWebView() }
         presenter.onViewShown()
         // 回前台立刻校时（后台期间可能已跨分钟），再对齐下一次整分刷新
         refreshBottomClock()
@@ -363,6 +369,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     override fun onPause() {
         bottomClockHandler.removeCallbacks(bottomClockTick)
         KeyphoneUrlGuard.detach(guardHost)
+        KeyphoneJsDialogs.detach(jsDialogHost)
         super.onPause()
         selectLongPressJob?.cancel()
         if (mouseTouchDown) {
@@ -1259,6 +1266,164 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
         }
     }
+
+    // region 网页 JS 弹窗接管（alert / confirm / prompt / beforeunload）
+
+    /** 上一条网页 alert 提示的时刻：广告站会弹窗风暴，提示必须节流。 */
+    private var webAlertLastAt = 0L
+
+    /** 待用户输入的网页 prompt 回调（null 表示当前没有）。 */
+    private var webPromptPending: ((String?) -> Unit)? = null
+
+    /** 待用户输入的网页 prompt 所在输入页，用于识别「未确认即被关闭」。 */
+    private var webPromptFragment: KeydroidxTextInputFragment? = null
+
+    /**
+     * 网页 JS 弹窗宿主（onResume 注册 / onPause 注销，与 [guardHost] 同生命周期）。
+     *
+     * 三个回调都只用**宿主自己的键控组件**承载，绝不产生系统模态窗口——这是
+     * 「页面卡住时菜单 / 光标 / 标签栏仍然可用」的前提，详见 [KeyphoneJsDialogs]。
+     */
+    private val jsDialogHost: KeyphoneJsDialogs.Host by lazy {
+        object : KeyphoneJsDialogs.Host {
+            override fun showWebAlert(url: String?, message: String) {
+                showWebAlertNotice(message)
+            }
+
+            override fun showWebConfirm(
+                url: String?,
+                message: String,
+                onDecision: (Boolean) -> Unit
+            ) {
+                showWebConfirmCard(message, onDecision)
+            }
+
+            override fun showWebPrompt(
+                url: String?,
+                message: String,
+                defaultValue: String,
+                onResult: (String?) -> Unit
+            ) {
+                openWebPromptInput(message, defaultValue, onResult)
+            }
+        }
+    }
+
+    /**
+     * 网页 alert → 非模态提示条。
+     *
+     * 页面 JS 已被立即放行（见 [KeyphoneJsDialogs.handleAlert]），这里只负责告知用户。
+     * 广告站常连着弹十几条 alert，按固定间隔节流，避免刷屏掩盖真正的拦截提示。
+     */
+    private fun showWebAlertNotice(message: String) {
+        val text = message.replace('\n', ' ').trim()
+        KeydroidxLog.d(TAG, "网页 alert: ${text.take(WEB_ALERT_LOG_CHARS)}")
+        val now = SystemClock.elapsedRealtime()
+        if (now - webAlertLastAt < WEB_ALERT_TOAST_GAP_MS) return
+        webAlertLastAt = now
+        val shown = if (text.isEmpty()) {
+            getString(R.string.keyphone_js_alert_empty)
+        } else {
+            getString(R.string.keyphone_js_alert, text.take(WEB_ALERT_MAX_CHARS))
+        }
+        Toast.makeText(this, shown, Toast.LENGTH_SHORT).show()
+    }
+
+    /** 网页 confirm → SDK 键控确认框（软键左 / 确认键 = 确定，软键右 / 返回 = 取消）。 */
+    private fun showWebConfirmCard(message: String, onDecision: (Boolean) -> Unit) {
+        val text = message.replace('\n', ' ').trim()
+            .ifBlank { getString(R.string.keyphone_js_confirm_empty) }
+        KeydroidxLog.d(TAG, "网页 confirm: ${text.take(WEB_ALERT_LOG_CHARS)}")
+        // 只回填一次：确认走 dismiss()、取消走 cancel()、返回键又触发 onCancelListener，
+        // 三者可能叠加，必须去重——同一个 JsResult 回填两次 WebView 会抛异常
+        var decided = false
+        val decide: (Boolean) -> Unit = { allow ->
+            if (!decided) {
+                decided = true
+                onDecision(allow)
+            }
+        }
+        try {
+            val dialog = KeydroidxConfirmDialog(
+                this,
+                getString(R.string.keyphone_js_confirm_title),
+                text
+            )
+                .setPositiveButton(getString(R.string.keyphone_js_confirm_ok)) { decide(true) }
+                .setNegativeButton(getString(R.string.keyphone_js_confirm_cancel)) { decide(false) }
+            // SDK 弹窗只把软键右映射为取消，返回键走 Dialog 默认 dismiss、不触发 negativeButton；
+            // 不补这一手，页面那次 confirm() 会永久悬挂
+            dialog.setOnCancelListener { decide(false) }
+            dialog.show()
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "展示网页 confirm 框失败", t)
+            decide(false)
+        }
+    }
+
+    /** 网页 prompt → SDK 键控输入页（预填网页给的默认值），确认回填文本、取消回填 null。 */
+    private fun openWebPromptInput(
+        message: String,
+        defaultValue: String,
+        onResult: (String?) -> Unit
+    ) {
+        if (webPromptPending != null) {
+            // 同一时刻只允许一个输入请求，避免页面（或广告脚本）连续弹输入页劫持按键
+            KeydroidxLog.d(TAG, "网页 prompt 已有待输入项，本次直接取消")
+            onResult(null)
+            return
+        }
+        val title = message.replace('\n', ' ').trim()
+            .ifBlank { getString(R.string.keyphone_js_prompt_title) }
+        val fragment = KeydroidxTextInputFragment.newInstance(
+            title,
+            defaultValue.ifBlank { null },
+            getString(R.string.keyphone_js_prompt_hint),
+            false,
+            WEB_PROMPT_MAX_CHARS
+        ).setRequired(false)
+        webPromptPending = onResult
+        webPromptFragment = fragment
+        fragment.setOnConfirmListener { text ->
+            // SDK 输入页会 trim；空串对网页 prompt 是合法的「确认空值」，不能当取消
+            finishWebPrompt(text ?: "")
+        }
+        KeydroidxLog.d(TAG, "网页 prompt: 打开输入页 title=$title")
+        openFragment(fragment)
+    }
+
+    /** 结束一次网页 prompt：回填结果并清状态（[text] 为 null 表示取消）。 */
+    private fun finishWebPrompt(text: String?) {
+        val callback = webPromptPending ?: return
+        webPromptPending = null
+        webPromptFragment = null
+        try {
+            callback(text)
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "回填网页 prompt 结果失败", t)
+        }
+    }
+
+    /**
+     * 网页 prompt 的兜底：SDK 输入页没有取消回调（BACK / 空内容软键右直接出栈），
+     * 用 Fragment 生命周期识别「未确认即被关闭」并回填 null，否则那次 `prompt()` 会永久悬挂。
+     * 确认路径不受影响：输入页先回调 `onConfirmListener` 再出栈。
+     */
+    private fun registerWebPromptLifecycle() {
+        supportFragmentManager.registerFragmentLifecycleCallbacks(
+            object : FragmentManager.FragmentLifecycleCallbacks() {
+                override fun onFragmentDestroyed(fm: FragmentManager, f: Fragment) {
+                    if (f === webPromptFragment) {
+                        KeydroidxLog.d(TAG, "网页 prompt 输入页未确认即关闭，回填 null")
+                        finishWebPrompt(null)
+                    }
+                }
+            },
+            false
+        )
+    }
+
+    // endregion
 
     /** # 菜单 4：站内跳转拦截（需停留在网页态且有可归一的域名）。 */
     private fun showJumpGuardMenu() {
@@ -3860,6 +4025,18 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         private const val GRID_COLUMNS = 3
         private const val MAX_HISTORY_ROWS = 10
         private const val MAX_INPUT_CHARS = 100
+
+        /** 网页 alert：提示条节流间隔（弹窗风暴时避免刷屏，掩盖真正的拦截提示） */
+        private const val WEB_ALERT_TOAST_GAP_MS = 1500L
+
+        /** 网页 alert：提示条正文最大字符数（长广告文案只显示开头） */
+        private const val WEB_ALERT_MAX_CHARS = 60
+
+        /** 网页 alert：日志正文最大字符数 */
+        private const val WEB_ALERT_LOG_CHARS = 200
+
+        /** 网页 prompt：输入页字符上限（0 = 不限，与网页原生 prompt 行为一致） */
+        private const val WEB_PROMPT_MAX_CHARS = 0
 
         /** 底部软键栏中键时间：24 小时制，分钟粒度（对齐整分刷新） */
         private const val BOTTOM_CLOCK_PATTERN = "HH:mm"

@@ -10,6 +10,7 @@ import acr.browser.lightning.dialog.DialogItem
 import acr.browser.lightning.extensions.color
 import acr.browser.lightning.extensions.resizeAndShow
 import acr.browser.lightning.favicon.FaviconModel
+import acr.browser.lightning.keyphone.KeyphoneJsDialogs
 import acr.browser.lightning.keyphone.KeyphoneUrlGuard
 import acr.browser.lightning.preference.UserPreferencesDataStore
 import acr.browser.lightning.utils.Utils
@@ -21,6 +22,8 @@ import android.net.Uri
 import android.os.Message
 import android.view.View
 import android.webkit.GeolocationPermissions
+import android.webkit.JsPromptResult
+import android.webkit.JsResult
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -157,6 +160,40 @@ class TabWebChromeClient @AssistedInject constructor(
             closeWindowSharedFlow.emit(Unit)
         }
     }
+
+    // ------------------------------------------------------------------
+    // 网页 JS 弹窗：按键机浏览页在场时一律接管
+    //
+    // WebView 默认实现弹的是**独立窗口的系统模态对话框**，实测会把宿主按键全部夺走
+    // （`*` 菜单打不开、方向键光标不动、标签栏也点不了）——广告站只靠弹窗就能把浏览器
+    // 钉死。接管后由宿主用键控组件承载，页面永远夺不走按键。
+    // 未注册宿主（上游触屏浏览器）时返回 false，行为与改造前完全一致。
+    // ------------------------------------------------------------------
+
+    override fun onJsAlert(view: WebView, url: String?, message: String?, result: JsResult): Boolean =
+        KeyphoneJsDialogs.handleAlert(view, url, message, result) ||
+            super.onJsAlert(view, url, message, result)
+
+    override fun onJsConfirm(view: WebView, url: String?, message: String?, result: JsResult): Boolean =
+        KeyphoneJsDialogs.handleConfirm(view, url, message, result) ||
+            super.onJsConfirm(view, url, message, result)
+
+    override fun onJsPrompt(
+        view: WebView,
+        url: String?,
+        message: String?,
+        defaultValue: String?,
+        result: JsPromptResult
+    ): Boolean = KeyphoneJsDialogs.handlePrompt(view, url, message, defaultValue, result) ||
+        super.onJsPrompt(view, url, message, defaultValue, result)
+
+    override fun onJsBeforeUnload(
+        view: WebView,
+        url: String?,
+        message: String?,
+        result: JsResult
+    ): Boolean = KeyphoneJsDialogs.handleBeforeUnload(view, url, message, result) ||
+        super.onJsBeforeUnload(view, url, message, result)
 
     override fun onProgressChanged(view: WebView, newProgress: Int) {
         tabCoroutineScope.launch {
