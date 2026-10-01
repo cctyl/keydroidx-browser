@@ -12,7 +12,6 @@ import android.widget.ScrollView
 import androidx.lifecycle.lifecycleScope
 import io.github.cctyl.nokia.common.log.KeydroidxLog
 import io.github.cctyl.nokia.common.model.KeydroidxKeyAction
-import io.github.cctyl.nokia.common.ui.KeydroidxTheme
 import io.github.cctyl.nokia.common.ui.dialog.KeydroidxConfirmDialog
 import io.github.cctyl.nokia.common.ui.page.KeydroidxListPageFragment
 import kotlinx.coroutines.Dispatchers
@@ -61,7 +60,9 @@ class KeyphoneTabsFragment : KeydroidxListPageFragment() {
     override fun onPageCreated(view: View, savedInstanceState: Bundle?) {
         // `midPanel` 是个裸 FrameLayout，且基类 `KeydroidxPageFragment.onViewCreated` 会
         // `setBackgroundResource(0)` 清掉 Fragment 背景 —— 不显式填色就会透出底下的 WebView。
-        view.setBackgroundColor(KeydroidxTheme.getCurrentTheme(requireContext()).darkColor)
+        // 背景与主页容器（keyphone_browser.xml `#121D2C`）一致，避免页间切换背景跳变
+        // （主题 darkColor 是顶栏渐变收尾色，与主页色肉眼可辨，会显得「和主题对不上」）。
+        view.setBackgroundColor(HOME_BACKGROUND)
         listScroll = view.findViewById<ScrollView>(R.id.keyphone_scroll)
         val host = activity as? KeyphoneBrowserActivity ?: return
         val box = view.findViewById<LinearLayout>(R.id.keyphone_rows) ?: return
@@ -249,5 +250,8 @@ class KeyphoneTabsFragment : KeydroidxListPageFragment() {
 
     companion object {
         private const val TAG = "KeyphoneTabs"
+
+        /** 与主页容器同色（keyphone_browser.xml `#121D2C`），避免页间切换时背景跳变。 */
+        private const val HOME_BACKGROUND = 0xFF121D2C.toInt()
     }
 }

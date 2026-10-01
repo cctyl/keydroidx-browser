@@ -3,7 +3,6 @@ package acr.browser.lightning.keyphone
 import acr.browser.lightning.IncognitoBrowserActivity
 import acr.browser.lightning.R
 import acr.browser.lightning.constant.SCHEME_BOOKMARKS
-import acr.browser.lightning.constant.SCHEME_HISTORY
 import acr.browser.lightning.settings.activity.SettingsActivity
 import android.content.Intent
 import android.net.Uri
@@ -156,7 +155,7 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         OptionEntry.Divider,
         OptionEntry.Section(R.string.keyphone_section_records),
         OptionEntry.Option(KeydroidxIcons.ICON_HISTORY, R.string.keyphone_opt_history) {
-            launchBrowser(SCHEME_HISTORY, "打开历史记录失败")
+            launchHistoryPage()
         },
         OptionEntry.Option(KeydroidxIcons.ICON_DOWNLOAD, R.string.keyphone_opt_downloads) { todo() },
 
@@ -182,6 +181,20 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
             )
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "返回首页失败", t)
+        }
+    }
+
+    /**
+     * 历史记录页（首页模式入口）。
+     *
+     * 独立 Activity（[KeyphoneHistoryActivity]，与安全拦截页同款骨架，自带标题栏），
+     * 直接拉起即可，不再绕道浏览页。
+     */
+    private fun launchHistoryPage() {
+        try {
+            startActivity(Intent(this, KeyphoneHistoryActivity::class.java))
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "打开历史记录失败", t)
         }
     }
 

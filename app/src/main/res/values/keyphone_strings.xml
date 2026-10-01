@@ -39,7 +39,7 @@
     <!-- 按键 # 全局快捷工具菜单（UC 经典 # 键全局菜单） -->
     <string name="keyphone_pm_input_url">1.输入网址</string>
     <string name="keyphone_pm_search">2.快捷搜索</string>
-    <string name="keyphone_pm_bookmarks">3.书签历史</string>
+    <string name="keyphone_pm_history">3.历史记录</string>
     <!-- 原「4.文件管理」移入右软键选项页（下载），第 4 项改为跳转拦截级联入口 -->
     <string name="keyphone_pm_jump_guard">4.跳转拦截</string>
     <string name="keyphone_pm_scroll_top_bottom">5.页首/页尾</string>
@@ -180,6 +180,20 @@
     <string name="keyphone_clear_tabs_title">清空标签页</string>
     <string name="keyphone_clear_tabs_message">确定要清空全部标签页吗？</string>
     <string name="keyphone_tabs_cleared">已清空标签页</string>
+
+    <!-- 历史记录页（竖向一行一条：标题 + 网址） -->
+    <string name="keyphone_history_title">历史记录</string>
+
+    <string name="keyphone_history_empty">暂无历史记录</string>
+    <string name="keyphone_history_today">今天</string>
+    <string name="keyphone_history_yesterday">昨天</string>
+    <string name="keyphone_history_load_failed">历史记录读取失败</string>
+    <string name="keyphone_delete_history_title">删除记录</string>
+    <string name="keyphone_delete_history_message">确定要删除这条历史记录吗？</string>
+    <string name="keyphone_history_deleted">已删除</string>
+    <string name="keyphone_clear_history_title">清空历史记录</string>
+    <string name="keyphone_clear_history_message">确定要清空全部历史记录吗？</string>
+    <string name="keyphone_history_cleared">已清空历史记录</string>
 
     <!-- 浏览页选项：标签页列表入口（直接放选项里，不再藏进设置页） -->
     <string name="keyphone_opt_tabs">标签页列表</string>

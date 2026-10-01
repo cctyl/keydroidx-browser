@@ -18,6 +18,7 @@ import acr.browser.lightning.database.HistoryEntry
 import acr.browser.lightning.database.bookmark.BookmarkRepository
 import acr.browser.lightning.database.history.HistoryRepository
 import acr.browser.lightning.di.injector
+import acr.browser.lightning.html.homepage.HomePageFactory
 import acr.browser.lightning.js.KeyphoneReadingMode
 import acr.browser.lightning.js.KeyphoneScroll
 import acr.browser.lightning.preference.UserPreferencesDataStore
@@ -479,11 +480,23 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     // region 顶部标签栏与模式切换
 
-    /** 判断指定标签页是否处于主页空白状态 */
+    /**
+     * 判断指定标签页是否处于「原生主页」状态（显示九宫格，隐藏 WebView）。
+     *
+     * 只有真·主页算主页：空白地址、`about:home`、`about:blank`、主页 HTML。
+     * 书签 / 历史 / 下载这些内部页同样是 `about:` 开头或 `file://...html`（[isSpecialUrl]），
+     * 但它们的内容由 WebView 渲染，**必须显示 WebView** —— 之前一律判成主页，
+     * 于是「打开历史记录」看到的是主页（内部页被藏起来了）。
+     */
     private fun isTabHome(tab: TabViewState?): Boolean {
         if (tab == null) return true
         val url = tab.url.trim()
-        return url.isBlank() || url.isSpecialUrl() || url.startsWith("about:") || url.startsWith("chrome://")
+        if (url.isBlank()) return true
+        if (url == SCHEME_HOMEPAGE || url == SCHEME_BLANK) return true
+        if (url.isSpecialUrl()) {
+            return url.endsWith(HomePageFactory.FILENAME)
+        }
+        return false
     }
 
     /** 刷新 UC 风格顶部标签栏与主内容区可见性 */
@@ -646,7 +659,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     /** 打开网址：若当前标签是主页空白页直接在当前标签加载，否则新建标签页加载 */
-    private fun openUrlInNewTab(url: String) {
+    internal fun openUrlInNewTab(url: String) {
         KeydroidxLog.d(TAG, "openUrlInNewTab: $url")
         if (isFindMode) {
             exitFindMode()
@@ -1278,7 +1291,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         return listOf(
             KeyphoneViews.QuickMenuItem("1", getString(R.string.keyphone_pm_input_url)) { openSearchEditor() },
             KeyphoneViews.QuickMenuItem("2", getString(R.string.keyphone_pm_search)) { openSearchEditor() },
-            KeyphoneViews.QuickMenuItem("3", getString(R.string.keyphone_pm_bookmarks)) { menuClick(MenuSelection.HISTORY) },
+            KeyphoneViews.QuickMenuItem("3", getString(R.string.keyphone_pm_history)) { showHistoryPage() },
             KeyphoneViews.QuickMenuItem("4", getString(R.string.keyphone_pm_jump_guard)) { showJumpGuardMenu() },
             KeyphoneViews.QuickMenuItem("5", getString(R.string.keyphone_pm_scroll_top_bottom)) { toggleScrollTopBottom() },
             KeyphoneViews.QuickMenuItem("6", getString(R.string.keyphone_pm_free_copy)) { startFreeCopyMode() },
@@ -2755,6 +2768,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 updateTabMode()
             }
         }
+        // 页面 push/pop 都会走到这里：顺带刷新光标显隐，
+        // 保证历史记录/标签页列表打开时方向键驱动的是列表焦点而不是光标
+        updateMouseCursorVisibility()
     }
 
     // endregion
@@ -2813,6 +2829,21 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             if (!isFinishing && !isDestroyed) {
                 openFragment(KeyphoneTabsFragment())
             }
+        }
+    }
+
+    /**
+     * 打开按键机「历史记录」页。
+     *
+     * 独立 Activity（[KeyphoneHistoryActivity]，与安全拦截页同款骨架）：
+     * 自带基类标题栏，观感与选项页 / 安全拦截页一致；打开链接经浏览页
+     * singleTop 入口（intent data）新标签页加载。
+     */
+    private fun showHistoryPage() {
+        try {
+            startActivity(Intent(this, KeyphoneHistoryActivity::class.java))
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "打开历史记录失败", t)
         }
     }
 
@@ -3627,6 +3658,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             !isFindMode &&
             !isFreeCopyMode &&
             !isCalibrateMode &&
+            // 页面 Fragment（历史记录/标签页列表等）打开期间光标必须让位：
+            // 方向键要驱动列表焦点，光标叠在列表上只会误导（看起来像在用光标操作）
+            getCurrentPage() == null &&
             // 阅读模式：方向键改为整屏翻页，光标层隐藏，避免出现第二个滚动源
             !isReadingMode()
     }
@@ -4193,7 +4227,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             KeyphoneOptionsActivity.ACTION_SHARE -> menuClick(MenuSelection.SHARE)
             KeyphoneOptionsActivity.ACTION_COPY_LINK -> menuClick(MenuSelection.COPY_LINK)
             KeyphoneOptionsActivity.ACTION_ADD_HOME -> addCurrentPageToHome()
-            KeyphoneOptionsActivity.ACTION_HISTORY -> menuClick(MenuSelection.HISTORY)
+            KeyphoneOptionsActivity.ACTION_HISTORY -> showHistoryPage()
             KeyphoneOptionsActivity.ACTION_DOWNLOADS -> menuClick(MenuSelection.DOWNLOADS)
             KeyphoneOptionsActivity.ACTION_SHOW_TABS -> showTabsPage()
             KeyphoneOptionsActivity.ACTION_CLEAR_TABS -> confirmClearAllTabs()

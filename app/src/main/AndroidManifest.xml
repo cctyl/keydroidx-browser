@@ -64,6 +64,11 @@
             android:theme="@style/Theme.DarkTheme"
             android:windowSoftInputMode="stateHidden" />
         <activity
+            android:name="acr.browser.lightning.keyphone.KeyphoneHistoryActivity"
+            android:exported="false"
+            android:theme="@style/Theme.DarkTheme"
+            android:windowSoftInputMode="stateHidden" />
+        <activity
             android:name="acr.browser.lightning.keyphone.KeyphoneHelpActivity"
             android:exported="false"
             android:theme="@style/Theme.DarkTheme"
