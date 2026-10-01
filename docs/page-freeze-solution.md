@@ -1,5 +1,8 @@
 # 浏览器卡死问题：原因分析与解决方案
 
+> **实施状态：第一期、第二期、第三期已实现**（commit `ac4b4f37`）。第四期（多进程）为备案，未做。
+> 改动文件：`KeyphoneBrowserActivity.kt`、`TabsRepository.kt`、`TabAdapter.kt`、`TabWebViewClient.kt`、`KeyphoneGuardStore.kt`、`AppModule.kt`、新增 `di/RendererBusyProvider.kt`。
+
 > 问题：打开章节特别多、JS 很重的页面（如 https://m.xxsy.net/chapter/22304467000039402/95797029348849723 ），点击页面内"目录"按钮后，整个浏览器卡死一段时间——菜单打不开、光标动不了、标签关不掉。
 >
 > 要求：**网页可以卡，浏览器壳永远不许卡。** 菜单、光标、标签管理任何时候都必须可响应。
