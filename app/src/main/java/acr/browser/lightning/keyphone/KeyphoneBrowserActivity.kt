@@ -11,6 +11,7 @@ import acr.browser.lightning.browser.tab.ImeBlockableWebView
 import acr.browser.lightning.browser.tab.TabPager
 import acr.browser.lightning.browser.tab.TabViewState
 import acr.browser.lightning.constant.SCHEME_BLANK
+import acr.browser.lightning.BuildConfig
 import acr.browser.lightning.constant.SCHEME_HOMEPAGE
 import acr.browser.lightning.database.Bookmark
 import acr.browser.lightning.database.HistoryEntry
@@ -18,6 +19,7 @@ import acr.browser.lightning.database.bookmark.BookmarkRepository
 import acr.browser.lightning.database.history.HistoryRepository
 import acr.browser.lightning.di.injector
 import acr.browser.lightning.js.KeyphoneReadingMode
+import acr.browser.lightning.js.KeyphoneScroll
 import acr.browser.lightning.preference.UserPreferencesDataStore
 import acr.browser.lightning.search.SearchEngineProvider
 import acr.browser.lightning.utils.isSpecialUrl
@@ -115,6 +117,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     @Inject
     internal lateinit var keyphoneReadingMode: KeyphoneReadingMode
 
+    @Inject
+    internal lateinit var keyphoneScroll: KeyphoneScroll
+
     /** 顶部标签栏 */
     private var tabBarScroll: HorizontalScrollView? = null
     private var tabBarContainer: LinearLayout? = null
@@ -152,6 +157,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     /** 已注入 JS 模块的「标签:URL」键，避免重复 evaluate */
     private var webInputInjectedKey: String? = null
+
+    /** 已注入光标滚动脚本的「标签:URL」键：页面导航后键值变化会自动重新注入 */
+    private var scrollModuleKey: String? = null
 
     /** UC 风格数字快捷菜单 */
     private enum class QuickMenuType {
@@ -333,7 +341,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         mouseController = KeyphoneMouseController(
             host = browserFrameHost!!,
             cursorView = cursorView,
-            webViewProvider = { currentWebView() }
+            webViewProvider = { currentWebView() },
+            ensureScrollModule = { ensureCursorScrollModule(it) },
+            pageBusyProvider = { pageBusy }
         )
 
         quickMenuOverlay = findViewById(R.id.keyphone_quick_menu_overlay)
@@ -347,8 +357,66 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         quickMenuOverlay?.setOnClickListener { hideQuickMenu() }
 
         registerWebPromptLifecycle()
+        installMainThreadWatchdog()
         updateTabMode()
         loadHomeData()
+    }
+
+    /**
+     * 主线程阻塞看门狗（仅 debug）：主线程连续停在同一个调用上超过约 2s（且不是 Looper 空闲等待）时，
+     * 把它的 Java 栈打进日志。
+     *
+     * 用途：定位「网页把渲染进程占死时，宿主也跟着卡死、最后被系统按 ANR 杀掉」到底是卡在哪一步
+     * —— 这类问题看不见栈就只能猜。release 构建不启动。
+     */
+    private fun installMainThreadWatchdog() {
+        if (!BuildConfig.DEBUG) return
+        val main = Looper.getMainLooper().thread
+        Thread {
+            var busySince = 0L
+            var lastLogAt = 0L
+            while (!isFinishing && !isDestroyed) {
+                try {
+                    Thread.sleep(MAIN_WATCH_INTERVAL_MS)
+                } catch (t: InterruptedException) {
+                    return@Thread
+                }
+                val stack = main.stackTrace
+                if (stack.isEmpty()) continue
+                val top = stack[0]
+                val now = SystemClock.elapsedRealtime()
+                // 只有停在 Looper 取消息才算空闲；其余都算「主线程在忙」
+                val idle = top.className.contains("MessageQueue") ||
+                    top.methodName.contains("nativePollOnce")
+                if (idle) {
+                    if (busySince != 0L) {
+                        val busyMs = now - busySince
+                        if (busyMs >= MAIN_WATCH_MIN_BUSY_MS) {
+                            KeydroidxLog.w(TAG, "主线程连续忙 ${busyMs}ms 后恢复空闲")
+                        }
+                    }
+                    busySince = 0L
+                    continue
+                }
+                if (busySince == 0L) {
+                    busySince = now
+                    continue
+                }
+                val busyMs = now - busySince
+                // 关键：不管栈是否变化，只要一直不空闲就抓一次（栈会变的情况以前会漏掉）
+                if (busyMs >= MAIN_WATCH_MIN_BUSY_MS && now - lastLogAt >= MAIN_WATCH_LOG_INTERVAL_MS) {
+                    lastLogAt = now
+                    KeydroidxLog.e(
+                        TAG,
+                        "主线程持续非空闲 ${busyMs}ms，当前栈:\n\t" +
+                            stack.take(MAIN_WATCH_STACK_FRAMES).joinToString("\n\t")
+                    )
+                }
+            }
+        }.apply {
+            isDaemon = true
+            name = "keyphone-main-watch"
+        }.start()
     }
 
     override fun onResume() {
@@ -361,6 +429,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         // 回前台立刻校时（后台期间可能已跨分钟），再对齐下一次整分刷新
         refreshBottomClock()
         scheduleBottomClock()
+        // 页面无响应看门狗（保活提示；见 checkPageResponsive）
+        schedulePageBusyTick()
         if (isHomeSelected) {
             loadHomeData()
         }
@@ -368,6 +438,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     override fun onPause() {
         bottomClockHandler.removeCallbacks(bottomClockTick)
+        pageBusyHandler.removeCallbacks(pageBusyTick)
+        pagePingPending = false
+        setPageBusy(false)
         KeyphoneUrlGuard.detach(guardHost)
         KeyphoneJsDialogs.detach(jsDialogHost)
         super.onPause()
@@ -2397,12 +2470,16 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
     }
 
+    /** 页面繁忙时的中键文案（null = 正常显示时间）；见 [setPageBusy] */
+    private var pageBusyText: String? = null
+
     /**
      * 软键栏中键在正常态是空位（左键「菜单 / 选项」、右键「返回 / 退出」），这里把空位用来显示
      * **24 小时制**时间 `HH:mm`：软键栏三栏等宽，中键正好在屏幕正中。
      *
      * 中键出现真实文案时（页内查找「下一个」、自由复制「复制」、书签编辑「删除」）文案优先，
      * 时间临时让位；文案清空后由下一次整分刷新自动补回（见 [refreshBottomClock]）。
+     * 页面无响应时中键改为「页面繁忙」（见 [setPageBusy]），优先级在真实文案之下、时间之上。
      * 走 [KeydroidxBaseActivity.setSoftKeys] 而非直接设 TextView，是为了复用 SDK 的中键
      * 自适应字号逻辑（窄屏下自动缩小，不出现省略号）。
      */
@@ -2410,7 +2487,20 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         lastSoftLeft = left
         lastSoftCenter = center
         lastSoftRight = right
-        super.setSoftKeys(left, center ?: bottomClockText, right)
+        super.setSoftKeys(left, bottomCenterText(), right)
+    }
+
+    /** 中键当前该显示的文案：真实软键文案 > 页面繁忙 > 时间 */
+    private fun bottomCenterText(): CharSequence? =
+        lastSoftCenter ?: pageBusyText ?: bottomClockText
+
+    /** 立即重设中键文案（繁忙状态切换 / 时间变化时用；见 [refreshBottomClock]） */
+    private fun applyBottomCenter() {
+        try {
+            super.setSoftKeys(lastSoftLeft, bottomCenterText(), lastSoftRight)
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "刷新底部中键文案失败", t)
+        }
     }
 
     /** 刷新中键时间（只在文本真的变化时重设，避免无谓重排） */
@@ -2420,8 +2510,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             return
         }
         bottomClockText = text
-        if (lastSoftCenter == null) {
-            super.setSoftKeys(lastSoftLeft, text, lastSoftRight)
+        // 繁忙提示 / 菜单文案正占着中键，等它们让位时由各自的流程补回时间
+        if (lastSoftCenter == null && pageBusyText == null) {
+            applyBottomCenter()
         }
     }
 
@@ -2433,6 +2524,82 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             bottomClockTick,
             BOTTOM_CLOCK_INTERVAL_MS - now % BOTTOM_CLOCK_INTERVAL_MS + BOTTOM_CLOCK_SLACK_MS
         )
+    }
+
+    // endregion
+
+    // region 页面无响应看门狗（保活提示 + 逃生口）
+
+    private val pageBusyHandler = Handler(Looper.getMainLooper())
+    private var pageBusy = false
+    private var pageBusyHintShown = false
+    private var pagePingPending = false
+    private var pagePingSentAt = 0L
+
+    private val pageBusyTick = object : Runnable {
+        override fun run() {
+            schedulePageBusyTick()
+            checkPageResponsive()
+        }
+    }
+
+    /**
+     * 定时 ping 渲染进程：网页脚本把渲染进程占死时（例如站点一次性渲染上千个章节项），
+     * `evaluateJavascript` 的回调会迟迟不回，宿主据此判定「页面繁忙」，把底部软键栏中键换成
+     * 提示 —— 用户能立刻分辨是**页面**卡了还是浏览器死了。
+     *
+     * 全程只做提示：不弹窗口、不抢按键、不等渲染进程。宿主按键链路本来就不依赖 WebView
+     * （菜单 / 光标 / 关标签都不等渲染进程），此刻 `*` 菜单照常可用，其中的
+     * 「1 刷新 / * 关闭窗口」就是逃生口。
+     */
+    private fun schedulePageBusyTick() {
+        pageBusyHandler.removeCallbacks(pageBusyTick)
+        pageBusyHandler.postDelayed(pageBusyTick, PAGE_BUSY_TICK_MS)
+    }
+
+    private fun checkPageResponsive() {
+        val webView = currentWebView()
+        // 主页 / 没有页面：不存在「页面繁忙」
+        if (isHomeSelected || webView == null) {
+            setPageBusy(false)
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (pagePingPending) {
+            // 上一次 ping 还没回来：超过阈值即认定繁忙（回调一到自动解除，不用额外轮询）
+            if (now - pagePingSentAt >= PAGE_BUSY_THRESHOLD_MS) {
+                setPageBusy(true)
+            }
+            return
+        }
+        pagePingPending = true
+        pagePingSentAt = now
+        try {
+            webView.evaluateJavascript(PAGE_BUSY_PING_JS) {
+                pagePingPending = false
+                setPageBusy(false)
+            }
+        } catch (t: Throwable) {
+            pagePingPending = false
+            KeydroidxLog.e(TAG, "页面心跳失败", t)
+        }
+    }
+
+    /** 繁忙状态切换：中键文案跟着换；每次进入繁忙只提示一条（非模态，说明逃生口在哪） */
+    private fun setPageBusy(busy: Boolean) {
+        if (busy == pageBusy) return
+        pageBusy = busy
+        pageBusyText = if (busy) getString(R.string.keyphone_page_busy) else null
+        applyBottomCenter()
+        if (busy) {
+            KeydroidxLog.d(TAG, "页面无响应：中键提示「页面繁忙」")
+            if (!pageBusyHintShown) {
+                pageBusyHintShown = true
+                Toast.makeText(this, R.string.keyphone_page_busy_hint, Toast.LENGTH_LONG).show()
+            }
+        } else {
+            pageBusyHintShown = false
+        }
     }
 
     // endregion
@@ -3461,12 +3628,37 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     /**
+     * 注入光标滚动脚本（幂等）：贴边滚动的目标由脚本按光标位置判定
+     * （侧边抽屉 / 弹层滚自己，绝不去滚背后的整页）。
+     *
+     * 键 = 标签 id + URL：页面导航后自动重新注入；同一页重复调用是空操作。
+     */
+    private fun ensureCursorScrollModule(webView: WebView) {
+        // 页面无响应时不碰 WebView：跨进程调用会把 UI 线程堵在等渲染进程上
+        if (pageBusy) return
+        val key = "${selectedTabId() ?: -1}:${webView.url.orEmpty()}"
+        if (key == scrollModuleKey) return
+        try {
+            webView.evaluateJavascript(keyphoneScroll.provideJs(), null)
+            scrollModuleKey = key
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "注入光标滚动脚本失败: $key", t)
+        }
+    }
+
+    /**
      * 把确认键转换为光标位置的原生触摸事件派发给 WebView：
      * DOWN/UP 配对（坐标即所见），由 WebView 自行识别单击/长按。
      */
     private fun dispatchCursorTouch(action: Int) {
         val controller = mouseController ?: return
         val webView = currentWebView() ?: return
+        if (pageBusy) {
+            // 页面无响应：不派发触摸（避免把 UI 线程堵在渲染进程上），也不留下悬挂的按压态
+            mouseTouchDown = false
+            KeydroidxLog.d(TAG, "页面繁忙，跳过光标触摸派发 action=$action")
+            return
+        }
         try {
             when (action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -4044,6 +4236,27 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
         /** 整分定时的小余量，避免恰好卡在边界上被系统判为提前唤醒 */
         private const val BOTTOM_CLOCK_SLACK_MS = 200L
+
+        /** 页面心跳间隔：每 tick 发一次 ping；上一次没回来时不重复发，不会堆积 */
+        private const val PAGE_BUSY_TICK_MS = 1000L
+
+        /** ping 超过此时长仍未回来，即判定「页面繁忙」 */
+        private const val PAGE_BUSY_THRESHOLD_MS = 1500L
+
+        /** 心跳脚本：只求值、不改页面（副作用为零） */
+        private const val PAGE_BUSY_PING_JS = "1"
+
+        /** 主线程看门狗采样间隔 */
+        private const val MAIN_WATCH_INTERVAL_MS = 500L
+
+        /** 主线程连续非空闲多久算异常（早于 5s 的 ANR） */
+        private const val MAIN_WATCH_MIN_BUSY_MS = 2000L
+
+        /** 抓栈日志的最小间隔，避免刷屏 */
+        private const val MAIN_WATCH_LOG_INTERVAL_MS = 3000L
+
+        /** 卡住时最多打印多少帧栈 */
+        private const val MAIN_WATCH_STACK_FRAMES = 30
 
         /** 阅读模式：JS 桥名（须与 KeyphoneReadingMode.js 内 BRIDGE_NAME 保持一致） */
         private const val READING_BRIDGE_NAME = "__keyphoneReadingBridge__"

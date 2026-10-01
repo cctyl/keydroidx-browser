@@ -243,6 +243,7 @@ mezzanine {
         "src/main/html/homepage.html",
         "src/main/js/InvertPage.js",
         "src/main/js/KeyphoneReadingMode.js",
+        "src/main/js/KeyphoneScroll.js",
         "src/main/js/TextReflow.js",
         "src/main/js/ThemeColor.js"
     )

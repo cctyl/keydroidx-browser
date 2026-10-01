@@ -3,6 +3,7 @@ package acr.browser.lightning.keyphone
 import android.animation.ValueAnimator
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.animation.AnimationUtils
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.LinearInterpolator
@@ -26,13 +27,19 @@ import io.github.cctyl.nokia.common.log.KeydroidxLog
  * - 到内容边界后封住该方向直至松手/换向。UP 由 Activity 自行消费（必然送达），
  *   不引入 foucs 的按压额度限制。不存在第二个滚动源，速度不可能叠加或突变。
  *
- * 边界判定基于 WebView 宿主（光标只在网页内容区活动），滚动直接作用于自持的
- * WebView（比 foucs 的无障碍手势注入简单可靠）。
+ * 边界判定基于 WebView 宿主（光标只在网页内容区活动）。滚动目标不再是文档根，而是
+ * **光标下的元素**（见 [KeyphoneScroll] 脚本）：移动站把侧边抽屉做成 fixed 浮层 + 自己的
+ * 滚动容器，只滚文档根会去滚抽屉**背后**的整页，而不是抽屉本身。
+ *
+ * @param ensureScrollModule 注入滚动脚本（幂等）；每次贴边滚动开始时调一次
+ * @param pageBusyProvider 页面是否无响应；为真时**一律不碰 WebView**
  */
 class KeyphoneMouseController(
     private val host: FrameLayout,
     private val cursorView: KeyphoneCursorView,
-    private val webViewProvider: () -> WebView?
+    private val webViewProvider: () -> WebView?,
+    private val ensureScrollModule: (WebView) -> Unit = {},
+    private val pageBusyProvider: () -> Boolean = { false }
 ) {
 
     companion object {
@@ -56,6 +63,13 @@ class KeyphoneMouseController(
 
         /** 1~9 热区跳转动画时长 */
         private const val JUMP_DURATION_MS = 180L
+
+        /**
+         * 贴边滚动请求的最小间隔：每帧都发跨进程调用会把 UI 线程堵在等渲染进程上
+         * （页面卡住时尤其致命，实测会导致 input ANR 被杀进程）。60ms ≈ 16 次/秒，
+         * 攒起来的增量照原速发出，平均速度与手感不变。
+         */
+        private const val SCROLL_REQUEST_INTERVAL_MS = 60L
 
         /** 短边缩放基准（foucs 用屏幕短边，这里用宿主短边，视觉一致） */
         private fun shortSideOf(host: FrameLayout): Int =
@@ -85,6 +99,16 @@ class KeyphoneMouseController(
 
     /** 松手标记：置位后滚动到「一个步长」即自停（速度不变） */
     private var edgeReleased = false
+
+    /** 下一次滚动请求是否重新判定目标元素（每个新手势开始时置位） */
+    private var scrollResolvePending = true
+
+    /** 攒批：距上次真正发请求的增量与时间 */
+    private var pendingScrollDelta = 0
+    private var lastScrollRequestAt = 0L
+
+    /** 每个手势只记一条结果日志，避免刷屏 */
+    private var scrollLogPending = false
 
     /** 当前光标位置（宿主坐标系），供确认键转触摸点击使用 */
     val posX: Int get() = cursorX
@@ -260,6 +284,25 @@ class KeyphoneMouseController(
      */
     private fun startEdgeScroll(dir: Int) {
         val webView = webViewProvider() ?: return
+        // 页面无响应：这次贴边滚动先不开始，等页面缓过来（避免把 UI 线程堵在渲染进程上）
+        if (pageBusy()) {
+            KeydroidxLog.d(TAG, "页面繁忙，暂不启动贴边滚动 dir=$dir")
+            return
+        }
+        // 新手势：重新判定光标下的滚动目标，并确保脚本已注入（脚本幂等）
+        scrollResolvePending = true
+        scrollLogPending = true
+        pendingScrollDelta = 0
+        lastScrollRequestAt = 0L
+        KeydroidxLog.d(
+            TAG,
+            "贴边滚动开始 dir=$dir cursor=($cursorX,$cursorY) host=${host.width}x${host.height}"
+        )
+        try {
+            ensureScrollModule(webView)
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "注入光标滚动脚本失败", t)
+        }
         val vertical = dir == KeyphoneCursorView.DIR_UP || dir == KeyphoneCursorView.DIR_DOWN
         val sign = if (dir == KeyphoneCursorView.DIR_UP || dir == KeyphoneCursorView.DIR_LEFT) -1 else 1
         val dim = if (vertical) host.height else host.width
@@ -296,9 +339,17 @@ class KeyphoneMouseController(
                     }
                     if (d > remain) d = remain
                 }
-                if (!scrollByDelta(webView, vertical, sign, d)) {
-                    handler.post { cancelEdgeAnimator() }
-                    return@addUpdateListener
+                // 攒批后再发：贴边滚动不需要每帧一次跨进程调用（页面卡住时它会堵死 UI 线程）
+                pendingScrollDelta += d
+                val nowMs = SystemClock.elapsedRealtime()
+                if (nowMs - lastScrollRequestAt >= SCROLL_REQUEST_INTERVAL_MS) {
+                    val flush = pendingScrollDelta
+                    pendingScrollDelta = 0
+                    lastScrollRequestAt = nowMs
+                    if (flush > 0 && !requestScroll(webView, vertical, sign, flush)) {
+                        handler.post { cancelEdgeAnimator() }
+                        return@addUpdateListener
+                    }
                 }
                 scrolled += d
                 if (edgeReleased && scrolled >= oneStep) {
@@ -310,8 +361,70 @@ class KeyphoneMouseController(
         anim.start()
     }
 
-    /** 带到边检测的单次滚动：内容滚不动时封住该方向并返回 false */
-    private fun scrollByDelta(webView: WebView, vertical: Boolean, sign: Int, delta: Int): Boolean {
+    /**
+     * 一次滚动请求：目标由**光标下的元素**决定（[KeyphoneScroll] 脚本，含浮层规则）。
+     *
+     * 结果异步回来，只用于处理「到头」：封住该方向并停掉动画。返回 false 表示请求没能发出
+     * （WebView 异常），调用方停动画；其余一律 true，由异步结果决定是否封方向。
+     */
+    private fun requestScroll(webView: WebView, vertical: Boolean, sign: Int, delta: Int): Boolean {
+        if (pageBusy()) {
+            // 页面无响应：一律不碰 WebView（跨进程调用会把 UI 线程堵在等渲染进程上），
+            // 这次增量直接丢掉，等页面缓过来动画自然继续
+            pendingScrollDelta = 0
+            return true
+        }
+        val dir = directionOf(vertical, sign)
+        if (dir in limitDirs) return false
+        val dx = if (vertical) 0 else sign * delta
+        val dy = if (vertical) sign * delta else 0
+        val resolve = if (scrollResolvePending) 1 else 0
+        scrollResolvePending = false
+        val script = "window.__keyphone_scroll__&&window.__keyphone_scroll__.by(" +
+            "$cursorX,$cursorY,$dx,$dy,${host.width},${host.height},$resolve)"
+        return try {
+            webView.evaluateJavascript(script) { raw ->
+                val status = raw?.trim('"')
+                if (scrollLogPending) {
+                    scrollLogPending = false
+                    KeydroidxLog.d(
+                        TAG,
+                        "滚动判定 status=$status cursor=($cursorX,$cursorY)" +
+                            " host=${host.width}x${host.height} delta=$delta vertical=$vertical"
+                    )
+                }
+                when (status) {
+                    // 脚本已自行处理（consume = 这次滚动被模态浮层吃掉，不动背后页面）
+                    "scroll", "consume" -> Unit
+
+                    // 目标已到尽头：封住该方向并停动画
+                    "end" -> sealDirection(dir)
+
+                    else -> {
+                        // "doc"（光标下没有元素滚动容器）以及脚本未注入 / 返回异常，
+                        // 一律回退到老路径滚文档根 —— 任何情况下都不能出现「完全滚不动」
+                        if (status == "none") scrollResolvePending = true
+                        if (!scrollWindow(webView, vertical, sign, delta)) {
+                            sealDirection(dir)
+                        }
+                    }
+                }
+            }
+            true
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "元素滚动请求失败 vertical=$vertical sign=$sign", t)
+            false
+        }
+    }
+
+    /** 封住某个方向（滚到内容尽头），并停掉贴边动画，等松手 / 换向再解除 */
+    private fun sealDirection(dir: Int) {
+        limitDirs.add(dir)
+        handler.post { cancelEdgeAnimator() }
+    }
+
+    /** 老路径：直接滚文档根（光标下没有元素滚动容器时的兜底） */
+    private fun scrollWindow(webView: WebView, vertical: Boolean, sign: Int, delta: Int): Boolean {
         return try {
             val canScroll = if (vertical) {
                 webView.canScrollVertically(sign)
@@ -319,7 +432,6 @@ class KeyphoneMouseController(
                 webView.canScrollHorizontally(sign)
             }
             if (!canScroll) {
-                limitDirs.add(directionOf(vertical, sign))
                 false
             } else {
                 if (vertical) {
@@ -330,7 +442,7 @@ class KeyphoneMouseController(
                 true
             }
         } catch (t: Throwable) {
-            KeydroidxLog.e(TAG, "边缘滚动失败 vertical=$vertical sign=$sign", t)
+            KeydroidxLog.e(TAG, "窗口滚动失败 vertical=$vertical sign=$sign", t)
             false
         }
     }
@@ -346,5 +458,12 @@ class KeyphoneMouseController(
     private fun cancelEdgeAnimator() {
         edgeAnimator?.cancel()
         edgeAnimator = null
+    }
+
+    /** 页面是否无响应（宿主看门狗判定）；为真时所有跨进程调用都要跳过 */
+    private fun pageBusy(): Boolean = try {
+        pageBusyProvider()
+    } catch (t: Throwable) {
+        false
     }
 }

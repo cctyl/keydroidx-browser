@@ -20,6 +20,7 @@ import acr.browser.lightning.html.homepage.HomeCleanup
 import acr.browser.lightning.html.homepage.HomePageReader
 import acr.browser.lightning.js.InvertPage
 import acr.browser.lightning.js.KeyphoneReadingMode
+import acr.browser.lightning.js.KeyphoneScroll
 import acr.browser.lightning.js.TextReflow
 import acr.browser.lightning.js.ThemeColor
 import acr.browser.lightning.log.AndroidLogger
@@ -237,6 +238,9 @@ class AppModule {
 
     @Provides
     fun providesKeyphoneReadingMode(): KeyphoneReadingMode = mezzanine()
+
+    @Provides
+    fun providesKeyphoneScroll(): KeyphoneScroll = mezzanine()
 
     @Provides
     fun providesCleanupList(
