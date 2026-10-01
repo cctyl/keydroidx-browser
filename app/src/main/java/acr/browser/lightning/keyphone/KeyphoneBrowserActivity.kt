@@ -28,14 +28,13 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.graphics.drawable.GradientDrawable
+import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.text.Editable
 import android.text.TextWatcher
-import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -142,8 +141,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private var browserFrameHost: FrameLayout? = null
     private lateinit var browserFrame: FrameLayout
 
-    /** 鼠标模式（仅网页态）：光标绘制层与移动引擎（数值照抄 keydroidx-foucs） */
-    private var mouseCursorView: KeyphoneCursorView? = null
+    /** 鼠标模式（仅网页态）：光标/菜单绘制走独立 Surface 覆盖层（不参与主窗口帧同步） */
+    private var shellOverlay: KeyphoneShellOverlay? = null
     private var mouseController: KeyphoneMouseController? = null
 
     /** 确认键已向 WebView 派发 DOWN 尚未派发 UP（防止触摸序列悬挂） */
@@ -175,8 +174,6 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     private var activeMenuType = QuickMenuType.NONE
-    private var quickMenuOverlay: FrameLayout? = null
-    private var quickMenuCard: LinearLayout? = null
     private var quickMenuFocusIndex = 0
     private var lastConsumedDownKeyCode: Int = KeyEvent.KEYCODE_UNKNOWN
 
@@ -334,33 +331,25 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             )
         )
 
-        // 鼠标光标层：盖在 WebView 宿主之上、快捷菜单浮层之下，随网页态显隐
-        val cursorView = KeyphoneCursorView(this).apply { visibility = View.GONE }
-        browserFrameHost?.addView(
-            cursorView,
+        // 外壳覆盖层：独立 Surface 自绘光标与快捷菜单，WebView 渲染进程再烧也不卡光标
+        val overlay = KeyphoneShellOverlay(this).apply { setCursorVisible(false) }
+        (window.decorView.findViewById(android.R.id.content) as? FrameLayout)?.addView(
+            overlay,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
         )
-        mouseCursorView = cursorView
+        shellOverlay = overlay
         mouseController = KeyphoneMouseController(
             host = browserFrameHost!!,
-            cursorView = cursorView,
+            cursorView = overlay,
             webViewProvider = { currentWebView() },
             ensureScrollModule = { ensureCursorScrollModule(it) },
             pageBusyProvider = { isRendererLikelyBusy() }
         )
 
-        quickMenuOverlay = findViewById(R.id.keyphone_quick_menu_overlay)
-        quickMenuCard = findViewById(R.id.keyphone_quick_menu_card)
-        val cardBg = GradientDrawable().apply {
-            cornerRadius = KeydroidxDimens.dp(resources, 4f).toFloat()
-            setColor(0xF01E2836.toInt())
-            setStroke(KeydroidxDimens.dp(resources, 1f), 0xFF3D516B.toInt())
-        }
-        quickMenuCard?.background = cardBg
-        quickMenuOverlay?.setOnClickListener { hideQuickMenu() }
+        // 快捷菜单绘制已迁入 shellOverlay（独立 Surface），主窗口不再持有菜单视图
 
         registerWebPromptLifecycle()
         installMainThreadWatchdog()
@@ -478,11 +467,6 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     override fun onDestroy() {
         // 复位，避免 holder 持有已销毁 Activity 的 lambda（其它浏览器 Activity 默认 false）
         rendererBusyHolder.provider = { false }
-        // 冻结是 onPause 实现：Activity 销毁前必须解冻，避免页面停在暂停态
-        if (pageFrozen) {
-            runCatching { currentWebView()?.onResume() }
-            pageFrozen = false
-        }
         super.onDestroy()
         presenter.onViewDetached()
     }
@@ -1715,19 +1699,15 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             QuickMenuType.JUMP_MENU -> buildJumpGuardMenuItems()
             QuickMenuType.NONE -> emptyList()
         }
+        // 菜单绘制在 shellOverlay 的独立 Surface 上（WebView 烧爆时依然即时弹出）；
         // 级联子面板（网址确认 / 跳转拦截）靠右弹出，常规菜单居中
-        (quickMenuCard?.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-            lp.gravity = if (type == QuickMenuType.URL_MENU || type == QuickMenuType.JUMP_MENU) {
-                Gravity.END or Gravity.CENTER_VERTICAL
-            } else {
-                Gravity.CENTER
-            }
-            quickMenuCard?.layoutParams = lp
-        }
+        shellOverlay?.showMenu(
+            rows = cachedMenuItems.map { KeyphoneShellOverlay.MenuRow(it.keyLabel, it.text) },
+            focusIndex = 0,
+            gravityRight = type == QuickMenuType.URL_MENU || type == QuickMenuType.JUMP_MENU
+        )
         backPressedCallback.isEnabled = true
         quickMenuFocusIndex = 0
-        quickMenuOverlay?.visibility = View.VISIBLE
-        renderQuickMenu()
         if (isFullScreenMode) {
             findViewById<View>(CommonR.id.bottomPanel)?.visibility = View.VISIBLE
         }
@@ -1743,7 +1723,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         activeMenuType = QuickMenuType.NONE
         cachedMenuItems = emptyList()
         updateBackPressedEnabled()
-        quickMenuOverlay?.visibility = View.GONE
+        shellOverlay?.hideMenu()
         if (isHomeSelected) {
             updateHomeSoftKeys()
         } else if (isFindMode) {
@@ -1757,26 +1737,6 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             findViewById<View>(CommonR.id.bottomPanel)?.visibility = View.GONE
         }
         updateMouseCursorVisibility()
-    }
-
-    private fun renderQuickMenu() {
-        val card = quickMenuCard ?: return
-        card.removeAllViews()
-        val items = getActiveMenuItems()
-        items.forEachIndexed { index, item ->
-            val isFocused = (index == quickMenuFocusIndex)
-            val row = KeyphoneViews.quickMenuItem(this, item, isFocused) {
-                hideQuickMenu()
-                item.action()
-            }
-            card.addView(
-                row,
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
-            )
-        }
     }
 
     private fun closeCurrentTabOrExit() {
@@ -2530,16 +2490,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
     }
 
-    /** 页面繁忙时的中键文案（null = 正常显示时间）；见 [setPageBusy] */
-    private var pageBusyText: String? = null
-
     /**
      * 软键栏中键在正常态是空位（左键「菜单 / 选项」、右键「返回 / 退出」），这里把空位用来显示
      * **24 小时制**时间 `HH:mm`：软键栏三栏等宽，中键正好在屏幕正中。
      *
      * 中键出现真实文案时（页内查找「下一个」、自由复制「复制」、书签编辑「删除」）文案优先，
      * 时间临时让位；文案清空后由下一次整分刷新自动补回（见 [refreshBottomClock]）。
-     * 页面无响应时中键改为「页面繁忙」（见 [setPageBusy]），优先级在真实文案之下、时间之上。
      * 走 [KeydroidxBaseActivity.setSoftKeys] 而非直接设 TextView，是为了复用 SDK 的中键
      * 自适应字号逻辑（窄屏下自动缩小，不出现省略号）。
      */
@@ -2550,9 +2506,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         super.setSoftKeys(left, bottomCenterText(), right)
     }
 
-    /** 中键当前该显示的文案：真实软键文案 > 页面繁忙 > 时间 */
+    /** 中键当前该显示的文案：真实软键文案 > 时间 */
     private fun bottomCenterText(): CharSequence? =
-        lastSoftCenter ?: pageBusyText ?: bottomClockText
+        lastSoftCenter ?: bottomClockText
 
     /** 立即重设中键文案（繁忙状态切换 / 时间变化时用；见 [refreshBottomClock]） */
     private fun applyBottomCenter() {
@@ -2570,8 +2526,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             return
         }
         bottomClockText = text
-        // 繁忙提示 / 菜单文案正占着中键，等它们让位时由各自的流程补回时间
-        if (lastSoftCenter == null && pageBusyText == null) {
+        // 菜单文案正占着中键，等它让位时由对应流程补回时间
+        if (lastSoftCenter == null) {
             applyBottomCenter()
         }
     }
@@ -2592,11 +2548,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     private val pageBusyHandler = Handler(Looper.getMainLooper())
     private var pageBusy = false
-    private var pageBusyHintShown = false
     private var pagePingPending = false
     private var pagePingSentAt = 0L
-    private var pageBusySince = 0L
-    private var pageFrozen = false
     private var lastKeyDownAt = 0L
 
     private val pageBusyTick = object : Runnable {
@@ -2629,8 +2582,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
         val now = SystemClock.elapsedRealtime()
         if (pagePingPending) {
-            // 上一次 ping 还没回来：超过阈值即认定繁忙（回调一到自动解除，不用额外轮询）
-            if (now - pagePingSentAt >= PAGE_BUSY_THRESHOLD_MS) {
+            // 上一次 ping 还没回来：达到预判阈值即认定繁忙（回调一到自动解除，不用额外轮询），
+            // 提前到 PREEMPT(800ms) 让冻结计时尽早开始，把渲染进程的燃烧段切得更短
+            if (now - pagePingSentAt >= PAGE_BUSY_PREEMPT_MS) {
                 KeydroidxLog.d(TAG, "心跳超时 ${now - pagePingSentAt}ms，判定页面繁忙")
                 setPageBusy(true)
             }
@@ -2659,45 +2613,15 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
     }
 
-    /** 繁忙状态切换：中键文案跟着换；每次进入繁忙只提示一条（非模态，说明逃生口在哪） */
+    /**
+     * 繁忙状态切换：只记状态和日志，**不做任何 UI 提示**（中键文案 / Toast 都被用户否了——
+     * 纯噪音，不解决问题）。真正的解法是把光标/菜单搬到独立 Surface（见 KeyphoneShellOverlay），
+     * 让外壳绘制不再等主窗口帧同步。
+     */
     private fun setPageBusy(busy: Boolean) {
-        val now = SystemClock.elapsedRealtime()
-        if (busy) {
-            if (pageBusySince == 0L) pageBusySince = now
-            // 繁忙持续超过阈值：自动暂停该 WebView（onPause 停掉它的 JS/渲染，只暂停这一个页面），
-            // 烧爆渲染进程的页面 JS 停下来——渲染进程空闲后主线程的同步 WebView 调用不再堵，
-            // 关标签 / 切标签 / 刷新全部恢复正常。页面恢复后自动 onResume 解冻。
-            if (!pageFrozen && now - pageBusySince >= PAGE_BUSY_FREEZE_MS) {
-                currentWebView()?.let { wv ->
-                    runCatching { wv.onPause() }
-                    pageFrozen = true
-                    KeydroidxLog.w(TAG, "页面繁忙持续 ${now - pageBusySince}ms，已冻结该页面（onPause）")
-                }
-            }
-        }
         if (busy == pageBusy) return
         pageBusy = busy
-        pageBusyText = if (busy) getString(R.string.keyphone_page_busy) else null
-        applyBottomCenter()
-        if (busy) {
-            KeydroidxLog.d(TAG, "页面无响应：中键提示「页面繁忙」")
-            if (!pageBusyHintShown) {
-                pageBusyHintShown = true
-                Toast.makeText(this, R.string.keyphone_page_busy_hint, Toast.LENGTH_LONG).show()
-            }
-        } else {
-            pageBusyHintShown = false
-            pageBusySince = 0L
-            if (pageFrozen) {
-                currentWebView()?.let { wv ->
-                    runCatching { wv.onResume() }
-                    KeydroidxLog.d(TAG, "页面恢复响应，解冻该页面（onResume）")
-                }
-                pageFrozen = false
-            } else {
-                KeydroidxLog.d(TAG, "页面恢复响应")
-            }
-        }
+        KeydroidxLog.d(TAG, if (busy) "页面无响应（渲染进程繁忙）" else "页面恢复响应")
     }
 
     /** 事前预判：渲染进程很可能繁忙时返回真。
@@ -3119,7 +3043,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                         val items = getActiveMenuItems()
                         if (items.isNotEmpty()) {
                             quickMenuFocusIndex = (quickMenuFocusIndex - 1 + items.size) % items.size
-                            renderQuickMenu()
+                            shellOverlay?.updateMenuFocus(quickMenuFocusIndex)
                         }
                     }
                     return true
@@ -3129,7 +3053,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                         val items = getActiveMenuItems()
                         if (items.isNotEmpty()) {
                             quickMenuFocusIndex = (quickMenuFocusIndex + 1) % items.size
-                            renderQuickMenu()
+                            shellOverlay?.updateMenuFocus(quickMenuFocusIndex)
                         }
                     }
                     return true
@@ -3299,13 +3223,13 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             val isFirstDown = isDown && event.repeatCount == 0
 
             val dir = when (event.keyCode) {
-                KeyEvent.KEYCODE_DPAD_UP -> KeyphoneCursorView.DIR_UP
-                KeyEvent.KEYCODE_DPAD_DOWN -> KeyphoneCursorView.DIR_DOWN
-                KeyEvent.KEYCODE_DPAD_LEFT -> KeyphoneCursorView.DIR_LEFT
-                KeyEvent.KEYCODE_DPAD_RIGHT -> KeyphoneCursorView.DIR_RIGHT
-                else -> KeyphoneCursorView.DIR_NONE
+                KeyEvent.KEYCODE_DPAD_UP -> KeyphoneShellOverlay.DIR_UP
+                KeyEvent.KEYCODE_DPAD_DOWN -> KeyphoneShellOverlay.DIR_DOWN
+                KeyEvent.KEYCODE_DPAD_LEFT -> KeyphoneShellOverlay.DIR_LEFT
+                KeyEvent.KEYCODE_DPAD_RIGHT -> KeyphoneShellOverlay.DIR_RIGHT
+                else -> KeyphoneShellOverlay.DIR_NONE
             }
-            if (dir != KeyphoneCursorView.DIR_NONE) {
+            if (dir != KeyphoneShellOverlay.DIR_NONE) {
                 if (isDown) {
                     mouseController?.onDirectionDown(dir)
                 } else if (event.action == KeyEvent.ACTION_UP) {
@@ -3367,13 +3291,13 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         // 消费了 DOWN 就必须消费同键 UP，防止抬起事件穿透
         if (isMouseModeActive()) {
             val dir = when (event.keyCode) {
-                KeyEvent.KEYCODE_DPAD_UP -> KeyphoneCursorView.DIR_UP
-                KeyEvent.KEYCODE_DPAD_DOWN -> KeyphoneCursorView.DIR_DOWN
-                KeyEvent.KEYCODE_DPAD_LEFT -> KeyphoneCursorView.DIR_LEFT
-                KeyEvent.KEYCODE_DPAD_RIGHT -> KeyphoneCursorView.DIR_RIGHT
-                else -> KeyphoneCursorView.DIR_NONE
+                KeyEvent.KEYCODE_DPAD_UP -> KeyphoneShellOverlay.DIR_UP
+                KeyEvent.KEYCODE_DPAD_DOWN -> KeyphoneShellOverlay.DIR_DOWN
+                KeyEvent.KEYCODE_DPAD_LEFT -> KeyphoneShellOverlay.DIR_LEFT
+                KeyEvent.KEYCODE_DPAD_RIGHT -> KeyphoneShellOverlay.DIR_RIGHT
+                else -> KeyphoneShellOverlay.DIR_NONE
             }
-            if (dir != KeyphoneCursorView.DIR_NONE) {
+            if (dir != KeyphoneShellOverlay.DIR_NONE) {
                 if (event.action == KeyEvent.ACTION_DOWN) {
                     mouseController?.onDirectionDown(dir)
                 } else if (event.action == KeyEvent.ACTION_UP) {
@@ -3506,7 +3430,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     val items = getActiveMenuItems()
                     if (items.isNotEmpty()) {
                         quickMenuFocusIndex = (quickMenuFocusIndex - 1 + items.size) % items.size
-                        renderQuickMenu()
+                        shellOverlay?.updateMenuFocus(quickMenuFocusIndex)
                     }
                     true
                 }
@@ -3514,7 +3438,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     val items = getActiveMenuItems()
                     if (items.isNotEmpty()) {
                         quickMenuFocusIndex = (quickMenuFocusIndex + 1) % items.size
-                        renderQuickMenu()
+                        shellOverlay?.updateMenuFocus(quickMenuFocusIndex)
                     }
                     true
                 }
@@ -3615,19 +3539,19 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (isCalibrateMode) {
             return when (action) {
                 KeydroidxKeyAction.UP -> {
-                    tapDirection(KeyphoneCursorView.DIR_UP)
+                    tapDirection(KeyphoneShellOverlay.DIR_UP)
                     true
                 }
                 KeydroidxKeyAction.DOWN -> {
-                    tapDirection(KeyphoneCursorView.DIR_DOWN)
+                    tapDirection(KeyphoneShellOverlay.DIR_DOWN)
                     true
                 }
                 KeydroidxKeyAction.LEFT -> {
-                    tapDirection(KeyphoneCursorView.DIR_LEFT)
+                    tapDirection(KeyphoneShellOverlay.DIR_LEFT)
                     true
                 }
                 KeydroidxKeyAction.RIGHT -> {
-                    tapDirection(KeyphoneCursorView.DIR_RIGHT)
+                    tapDirection(KeyphoneShellOverlay.DIR_RIGHT)
                     true
                 }
                 KeydroidxKeyAction.SELECT -> {
@@ -3764,21 +3688,17 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     /** 刷新鼠标光标可见性：仅网页态显示，回主页/弹菜单/进查找复制态时隐藏并停连发 */
     private fun updateMouseCursorVisibility() {
-        val cursor = mouseCursorView ?: return
+        val overlay = shellOverlay ?: return
         if (isMouseModeActive() || isCalibrateMode) {
             mouseController?.ensurePositionValid()
-            if (cursor.visibility != View.VISIBLE) {
-                cursor.visibility = View.VISIBLE
-            }
+            overlay.setCursorVisible(true)
         } else {
             if (mouseTouchDown) {
                 dispatchCursorTouch(MotionEvent.ACTION_UP)
             }
             mouseController?.stopRepeat()
             cancelWebInputProbe()
-            if (cursor.visibility != View.GONE) {
-                cursor.visibility = View.GONE
-            }
+            overlay.setCursorVisible(false)
         }
     }
 
@@ -4413,10 +4333,6 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         /** 事前预判阈值：ping 发出后超过此时长未回，即视为渲染进程很可能繁忙，
          *  在它真正判忙之前就拦下会同步阻塞主线程的调用（dispatchTouchEvent / evaluateJavascript） */
         private const val PAGE_BUSY_PREEMPT_MS = 800L
-
-        /** 页面繁忙持续超过该时长：自动暂停页面计时器（WebView.pauseTimers，全进程），
-         *  把烧爆渲染进程的页面 JS 停下来，渲染进程空闲后主线程的同步 WebView 调用不再堵 */
-        private const val PAGE_BUSY_FREEZE_MS = 2500L
 
         /** 心跳脚本：只求值、不改页面（副作用为零） */
         private const val PAGE_BUSY_PING_JS = "1"

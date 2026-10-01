@@ -1,168 +1,79 @@
 # 浏览器卡死问题：原因分析与解决方案
 
-> **实施状态：第一期、第二期、第三期已实现**（commit `ac4b4f37`）。第四期（多进程）为备案，未做。
-> 改动文件：`KeyphoneBrowserActivity.kt`、`TabsRepository.kt`、`TabAdapter.kt`、`TabWebViewClient.kt`、`KeyphoneGuardStore.kt`、`AppModule.kt`、新增 `di/RendererBusyProvider.kt`。
+> **实施状态：独立 Surface 外壳方案已实现（本期）。** 同步调用守卫（P1 部分）仍保留为辅助。
+> 核心改动：新增 `KeyphoneShellOverlay.kt`（独立 Surface + 专用渲染线程自绘光标/菜单），
+> 删除 `KeyphoneCursorView.kt`，`KeyphoneBrowserActivity.kt` / `KeyphoneMouseController.kt` / `keyphone_browser.xml` / `keyphone_strings.xml` 相应改造。
 
-> 问题：打开章节特别多、JS 很重的页面（如 https://m.xxsy.net/chapter/22304467000039402/95797029348849723 ），点击页面内"目录"按钮后，整个浏览器卡死一段时间——菜单打不开、光标动不了、标签关不掉。
+> 问题：打开章节特别多、JS 很重的页面（如 https://m.xxsy.net/chapter/22304467000039402/95797029348849723 ），点击页面内"目录"按钮后，整个浏览器卡死——菜单打不开、光标动不了、标签关不掉，甚至闪退。
 >
-> 要求：**网页可以卡，浏览器壳永远不许卡。** 菜单、光标、标签管理任何时候都必须可响应。
+> 要求（用户铁律）：**网页可以卡，浏览器壳永远不许卡。** 光标、菜单、标签管理任何时候都必须可响应；页面本身必须保持可见、继续渲染（不许冻结、不许隐藏）。
 
 ---
 
-## 一、卡死的真正原因
+## 一、卡死的真正原因（三轮实测后定论）
 
-不是简单的"章节太多加载慢"，机制更具体：
+早期假设"主线程被同步跨进程 WebView 调用堵住"经过三轮探针**证伪**：冻结窗口内 `dispatchTouchEvent`、`evaluateJavascript`、`view.draw` 全部静默且调用本身 0ms 返回，主线程消息循环照常运行。
 
-**Android WebView 的网页渲染跑在系统的独立渲染进程里。当页面 JS 一次性渲染上千个章节 DOM 时，渲染进程被占满。此时主线程对 WebView 做的某些调用（`dispatchTouchEvent`、`evaluateJavascript`）是跨进程同步等待的——主线程会原地冻结，直到渲染进程腾出手。**
+真实机制（日志实证）：
 
-光标点击的最终落地路径（光标是原生层画的"假鼠标"，网页看不见它，按下确认键时伪造一次触摸喂给 WebView）：
+1. 巨型章节 DOM 把 **WebView 渲染进程**烧爆（持续 60%+ CPU）；
+2. 渲染进程出帧太慢 → 应用主窗口的帧同步被拖垮：`Choreographer Skipped 300+ frames`、`Davey! duration=5635ms`、延迟集中在 `IntendedVsync→Vsync`（5.4s）和 `SwapBuffers`（2.7s）；
+3. 光标、快捷菜单、软键栏这些 View **和 WebView 画在同一个窗口、同一条显示管线**上 → 主窗口一帧都出不来 → 所有 View 视觉上全卡死（帧率 ~1fps 甚至 5 秒无帧）；
+4. 按键功能其实在执行（有按键日志），但**视觉反馈**（光标移动、菜单弹出）要等帧 → 用户感知"光标卡死、菜单卡死"。
 
-```
-确认键 → dispatchKeyEvent (KeyphoneBrowserActivity.kt:2899 起的按键分发)
-       → 鼠标模式分支
-       → dispatchCursorTouch (KeyphoneBrowserActivity.kt:3653)
-       → 在光标当前坐标构造 MotionEvent（DOWN 和 UP）
-       → webView.dispatchTouchEvent(DOWN) / (UP)   ← :3677 / :3691，同步跨进程调用
-```
+**结论：任何"守卫同步调用""降渲染进程优先级"都救不了视觉卡死，因为病根不在调用链，而在共享的显示管线。** 必须让浏览器外壳**不走主窗口的渲染管线**。
 
-平时渲染进程毫秒级响应，没事；但"目录"触发页面 JS 一口气渲染几千个章节 DOM，渲染进程瞬间被占满——主线程在 `dispatchTouchEvent` 里原地等它，等多久卡多久。**主线程一冻，菜单、光标、按键全部失灵**（它们本身不碰 WebView，是纯粹被主线程堵死连累的）。
+## 二、方案：独立 Surface 自绘外壳（本期待实施）
 
-代码中已有注释实测过该机理：`KeyphoneMouseController.kt:67-72` 明确写到"每帧都发跨进程调用会把 UI 线程堵在等渲染进程上……实测会导致 input ANR 被杀进程"。
+### 核心机制
 
-## 二、已有防护及其漏洞
+Android 的 `SurfaceView` 拥有**独立于窗口的 Surface**（独立 buffer queue，直接交给 SurfaceFlinger 合成）。用 `SurfaceHolder.lockCanvas()`（软件 Canvas）在**自建工作线程**（`HandlerThread("keyphone-shell-overlay")`）上绘制，**完全不经过主线程 Choreographer、不经过 RenderThread、不参与主窗口帧同步**。WebView 把主窗口帧同步拖到 5 秒一帧时，独立 Surface 依然能即时出帧。这正是"页面烧爆、系统 UI 依然流畅"的同款机制。
 
-项目已有一套 `pageBusy` 看门狗（`KeyphoneBrowserActivity.kt:2531-2604`）：每 1 秒向渲染进程 ping 一次（`evaluateJavascript("1")`），超过 1.5 秒没回应就标记"页面繁忙"，之后触摸派发、JS 注入都会被跳过。思路正确，但有三个洞：
+### 具体实现
 
-1. **生效延迟窗口约 2.5 秒**（ping 间隔 1s + 阈值 1.5s）。页面刚开始卡的那 2.5 秒内 `pageBusy` 未置位，而点"目录"的那次点击恰好就发生在这个窗口里——**第一次点击永远不受保护**。
-2. **关标签/切标签路径完全没有守卫**。`TabAdapter.freeze()/destroy()`（`TabAdapter.kt:467-490`）里的 `stopLoading/onPause/destroy/removeAllViews` 全是主线程直调 WebView，页面繁忙时关标签照样卡。
-3. **事后补救，不是事前预防**。看门狗只能"发现卡了之后不再碰"，不能"让点击本身不卡"。
+**新增 `KeyphoneShellOverlay.kt`**（`SurfaceView`）：
 
-次要放大因素：
+- 透明 surface，`setZOrderOnTop(true)` 浮于主窗口一切内容（含 WebView）之上；不抢焦点、`dispatchTouchEvent` 恒返 false 触摸穿透给 WebView。
+- `surfaceCreated` 时起渲染线程，`surfaceDestroyed` / `onDetachedFromWindow` 时退出。
+- **状态模型 + 按需渲染**：主线程调 `updateCursor(x, y, edgeDir)`、`setCursorVisible(bool)`、`showMenu(rows, focusIndex, gravityRight)`、`updateMenuFocus(index)`、`hideMenu()` 写状态并 post 一帧；渲染线程 `lockCanvas` → 清屏 → 画光标（原 `KeyphoneCursorView.onDraw` 绘制代码原样迁入）→ 画快捷菜单（卡片背景 + 逐行文字 + 焦点高亮，样式对齐原 `KeyphoneViews.quickMenuItem`）→ `unlockCanvasAndPost`。高频连发按键合并为一帧（`renderQueued` 去重）。
+- 渲染线程自绘不抛异常出进程：任何绘制异常吞掉，下一帧照常。
 
-- `TabAdapter.kt:524-551`：`onPageFinished` 后主线程 `view.draw(canvas)` 给整个 WebView 截图做标签预览，DOM 巨大时是一次昂贵绘制。
-- `KeyphoneGuardStore.kt:304-314`：`isRedirectorBlocked()` 每次遍历 SharedPreferences 全表，而它在 `shouldInterceptRequest` 里每个子资源都调一次，拖慢加载期、延长渲染进程繁忙期。
-- 全项目没有 `onRenderProcessGone` / `WebViewRenderProcessClient` 处理：渲染进程崩溃时默认行为是**系统连 App 进程一起杀**（网页崩 = 浏览器闪退）。
+**Activity / 控制器改造**：
 
-## 三、方案选型
+- `KeyphoneBrowserActivity.onCreate`：overlay 挂到 `android.R.id.content` 根容器（覆盖全内容区），传入 `KeyphoneMouseController`。
+- `KeyphoneMouseController`：光标参数类型改为 `KeyphoneShellOverlay`，`cursorView.update(...)` → `updateCursor(...)`。
+- 快捷菜单：菜单模型与按键逻辑全部留在 Activity，只把**绘制**搬到 overlay。`showMenu` → `shellOverlay.showMenu(rows…)`；焦点移动（上/下键、SDK `onAction` 两条路径）→ `shellOverlay.updateMenuFocus(index)`；`hideQuickMenu` → `shellOverlay.hideMenu()`。
+- 删除主窗口里的 `keyphone_quick_menu_overlay` 浮层（XML + 字段）。
 
-结合"长期做高度自定义浏览器"的目标：**选第一期（事前预判）+ 第二期（逃生通道）+ 第三期（渲染进程死亡处理 + 优化项），暂缓多进程（第四期备案）。**
+**删除噪音**：`setPageBusy` 不再显示任何 UI（删 Toast、删软键栏中键"页面繁忙"文案）——用户明确否掉该提示。busy 心跳检测保留，仅用于 `isRendererLikelyBusy()` 守卫日志与滚动/输入拦截。
 
-理由：
+### 保留的辅助防护（P1，已实现、非本次改动核心）
 
-1. **多进程代价双倍贵。** Android 系统限制一个 App 只有一个进程能使用 WebView（数据目录、Cookie、缓存绑定进程）。多进程意味着所有 WebView 进 `:web` 进程，菜单/光标/标签/软键栏留在主进程，两者之间每一次交互都要跨进程。对"高度自定义"的浏览器，等于给未来每个功能（脚本注入、规则引擎、手势、插件）加一道 IPC 税。
-2. **多进程要防的事，`onRenderProcessGone` 已能防住。** 多进程真正的收益是"渲染进程崩溃时外壳不死"，而 `WebViewRenderProcessClient`（API 26+）在单进程下同样能收到渲染进程死亡回调。剩下的唯一风险"主线程被同步跨进程调用堵住"，恰好是第一、二期解决的。
-3. **高度自定义浏览器的核心竞争力在外壳的响应性和可扩展性**，第一、二期做完就达到"外壳永远听使唤"的底线，这才是自定义功能的地基。
+- `WebViewFactory`：`RENDERER_PRIORITY_WAIVED` + `offscreenPreRaster=false`。
+- `TabWebViewClient.onRenderProcessGone`：渲染进程崩溃时 destroy + 清引用 + 返回 true（防闪退）。
+- `TabsRepository.deleteTab/deleteAllTabs`：繁忙时先从列表移除再延迟 destroy（关标签立即生效）。
+- `KeyphoneGuardStore` 内存缓存、`KeyphoneMouseController` 贴边滚动与 `evaluateJavascript` 注入的 busy 守卫。
 
----
+## 三、不改的部分（明确边界）
 
-## 四、具体实现方案
+- **WebView 页面本身照常渲染**：不冻结、不隐藏、不停 JS、不降帧。
+- **标签栏 / 地址栏 / 软键栏**仍在主窗口：它们是静态元素，状态变化时才重绘，烧爆期间文字晚几秒更新可接受。若实测软键栏中键反馈也必须实时，可把软键文字搬进 overlay（架构已预留）。
 
-### 第一期：事前预判——让那次点击永远堵不住主线程
+## 四、验收标准
 
-目标：用户点击落在繁忙页面上时，点击被安全跳过，主线程零阻塞。
-
-**1. 看门狗加密 + 记录"最后存活时间"**（`KeyphoneBrowserActivity.kt:2531-2604`）
-
-- ping 间隔：1000ms → **400ms**。ping 用的 `evaluateJavascript("1")` 是异步发射不管的，不堵主线程，加密无风险。
-- 新增字段 `lastPongAt: Long`，每次 ping 回调回来时更新。
-- 新增判定函数 `isRendererLikelyBusy()`：`SystemClock.uptimeMillis() - lastPongAt > 800ms`（连续两次 ping 未回）即视为繁忙。保护窗口从 2.5s 缩到 **0.8s**，且从"事后发现"变为"随时可查的预判"。
-- 原 `pageBusy` 标志保留，继续驱动软键栏"页面繁忙"显示。
-
-**2. `dispatchCursorTouch` 加前置守卫（核心改动，`KeyphoneBrowserActivity.kt:3653-3695`）**
-
-```
-dispatchCursorTouch(action):
-    if isRendererLikelyBusy():
-        置 pageBusy = true（立即，不等看门狗下一轮）
-        软键栏刷新为"页面繁忙"
-        toast("页面繁忙，请点击已忽略，稍后再试")
-        return true   // 消费按键，事件不到 WebView
-    // 渲染进程活着才往下走
-    构造 MotionEvent → webView.dispatchTouchEvent(...)
-```
-
-**3. 同窗口内其他跨进程调用一并收口**
-
-- `:3676`（点击后安装输入劫持）和 `:3833`（探测脚本）的 `evaluateJavascript`：加 `isRendererLikelyBusy()` 前置判断，忙则跳过，页面恢复后由现有"恢复重注入"逻辑补上。
-- `KeyphoneMouseController` 贴边滚动（`:288`、`:371` 已有 pageBusy 守卫）改为同时查 `isRendererLikelyBusy()`，新判定比 pageBusy 提前约 1.7s 生效。
-
-第一期效果：点"目录"→ 页面开始卡 → 最迟 0.8s 后软键栏显示"页面繁忙"→ 后续点击被安全忽略并提示 → 菜单、光标、按键全程正常。第一次点击本身发生在页面未卡时（页面是收到点击后才开始渲染的），DOWN/UP 派发时渲染进程未满，大概率正常通过。
-
-### 第二期：逃生通道——卡死时关标签、切标签、停加载永远可用
-
-**1. 关标签/切标签降级路径**（`TabAdapter.kt:467-490` 的 `freeze()` / `destroy()`）
-
-```
-freeze(tab):
-    if tab 对应的渲染进程繁忙（isRendererLikelyBusy / pageBusy）:
-        browserFrame.removeView(webView)   // 本地操作，不等渲染进程，立即执行
-        // 用户视角：标签已关闭，立即切走
-        Handler.postDelayed(5s 或等 ping 恢复) { webView.destroy() }  // 延迟销毁
-    else:
-        走现有完整 freeze 流程
-```
-
-要点：**从视图树摘除是本地操作**，用户点"关闭标签"永远立即生效；WebView 对象销毁稍后补，即使最终泄漏一份内存，代价远小于整壳卡死。
-
-**2. 软键栏"页面繁忙"升级为可操作菜单**（`KeyphoneBrowserActivity` 软键栏渲染处）
-
-`pageBusy` 时提供两个按键项：
-
-- 【停止加载】→ `webView.stopLoading()`。该调用也是跨进程的，用 Handler post 出去调，**调用前不等、调用后不检查**，发完不管；渲染进程对"取消加载"通常优先响应。
-- 【强制关闭本页】→ 直接走上面第 1 条的降级关标签路径。
-
-**3. 按键入口优先级审计**（`dispatchKeyEvent`，`KeyphoneBrowserActivity.kt:2899` 起）
-
-确认菜单键、返回键的处理分支排在一切可能触碰 WebView 的分支之前。菜单本身不碰 WebView，第一期做完后这步是防御性确认，不需大改。
-
-### 第三期：渲染进程死亡处理 + 优化项
-
-**1. `WebViewRenderProcessClient`**（`WebViewFactory.kt` 的 `createWebView()`，API 26+）
-
-单进程下防"页面把浏览器拖死"的最后一道闸：
-
-```
-webView.webViewRenderProcessClient = object : WebViewRenderProcessClient() {
-    onRenderProcessGone(view, detail):
-        标记该 tab 为"已崩溃"
-        立即 removeView + destroy 该 WebView（渲染进程已死，不会再堵）
-        显示覆盖层："页面已崩溃 [重新加载] [关闭标签]"
-        return true   // 关键！返回 false 系统会连 App 进程一起杀
-}
-```
-
-**2. 标签预览截图守卫**（`TabAdapter.kt:524-551`）
-
-- `pageBusy` / `isRendererLikelyBusy` 时跳过本次截图，保留旧预览。
-- 后续可换 `PixelCopy`（API 26+，异步不堵主线程）。
-
-**3. 拦截规则表内存缓存**（`KeyphoneGuardStore.kt:304-314`）
-
-- `isRedirectorBlocked()` 改为：启动时/规则变更时读入内存 `HashSet`，查询 O(1)。资源加载更快 → 渲染进程繁忙期更短。
-
-**4. WebView 池预热**
-
-- 切标签现场 `new WebView`（`WebViewFactory.kt:68`）有几十到几百 ms 卡顿。启动后和每次池取出后，用主线程 idle Handler 补一个预热实例（WebView 构造必须在主线程）。
-
-### 第四期（备案，暂不做）：WebView 独立进程
-
-若未来做插件沙箱、脚本引擎需要硬隔离再启动。路径：所有 WebView 集中到 `:web` 进程的 Activity，主进程通过 Binder/AIDL 发指令（按键、光标坐标、标签操作），页面信息回调回传。前三期的守卫逻辑原样保留，只换通信层。现在不做，是为了不给"高度自定义"的迭代速度上枷锁。
-
----
-
-## 五、验收标准
-
-基准场景：`m.xxsy.net` 章节页点"目录"。
+基准场景：`m.xxsy.net` 章节页点"目录"，页面烧爆期间：
 
 | 场景 | 通过标准 |
 |---|---|
-| 页面繁忙中按菜单键 | 菜单 1 秒内弹出 |
-| 页面繁忙中动光标 | 光标流畅跟随按键 |
-| 页面繁忙中关标签 | 标签 1 秒内关闭并切换 |
-| 页面繁忙中点页面 | 点击被忽略，有"页面繁忙"提示，无冻结 |
-| 渲染进程崩溃（chrome://crash 类页面模拟） | 显示崩溃覆盖层，App 不闪退 |
-| 页面从繁忙恢复 | pageBusy 解除，输入劫持等脚本自动补注入，功能恢复 |
+| 页面烧爆中动光标 | 光标**即时**跟手（不再等 5 秒） |
+| 页面烧爆中按 1 弹菜单 | 菜单即时弹出、上/下键高亮即时移动 |
+| 页面烧爆中关标签 / 切标签 | 立即生效且有即时反馈 |
+| 页面本身 | 保持可见、继续渲染，无冻结无隐藏 |
+| 全程 | 无任何"页面繁忙"Toast / 提示 |
 
-## 六、实施顺序
+## 五、遗留风险与兜底
 
-一 → 二 → 三期，每期独立可交付、独立见效。第一期改动最小（看门狗加密 + `dispatchCursorTouch` 守卫），收益最大，先做。
+- `setZOrderOnTop(true)` 会盖住主窗口弹窗；本浏览器弹窗只有快捷菜单（已迁入 overlay），若发现其他浮层被盖，改 `setZOrderMediaOverlay(true)`。
+- 触摸穿透：实测若 overlay 拦截触摸，加 `setOnTouchListener { false }` 兜底。
+- 个别设备合成透明 top surface 兼容问题：回退为 `WindowManager.addView` 独立窗口，同样绕开主窗口帧同步。
+- 若独立 surface 后仍有可感知残留卡顿（渲染进程持续烧导致帧率普遍降低）：再考虑 busy 时注入暂停 rAF/setInterval 的 JS（保留最后画面、不隐藏页面）降低渲染负载——暂不做，用户反感"冻结/隐藏"语义。

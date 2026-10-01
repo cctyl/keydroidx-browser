@@ -127,26 +127,6 @@
             android:focusable="false"
             android:focusableInTouchMode="false"
             android:visibility="gone" />
-
-        <!-- UC 风格数字快捷菜单浮层（按键 1 弹出） -->
-        <FrameLayout
-            android:id="@+id/keyphone_quick_menu_overlay"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:background="#30000000"
-            android:visibility="gone"
-            android:clickable="true"
-            android:focusable="false">
-
-            <LinearLayout
-                android:id="@+id/keyphone_quick_menu_card"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="center"
-                android:minWidth="110dp"
-                android:orientation="vertical"
-                android:padding="2dp" />
-        </FrameLayout>
     </FrameLayout>
 
 </LinearLayout>

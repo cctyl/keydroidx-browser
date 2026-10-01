@@ -36,7 +36,7 @@ import io.github.cctyl.nokia.common.log.KeydroidxLog
  */
 class KeyphoneMouseController(
     private val host: FrameLayout,
-    private val cursorView: KeyphoneCursorView,
+    private val cursorView: KeyphoneShellOverlay,
     private val webViewProvider: () -> WebView?,
     private val ensureScrollModule: (WebView) -> Unit = {},
     private val pageBusyProvider: () -> Boolean = { false }
@@ -176,7 +176,7 @@ class KeyphoneMouseController(
                 val t = a.animatedValue as Float
                 cursorX = Math.round(startX + (targetX - startX) * t)
                 cursorY = Math.round(startY + (targetY - startY) * t)
-                cursorView.update(cursorX, cursorY, KeyphoneCursorView.DIR_NONE)
+                cursorView.updateCursor(cursorX, cursorY, KeyphoneShellOverlay.DIR_NONE)
             }
         }
         jumpAnimator = anim
@@ -198,7 +198,7 @@ class KeyphoneMouseController(
         if (cursorX < 0 || cursorY < 0 || cursorX > w - 1 || cursorY > h - 1) {
             cursorX = w / 2
             cursorY = h / 2
-            cursorView.update(cursorX, cursorY, KeyphoneCursorView.DIR_NONE)
+            cursorView.updateCursor(cursorX, cursorY, KeyphoneShellOverlay.DIR_NONE)
         }
     }
 
@@ -245,28 +245,28 @@ class KeyphoneMouseController(
         val maxY = h - 1
         val step = cursorStep()
 
-        var atEdge = KeyphoneCursorView.DIR_NONE
+        var atEdge = KeyphoneShellOverlay.DIR_NONE
         when (dir) {
-            KeyphoneCursorView.DIR_UP -> {
-                if (cursorY <= minY) atEdge = KeyphoneCursorView.DIR_UP else cursorY = (cursorY - step).coerceAtLeast(minY)
+            KeyphoneShellOverlay.DIR_UP -> {
+                if (cursorY <= minY) atEdge = KeyphoneShellOverlay.DIR_UP else cursorY = (cursorY - step).coerceAtLeast(minY)
             }
-            KeyphoneCursorView.DIR_DOWN -> {
-                if (cursorY >= maxY) atEdge = KeyphoneCursorView.DIR_DOWN else cursorY = (cursorY + step).coerceAtMost(maxY)
+            KeyphoneShellOverlay.DIR_DOWN -> {
+                if (cursorY >= maxY) atEdge = KeyphoneShellOverlay.DIR_DOWN else cursorY = (cursorY + step).coerceAtMost(maxY)
             }
-            KeyphoneCursorView.DIR_LEFT -> {
-                if (cursorX <= minX) atEdge = KeyphoneCursorView.DIR_LEFT else cursorX = (cursorX - step).coerceAtLeast(minX)
+            KeyphoneShellOverlay.DIR_LEFT -> {
+                if (cursorX <= minX) atEdge = KeyphoneShellOverlay.DIR_LEFT else cursorX = (cursorX - step).coerceAtLeast(minX)
             }
-            KeyphoneCursorView.DIR_RIGHT -> {
-                if (cursorX >= maxX) atEdge = KeyphoneCursorView.DIR_RIGHT else cursorX = (cursorX + step).coerceAtMost(maxX)
+            KeyphoneShellOverlay.DIR_RIGHT -> {
+                if (cursorX >= maxX) atEdge = KeyphoneShellOverlay.DIR_RIGHT else cursorX = (cursorX + step).coerceAtMost(maxX)
             }
         }
 
-        if (atEdge != KeyphoneCursorView.DIR_NONE) {
+        if (atEdge != KeyphoneShellOverlay.DIR_NONE) {
             // 光标已在边界：不再移动，转为基于光标位置的网页滚动
             applyEdgeScroll(dir)
-            cursorView.update(cursorX, cursorY, atEdge)
+            cursorView.updateCursor(cursorX, cursorY, atEdge)
         } else {
-            cursorView.update(cursorX, cursorY, KeyphoneCursorView.DIR_NONE)
+            cursorView.updateCursor(cursorX, cursorY, KeyphoneShellOverlay.DIR_NONE)
         }
     }
 
@@ -303,8 +303,8 @@ class KeyphoneMouseController(
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "注入光标滚动脚本失败", t)
         }
-        val vertical = dir == KeyphoneCursorView.DIR_UP || dir == KeyphoneCursorView.DIR_DOWN
-        val sign = if (dir == KeyphoneCursorView.DIR_UP || dir == KeyphoneCursorView.DIR_LEFT) -1 else 1
+        val vertical = dir == KeyphoneShellOverlay.DIR_UP || dir == KeyphoneShellOverlay.DIR_DOWN
+        val sign = if (dir == KeyphoneShellOverlay.DIR_UP || dir == KeyphoneShellOverlay.DIR_LEFT) -1 else 1
         val dim = if (vertical) host.height else host.width
         val interval = if (vertical) PAGE_SCROLL_INTERVAL_MS else PAGE_SCROLL_INTERVAL_H_MS
         val ratio = if (vertical) PAGE_SCROLL_STEP_RATIO_V else PAGE_SCROLL_STEP_RATIO_H
@@ -472,9 +472,9 @@ class KeyphoneMouseController(
 
     private fun directionOf(vertical: Boolean, sign: Int): Int {
         return if (vertical) {
-            if (sign < 0) KeyphoneCursorView.DIR_UP else KeyphoneCursorView.DIR_DOWN
+            if (sign < 0) KeyphoneShellOverlay.DIR_UP else KeyphoneShellOverlay.DIR_DOWN
         } else {
-            if (sign < 0) KeyphoneCursorView.DIR_LEFT else KeyphoneCursorView.DIR_RIGHT
+            if (sign < 0) KeyphoneShellOverlay.DIR_LEFT else KeyphoneShellOverlay.DIR_RIGHT
         }
     }
 

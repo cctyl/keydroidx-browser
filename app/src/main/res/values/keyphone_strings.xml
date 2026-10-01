@@ -259,9 +259,6 @@
 
     <!-- 提示 -->
     <string name="keyphone_todo">该功能即将支持</string>
-    <!-- 页面无响应看门狗：中键提示 + 说明逃生口（* 菜单可刷新 / 关闭窗口） -->
-    <string name="keyphone_page_busy">页面繁忙</string>
-    <string name="keyphone_page_busy_hint">页面繁忙（网页脚本占用中）：按 * 打开菜单，可刷新或关闭窗口</string>
     <string name="keyphone_need_page">请先打开网页后再使用</string>
     <string name="keyphone_open_failed">无法打开链接</string>
     <string name="keyphone_added_home">已添加到首页</string>
