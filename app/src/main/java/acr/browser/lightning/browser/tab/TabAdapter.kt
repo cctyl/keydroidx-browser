@@ -24,6 +24,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.os.Bundle
 import android.os.Message
+import android.os.SystemClock
 import android.util.Log
 import android.view.GestureDetector
 import android.view.MotionEvent
@@ -480,6 +481,7 @@ class TabAdapter @AssistedInject constructor(
     }
 
     override suspend fun freeze() {
+        val freezeStart = SystemClock.elapsedRealtime()
         // 先从视图树摘除（本地操作，不等渲染进程）：即使后续 WebView 销毁因渲染进程繁忙
         // 而卡住，用户视角的标签也已消失、可切到其它标签
         if (priority == Priority.HIGH) {
@@ -493,6 +495,10 @@ class TabAdapter @AssistedInject constructor(
             clearHistory()
             removeAllViews()
             destroy()
+        }
+        val freezeMs = SystemClock.elapsedRealtime() - freezeStart
+        if (freezeMs >= 300) {
+            Log.w("TabAdapter", "【主线程耗时】freeze() tab=$id = ${freezeMs}ms")
         }
     }
 
@@ -567,7 +573,12 @@ class TabAdapter @AssistedInject constructor(
         view.layout(0, 0, width, height)
 
         // Draw the view onto the canvas
+        val drawStart = SystemClock.elapsedRealtime()
         view.draw(canvas)
+        val drawMs = SystemClock.elapsedRealtime() - drawStart
+        if (drawMs >= 300) {
+            Log.w("TabAdapter", "【主线程耗时】标签预览 view.draw ${width}x${height} = ${drawMs}ms")
+        }
 
         return@withContext bitmap
     }

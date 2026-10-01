@@ -370,8 +370,10 @@ class KeyphoneMouseController(
     private fun requestScroll(webView: WebView, vertical: Boolean, sign: Int, delta: Int): Boolean {
         if (pageBusy()) {
             // 页面无响应：一律不碰 WebView（跨进程调用会把 UI 线程堵在等渲染进程上），
-            // 这次增量直接丢掉，等页面缓过来动画自然继续
+            // 这次增量直接丢掉；动画也别再空转烧帧，直接停掉，等下次按键再重新开始
             pendingScrollDelta = 0
+            KeydroidxLog.d(TAG, "页面繁忙，贴边滚动暂停（丢弃增量）")
+            handler.post { cancelEdgeAnimator() }
             return true
         }
         val dir = directionOf(vertical, sign)
@@ -383,7 +385,12 @@ class KeyphoneMouseController(
         val script = "window.__keyphone_scroll__&&window.__keyphone_scroll__.by(" +
             "$cursorX,$cursorY,$dx,$dy,${host.width},${host.height},$resolve)"
         return try {
+            val t0 = SystemClock.elapsedRealtime()
             webView.evaluateJavascript(script) { raw ->
+                val callLatency = SystemClock.elapsedRealtime() - t0
+                if (callLatency >= 100) {
+                    KeydroidxLog.w(TAG, "【主线程耗时】滚动JS回调滞后 ${callLatency}ms")
+                }
                 val status = raw?.trim('"')
                 if (scrollLogPending) {
                     scrollLogPending = false
@@ -410,6 +417,10 @@ class KeyphoneMouseController(
                     }
                 }
             }
+            val callMs = SystemClock.elapsedRealtime() - t0
+            if (callMs >= 100) {
+                KeydroidxLog.w(TAG, "【主线程耗时】滚动 evaluateJavascript 调用本身阻塞 ${callMs}ms")
+            }
             true
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "元素滚动请求失败 vertical=$vertical sign=$sign", t)
@@ -425,7 +436,14 @@ class KeyphoneMouseController(
 
     /** 老路径：直接滚文档根（光标下没有元素滚动容器时的兜底） */
     private fun scrollWindow(webView: WebView, vertical: Boolean, sign: Int, delta: Int): Boolean {
+        // 渲染进程繁忙时绝不碰同步调用：canScrollVertically/scrollBy 都是跨进程同步等待，
+        // 页面把渲染进程占死时它会一口气堵主线程好几秒（实测单次 5.1s）
+        if (pageBusy()) {
+            KeydroidxLog.d(TAG, "页面繁忙，跳过滚动兜底（canScroll/scrollBy 同步阻塞）")
+            return true
+        }
         return try {
+            val t0 = SystemClock.elapsedRealtime()
             val canScroll = if (vertical) {
                 webView.canScrollVertically(sign)
             } else {
@@ -440,6 +458,11 @@ class KeyphoneMouseController(
                     webView.scrollBy(sign * delta, 0)
                 }
                 true
+            }.also {
+                val dt = SystemClock.elapsedRealtime() - t0
+                if (dt >= 100) {
+                    KeydroidxLog.w(TAG, "【主线程耗时】滚动兜底 canScroll/scrollBy = ${dt}ms")
+                }
             }
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "窗口滚动失败 vertical=$vertical sign=$sign", t)

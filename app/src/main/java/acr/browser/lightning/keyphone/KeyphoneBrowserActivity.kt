@@ -364,8 +364,24 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
         registerWebPromptLifecycle()
         installMainThreadWatchdog()
+        installMainLoopTracer()
         updateTabMode()
         loadHomeData()
+    }
+
+    /**
+     * 主线程消息探针（仅 debug）：给主线程 Looper 装 setMessageLogging，
+     * 主线程处理的每一条消息都会打出 "LOOP >>>>> Dispatching to ..." / "LOOP <<<<< Finished"。
+     *
+     * 卡死排查的铁证：冻结窗口里最后一条只有 >>>>> 没有 <<<<< 的消息，
+     * 就是正在阻塞主线程的那个调用（Handler 任务 / 动画回调 / WebView 回调 / 输入事件）。
+     * ANR dump 总是慢半拍只能抓到恢复后的空闲栈，这个探针直接在阻塞现场取证。
+     */
+    private fun installMainLoopTracer() {
+        if (!BuildConfig.DEBUG) return
+        Looper.getMainLooper().setMessageLogging { line ->
+            KeydroidxLog.d(TAG, "LOOP $line")
+        }
     }
 
     /**
@@ -460,9 +476,14 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
         // 复位，避免 holder 持有已销毁 Activity 的 lambda（其它浏览器 Activity 默认 false）
         rendererBusyHolder.provider = { false }
+        // 冻结是 onPause 实现：Activity 销毁前必须解冻，避免页面停在暂停态
+        if (pageFrozen) {
+            runCatching { currentWebView()?.onResume() }
+            pageFrozen = false
+        }
+        super.onDestroy()
         presenter.onViewDetached()
     }
 
@@ -1219,14 +1240,25 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 KeydroidxLog.w(TAG, "阅读模式翻页跳过：WebView 不可用 keyCode=$keyCode")
                 return true
             }
+            // 渲染进程繁忙时跳过：scrollY/contentHeight/scrollBy 全是同步跨进程调用，
+            // 页面把渲染进程占死时会堵主线程好几秒（页面反正也滚不动）
+            if (isRendererLikelyBusy()) {
+                KeydroidxLog.d(TAG, "渲染进程可能繁忙，阅读模式翻页跳过（同步读取会阻塞主线程）")
+                return true
+            }
             val tabId = selectedTabId()
             try {
+                val t0 = SystemClock.elapsedRealtime()
                 val step = (webView.height * READING_SCROLL_STEP_RATIO).toInt().coerceAtLeast(1)
                 val scrollUp = isUpKey || digit == 2
                 val fromY = webView.scrollY
                 webView.scrollBy(0, if (scrollUp) -step else step)
                 val contentPx = (webView.contentHeight * webView.scale).toInt()
                 val remaining = contentPx - webView.scrollY - webView.height
+                val syncMs = SystemClock.elapsedRealtime() - t0
+                if (syncMs >= 100) {
+                    KeydroidxLog.w(TAG, "【主线程耗时】阅读模式翻页同步读取 = ${syncMs}ms")
+                }
                 KeydroidxLog.d(
                     TAG,
                     "阅读模式翻页 keyCode=$keyCode up=$scrollUp from=$fromY to=${webView.scrollY}" +
@@ -2309,6 +2341,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             return
         }
 
+        // 渲染进程繁忙时跳过：scrollTo/pageDown 是同步跨进程调用，会堵主线程
+        if (isRendererLikelyBusy()) {
+            KeydroidxLog.d(TAG, "渲染进程可能繁忙，跳过滚动到顶/底部（同步调用）")
+            return
+        }
         if (isScrolledToBottom) {
             webView.scrollTo(0, 0)
             isScrolledToBottom = false
@@ -2558,6 +2595,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private var pageBusyHintShown = false
     private var pagePingPending = false
     private var pagePingSentAt = 0L
+    private var pageBusySince = 0L
+    private var pageFrozen = false
+    private var lastKeyDownAt = 0L
 
     private val pageBusyTick = object : Runnable {
         override fun run() {
@@ -2591,6 +2631,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (pagePingPending) {
             // 上一次 ping 还没回来：超过阈值即认定繁忙（回调一到自动解除，不用额外轮询）
             if (now - pagePingSentAt >= PAGE_BUSY_THRESHOLD_MS) {
+                KeydroidxLog.d(TAG, "心跳超时 ${now - pagePingSentAt}ms，判定页面繁忙")
                 setPageBusy(true)
             }
             return
@@ -2598,9 +2639,19 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         pagePingPending = true
         pagePingSentAt = now
         try {
+            val callStart = SystemClock.elapsedRealtime()
             webView.evaluateJavascript(PAGE_BUSY_PING_JS) {
                 pagePingPending = false
+                val latency = SystemClock.elapsedRealtime() - pagePingSentAt
+                if (latency >= 400) {
+                    KeydroidxLog.w(TAG, "心跳 pong 滞后 ${latency}ms")
+                }
                 setPageBusy(false)
+            }
+            val callMs = SystemClock.elapsedRealtime() - callStart
+            if (callMs >= 100) {
+                // evaluateJavascript 是异步 API，若调用本身阻塞，说明渲染进程卡的连请求都接不住
+                KeydroidxLog.w(TAG, "【主线程耗时】心跳 evaluateJavascript 调用本身阻塞 ${callMs}ms")
             }
         } catch (t: Throwable) {
             pagePingPending = false
@@ -2610,6 +2661,20 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     /** 繁忙状态切换：中键文案跟着换；每次进入繁忙只提示一条（非模态，说明逃生口在哪） */
     private fun setPageBusy(busy: Boolean) {
+        val now = SystemClock.elapsedRealtime()
+        if (busy) {
+            if (pageBusySince == 0L) pageBusySince = now
+            // 繁忙持续超过阈值：自动暂停该 WebView（onPause 停掉它的 JS/渲染，只暂停这一个页面），
+            // 烧爆渲染进程的页面 JS 停下来——渲染进程空闲后主线程的同步 WebView 调用不再堵，
+            // 关标签 / 切标签 / 刷新全部恢复正常。页面恢复后自动 onResume 解冻。
+            if (!pageFrozen && now - pageBusySince >= PAGE_BUSY_FREEZE_MS) {
+                currentWebView()?.let { wv ->
+                    runCatching { wv.onPause() }
+                    pageFrozen = true
+                    KeydroidxLog.w(TAG, "页面繁忙持续 ${now - pageBusySince}ms，已冻结该页面（onPause）")
+                }
+            }
+        }
         if (busy == pageBusy) return
         pageBusy = busy
         pageBusyText = if (busy) getString(R.string.keyphone_page_busy) else null
@@ -2622,6 +2687,16 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
         } else {
             pageBusyHintShown = false
+            pageBusySince = 0L
+            if (pageFrozen) {
+                currentWebView()?.let { wv ->
+                    runCatching { wv.onResume() }
+                    KeydroidxLog.d(TAG, "页面恢复响应，解冻该页面（onResume）")
+                }
+                pageFrozen = false
+            } else {
+                KeydroidxLog.d(TAG, "页面恢复响应")
+            }
         }
     }
 
@@ -2632,6 +2707,19 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (pageBusy) return true
         if (!pagePingPending) return false
         return SystemClock.elapsedRealtime() - pagePingSentAt >= PAGE_BUSY_PREEMPT_MS
+    }
+
+    /** 主线程同步 WebView 调用耗时探针：任何超过 100ms 的调用都打日志，定位「单次卡死几秒」的元凶 */
+    private fun traceMain(label: String, block: () -> Unit) {
+        val t0 = SystemClock.elapsedRealtime()
+        try {
+            block()
+        } finally {
+            val dt = SystemClock.elapsedRealtime() - t0
+            if (dt >= 100) {
+                KeydroidxLog.w(TAG, "【主线程耗时】$label = ${dt}ms")
+            }
+        }
     }
 
     // endregion
@@ -2952,6 +3040,15 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     // region 按键分发
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // 每次 DOWN 打一条流水：下一次 DOWN 的日志晚了多久，就说明上一次按键处理卡了多久
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            val now = SystemClock.elapsedRealtime()
+            val gap = if (lastKeyDownAt == 0L) -1L else now - lastKeyDownAt
+            lastKeyDownAt = now
+            KeydroidxLog.d(
+                TAG, "按键 key=${event.keyCode} 距上次=$gap ms busy=${isRendererLikelyBusy()}"
+            )
+        }
         // 如果该按键的 DOWN 事件已经被快捷菜单/快捷键消费，则必须拦截并消费对应的 UP 事件，防止穿透到底层视图
         if (event.action == KeyEvent.ACTION_UP && lastConsumedDownKeyCode != KeyEvent.KEYCODE_UNKNOWN) {
             if (event.keyCode == lastConsumedDownKeyCode) {
@@ -3697,7 +3794,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         val key = "${selectedTabId() ?: -1}:${webView.url.orEmpty()}"
         if (key == scrollModuleKey) return
         try {
-            webView.evaluateJavascript(keyphoneScroll.provideJs(), null)
+            traceMain("注入光标滚动脚本(${keyphoneScroll.provideJs().length}B)") {
+                webView.evaluateJavascript(keyphoneScroll.provideJs(), null)
+            }
             scrollModuleKey = key
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "注入光标滚动脚本失败: $key", t)
@@ -3734,7 +3833,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     try {
                         // 幂等安装网页输入劫持模块（点中输入框 → SDK 输入页）
                         webView.evaluateJavascript(webInputInstallJs, null)
-                        webView.dispatchTouchEvent(down)
+                        traceMain("光标触摸派发 DOWN") { webView.dispatchTouchEvent(down) }
                     } finally {
                         down.recycle()
                     }
@@ -3748,7 +3847,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                         controller.posX.toFloat(), controller.posY.toFloat(), 0
                     )
                     try {
-                        webView.dispatchTouchEvent(up)
+                        traceMain("光标触摸派发 UP") { webView.dispatchTouchEvent(up) }
                     } finally {
                         up.recycle()
                     }
@@ -3890,15 +3989,20 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private fun probeWebInput() {
         val webView = currentWebView() ?: return
         // 渲染进程繁忙时不发 evaluateJavascript：跨进程调用会同步阻塞主线程
-        if (isRendererLikelyBusy()) return
+        if (isRendererLikelyBusy()) {
+            KeydroidxLog.d(TAG, "输入探测跳过（渲染进程可能繁忙）attempt=$webInputProbeAttempt")
+            return
+        }
         webInputProbeAttempt++
-        webView.evaluateJavascript(webInputProbeJs) { result ->
-            val parsed = parseWebInputProbe(result)
-            if (parsed != null) {
-                webInputPendingSubmit = parsed.submit
-                openWebInputEditor(parsed.value, parsed.multiline)
-            } else if (webInputProbeAttempt < WEB_INPUT_PROBE_MAX_ATTEMPTS) {
-                inputProbeHandler.postDelayed(webInputProbeRunnable, WEB_INPUT_PROBE_RETRY_MS)
+        traceMain("输入探测 evaluateJavascript") {
+            webView.evaluateJavascript(webInputProbeJs) { result ->
+                val parsed = parseWebInputProbe(result)
+                if (parsed != null) {
+                    webInputPendingSubmit = parsed.submit
+                    openWebInputEditor(parsed.value, parsed.multiline)
+                } else if (webInputProbeAttempt < WEB_INPUT_PROBE_MAX_ATTEMPTS) {
+                    inputProbeHandler.postDelayed(webInputProbeRunnable, WEB_INPUT_PROBE_RETRY_MS)
+                }
             }
         }
     }
@@ -4310,17 +4414,21 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
          *  在它真正判忙之前就拦下会同步阻塞主线程的调用（dispatchTouchEvent / evaluateJavascript） */
         private const val PAGE_BUSY_PREEMPT_MS = 800L
 
+        /** 页面繁忙持续超过该时长：自动暂停页面计时器（WebView.pauseTimers，全进程），
+         *  把烧爆渲染进程的页面 JS 停下来，渲染进程空闲后主线程的同步 WebView 调用不再堵 */
+        private const val PAGE_BUSY_FREEZE_MS = 2500L
+
         /** 心跳脚本：只求值、不改页面（副作用为零） */
         private const val PAGE_BUSY_PING_JS = "1"
 
         /** 主线程看门狗采样间隔 */
         private const val MAIN_WATCH_INTERVAL_MS = 500L
 
-        /** 主线程连续非空闲多久算异常（早于 5s 的 ANR） */
-        private const val MAIN_WATCH_MIN_BUSY_MS = 2000L
+        /** 主线程连续非空闲多久算异常（早于 5s 的 ANR；实测单次阻塞 5.6s 的典型场景） */
+        private const val MAIN_WATCH_MIN_BUSY_MS = 1000L
 
         /** 抓栈日志的最小间隔，避免刷屏 */
-        private const val MAIN_WATCH_LOG_INTERVAL_MS = 3000L
+        private const val MAIN_WATCH_LOG_INTERVAL_MS = 1000L
 
         /** 卡住时最多打印多少帧栈 */
         private const val MAIN_WATCH_STACK_FRAMES = 30

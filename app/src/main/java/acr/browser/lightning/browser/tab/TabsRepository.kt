@@ -96,6 +96,7 @@ class TabsRepository @Inject constructor(
         // 把 save()+destroy() 推迟到下一轮主线程循环，此刻按键已返回、用户已拿回控制权，
         // 即便推迟后的销毁仍短暂阻塞，影响也远小于现在卡死整壳。
         if (rendererBusyProvider.isRendererBusy()) {
+            android.util.Log.w("TabsRepository", "关标签繁忙快速路径：先从列表移除，推迟销毁")
             tabsList = tabsList - tab
             tabsListStateFlow.emit(tabsList)
             scheduleSaveTabs()

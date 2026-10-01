@@ -381,6 +381,7 @@ class TabWebViewClient @AssistedInject constructor(
 
     override fun onPageFinished(view: WebView, url: String) {
         super.onPageFinished(view, url)
+        logger.log(TAG, "onPageFinished: url=$url")
         tabCoroutineScope.launch {
             urlSharedFlow.emit(url)
             goBackSharedFlow.emit(view.canGoBack())
@@ -388,6 +389,8 @@ class TabWebViewClient @AssistedInject constructor(
         }
         view.postVisualStateCallback(1, object : WebView.VisualStateCallback() {
             override fun onComplete(requestId: Long) {
+                // visualStateCallback 在渲染进程合成完首帧后回调——卡住的页面这里会迟到
+                logger.log(TAG, "visualStateCallback onComplete: url=$url") // 渲染完成信号
                 tabCoroutineScope.launch {
                     finishedSharedFlow.emit(Unit)
                 }
