@@ -109,7 +109,14 @@ class WebViewFactory @Inject constructor(
         settings.displayZoomControls = false
         settings.allowContentAccess = true
         settings.allowFileAccess = true
-        settings.offscreenPreRaster = true
+        // 关掉预栅格化：巨型 DOM 上它会双倍渲染工作量，把低配机的渲染进程直接烧爆
+        settings.offscreenPreRaster = false
+
+        // 渲染进程优先级让路（API 26+）：系统在内存/CPU吃紧时先杀渲染进程而不是拖死整机。
+        // 配合 TabAdapter 的 onRenderProcessGone 处理，页面变成"已回收可重载"，外壳始终响应。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
+        }
 
         val modifiesHeaders = tabSettings.doNotTrackEnabled
             || tabSettings.saveDataEnabled

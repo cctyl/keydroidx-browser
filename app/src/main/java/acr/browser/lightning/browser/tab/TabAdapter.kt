@@ -462,7 +462,7 @@ class TabAdapter @AssistedInject constructor(
     override suspend fun foreground() {
         priority = Priority.HIGH
         webView().resumeTimers()
-        webView().settings.offscreenPreRaster = true
+        // 预栅格化已全局关闭：巨型 DOM 上它会把低配机的渲染进程烧爆（见 WebViewFactory）
         webView().onResume()
         latentInitializer?.let(::loadFromInitializer)
         latentInitializer = null
