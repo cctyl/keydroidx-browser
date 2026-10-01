@@ -141,6 +141,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private var browserFrameHost: FrameLayout? = null
     private lateinit var browserFrame: FrameLayout
 
+    /** 独立窗口管理（WebView 窗口 + 几何同步基准），null = 尚未初始化 */
+    private var auxWindows: KeyphoneAuxWindows? = null
+    private var contentFrame: FrameLayout? = null
+
     /** 鼠标模式（仅网页态）：光标/菜单绘制走独立 Surface 覆盖层（不参与主窗口帧同步） */
     private var shellOverlay: KeyphoneShellOverlay? = null
     private var mouseController: KeyphoneMouseController? = null
@@ -322,7 +326,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         homeRowsContainer = findViewById(R.id.keyphone_home_rows)
         focusHelper = homeScroll?.let { KeydroidxListFocusHelper(it) }
 
-        browserFrameHost = findViewById(R.id.keyphone_browser_frame_host)
+        // Web 浏览器容器：WebView 挪进独立窗口（KeyphoneAuxWindows），
+        // 渲染进程烧爆时只卡页面窗口，壳窗口照常出帧/收按键
+        browserFrameHost = FrameLayout(this)
         browserFrameHost?.addView(
             browserFrame,
             FrameLayout.LayoutParams(
@@ -331,17 +337,18 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             )
         )
 
-        // 外壳覆盖层：独立 Surface 自绘光标与快捷菜单，WebView 渲染进程再烧也不卡光标。
-        // 挂进 keyphone_content_frame（与 browserFrameHost 同坐标系）而非 content 根容器，
-        // 否则光标整体向上错位 headerH（tab栏+地址栏高度），顶部越界/底部盲区/点击错位全由此来
+        // 外壳覆盖层：独立 Surface 自绘光标与快捷菜单（也放进 Web 窗口，其独立 surface
+        // 不受 Web 窗口帧卡影响；坐标系与 browserFrameHost 天然一致）
         val overlay = KeyphoneShellOverlay(this).apply { setCursorVisible(false) }
-        findViewById<FrameLayout>(R.id.keyphone_content_frame)?.addView(
-            overlay,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
+        auxWindows = KeyphoneAuxWindows(this).apply {
+            attach(browserFrameHost!!, overlay)
+        }
+        val contentFrameView = findViewById<FrameLayout>(R.id.keyphone_content_frame)
+        contentFrame = contentFrameView
+        contentFrameView?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            auxWindows?.sync(contentFrameView)
+        }
+        contentFrameView?.post { auxWindows?.sync(contentFrameView) }
         shellOverlay = overlay
         mouseController = KeyphoneMouseController(
             host = browserFrameHost!!,
@@ -469,6 +476,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     override fun onDestroy() {
         // 复位，避免 holder 持有已销毁 Activity 的 lambda（其它浏览器 Activity 默认 false）
         rendererBusyHolder.provider = { false }
+        auxWindows?.detach()
+        auxWindows = null
         super.onDestroy()
         presenter.onViewDetached()
     }
@@ -523,7 +532,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 exitFreeCopyMode()
             }
             homeScroll?.visibility = View.VISIBLE
-            browserFrameHost?.visibility = View.GONE
+            auxWindows?.setWebVisible(false)
             addressBarContainer?.visibility = View.GONE
             findBarContainer?.visibility = View.GONE
             progressBar?.visibility = View.INVISIBLE
@@ -532,7 +541,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
         } else {
             homeScroll?.visibility = View.GONE
-            browserFrameHost?.visibility = View.VISIBLE
+            auxWindows?.setWebVisible(true)
             if (isFindMode) {
                 addressBarContainer?.visibility = View.GONE
                 findBarContainer?.visibility = View.VISIBLE
