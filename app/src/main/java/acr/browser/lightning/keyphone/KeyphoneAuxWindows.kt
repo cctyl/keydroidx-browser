@@ -36,10 +36,14 @@ class KeyphoneAuxWindows(private val activity: Activity) {
 
     private var attached = false
 
+    /** 待执行的延迟 attach（token 未就绪时 post 的 addView）；onDestroy 时取消，防 WindowLeaked */
+    private var pendingAttach: Runnable? = null
+
     /** 挂到 WindowManager；browserFrameHost 与 shellOverlay 以 MATCH_PARENT 放满窗口。
-     *  onInitViews 阶段 decorView 尚未 attach（windowToken 为空），需要推迟到 token 就绪。 */
+     *  onInitViews 阶段 decorView 尚未 attach（windowToken 为空），需要推迟到 token 就绪；
+     *  若 Activity 在回调执行前被销毁则放弃 addView（否则 WindowLeaked）。 */
     fun attach(browserFrameHost: FrameLayout, shellOverlay: KeyphoneShellOverlay) {
-        if (attached) return
+        if (attached || pendingAttach != null) return
         webRoot.addView(
             browserFrameHost,
             FrameLayout.LayoutParams(
@@ -61,17 +65,19 @@ class KeyphoneAuxWindows(private val activity: Activity) {
             wm.addView(webRoot, webLp)
             attached = true
         } else {
-            decor.post {
-                if (!attached) {
-                    webLp.token = decor.windowToken
-                    try {
-                        wm.addView(webRoot, webLp)
-                        attached = true
-                    } catch (t: Throwable) {
-                        // token 仍不可用（极少见）：回退，WebView 走壳窗口旧路径由调用方处理
-                    }
+            val r = Runnable {
+                pendingAttach = null
+                if (attached || activity.isDestroyed) return@Runnable
+                webLp.token = decor.windowToken
+                try {
+                    wm.addView(webRoot, webLp)
+                    attached = true
+                } catch (t: Throwable) {
+                    // token 仍不可用（极少见）：放弃 attach，WebView 走壳窗口旧路径由调用方处理
                 }
             }
+            pendingAttach = r
+            decor.post(r)
         }
     }
 
@@ -109,6 +115,10 @@ class KeyphoneAuxWindows(private val activity: Activity) {
     }
 
     fun detach() {
+        // 取消还没执行的延迟 attach（token 未就绪时 post 的 addView），
+        // 否则回调会在已销毁的 Activity 上加窗口 → WindowLeaked
+        pendingAttach?.let { activity.window.decorView.removeCallbacks(it) }
+        pendingAttach = null
         if (!attached) return
         attached = false
         try {

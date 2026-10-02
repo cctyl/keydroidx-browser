@@ -30,6 +30,7 @@ import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.ViewGroup
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import androidx.activity.result.ActivityResult
@@ -185,6 +186,8 @@ class TabAdapter @AssistedInject constructor(
                 "渲染进程死亡 tab=$id didCrash=${detail.didCrash()} url=${urlStateFlow.value}"
             )
             _acquiredWebView = null
+            // 先摘除再 destroy：attached 状态 destroy 会撕裂 AwContents（destroy while attached 警告）
+            runCatching { (view.parent as? ViewGroup)?.removeView(view) }
             runCatching { view.destroy() }
             true // 返回 false 系统会连 App 进程一起杀；返回 true 由宿主接管（下次 webView() 重建）
         }
@@ -490,6 +493,10 @@ class TabAdapter @AssistedInject constructor(
             tabPager.removeTab(id)
         }
         webViewIfInitialized()?.apply {
+            // 先把 WebView 从父容器摘除再 destroy：removeAllViews() 删的是 WebView 的子视图，
+            // 不是把自己从父容器摘下；attached 状态 destroy 会把 Chromium AwContents 撕裂
+            // （日志实证 "destroy() called while still attached"），且阻塞渲染中继。
+            (parent as? ViewGroup)?.removeView(this)
             stopLoading()
             onPause()
             clearHistory()
