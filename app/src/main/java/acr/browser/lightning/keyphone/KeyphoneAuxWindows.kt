@@ -25,9 +25,13 @@ class KeyphoneAuxWindows(private val activity: Activity) {
     /** Web 页面窗口根布局：browserFrameHost（WebView）+ shellOverlay（光标/菜单覆盖层） */
     private val webRoot = FrameLayout(activity)
 
+    // Web 页面窗口：TYPE_APPLICATION（独立窗口，栈序在基础 Activity 窗口之上）。
+    // 不能用 TYPE_APPLICATION_PANEL：面板子窗口在部分 ROM 上不浮到父窗口之上，
+    // 被不透明壳窗口盖住 → 黑屏（dumpsys 实证：壳窗口 mTopFullscreenOpaque，栈序高于 Panel）。
+    // token 不手动设置：经 Activity 的 WindowManager 添加时自动取 Activity token。
     private val webLp = WindowManager.LayoutParams(
         0, 0,
-        WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+        WindowManager.LayoutParams.TYPE_APPLICATION,
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
         PixelFormat.TRANSLUCENT
     ).apply {
@@ -36,14 +40,16 @@ class KeyphoneAuxWindows(private val activity: Activity) {
 
     private var attached = false
 
-    /** 待执行的延迟 attach（token 未就绪时 post 的 addView）；onDestroy 时取消，防 WindowLeaked */
-    private var pendingAttach: Runnable? = null
+    /** attach 请求已受理但窗口尚未 addView（等 onResume 时机）；onDestroy 时取消，防 WindowLeaked */
+    private var attachPending = false
 
-    /** 挂到 WindowManager；browserFrameHost 与 shellOverlay 以 MATCH_PARENT 放满窗口。
-     *  onInitViews 阶段 decorView 尚未 attach（windowToken 为空），需要推迟到 token 就绪；
-     *  若 Activity 在回调执行前被销毁则放弃 addView（否则 WindowLeaked）。 */
+    /**
+     * 组装窗口内容树（browserFrameHost + shellOverlay），但**不在此时 addView**——
+     * Activity 自己的窗口到 onResume 才注册，先加的窗口栈序更低，会被不透明壳窗口盖住
+     * （黑屏根因）。真正的 addView 推迟到 [onActivityResumed]。
+     */
     fun attach(browserFrameHost: FrameLayout, shellOverlay: KeyphoneShellOverlay) {
-        if (attached || pendingAttach != null) return
+        if (attached || attachPending) return
         webRoot.addView(
             browserFrameHost,
             FrameLayout.LayoutParams(
@@ -58,26 +64,20 @@ class KeyphoneAuxWindows(private val activity: Activity) {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
-        val decor = activity.window.decorView
-        val token = decor.windowToken
-        if (token != null) {
-            webLp.token = token
-            wm.addView(webRoot, webLp)
-            attached = true
-        } else {
-            val r = Runnable {
-                pendingAttach = null
-                if (attached || activity.isDestroyed) return@Runnable
-                webLp.token = decor.windowToken
-                try {
-                    wm.addView(webRoot, webLp)
-                    attached = true
-                } catch (t: Throwable) {
-                    // token 仍不可用（极少见）：放弃 attach，WebView 走壳窗口旧路径由调用方处理
-                }
+        attachPending = true
+    }
+
+    /** onResume 时机（Activity 窗口已注册）才执行 addView：后注册 → 栈序在壳窗口之上。
+     *  onDestroy 之后不能再加（否则 WindowLeaked）。 */
+    fun onActivityResumed() {
+        if (attachPending && !attached && !activity.isDestroyed) {
+            attachPending = false
+            try {
+                wm.addView(webRoot, webLp)
+                attached = true
+            } catch (t: Throwable) {
+                // 极少见：放弃 attach，WebView 走壳窗口旧路径由调用方处理
             }
-            pendingAttach = r
-            decor.post(r)
         }
     }
 
@@ -115,10 +115,8 @@ class KeyphoneAuxWindows(private val activity: Activity) {
     }
 
     fun detach() {
-        // 取消还没执行的延迟 attach（token 未就绪时 post 的 addView），
-        // 否则回调会在已销毁的 Activity 上加窗口 → WindowLeaked
-        pendingAttach?.let { activity.window.decorView.removeCallbacks(it) }
-        pendingAttach = null
+        // 取消还没执行的 attach（等 onResume 时机），防 Activity 销毁后 addView → WindowLeaked
+        attachPending = false
         if (!attached) return
         attached = false
         try {

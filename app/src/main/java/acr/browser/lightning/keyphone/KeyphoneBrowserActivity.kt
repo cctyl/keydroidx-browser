@@ -441,6 +441,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     override fun onResume() {
         super.onResume()
+        // Web 独立窗口在此之后才 addView：Activity 窗口已注册，后加的窗口栈序在上，
+        // 不然会被不透明壳窗口盖住（黑屏根因）
+        auxWindows?.onActivityResumed()
         KeyphoneUrlGuard.attach(guardHost)
         // 只有当前挂在浏览容器里的 WebView 才算「可见页」：后台标签页的弹窗一律静默处理，
         // 否则广告站的后台标签能随时把确认框盖到用户正在看的页面上
