@@ -37,6 +37,17 @@ class TabPager @Inject constructor(
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
+        // 诊断：WebView 被 add 进的 container 是不是当前 Activity 的窗口里那个？
+        // container.windowToken 与 webRoot.windowToken 一致 → 绑定正确；
+        // 不一致或 container 未 attach → 绑到了旧/死的窗口（黑屏根因定位用）
+        android.util.Log.d(
+            "TabPager",
+            "selectTab id=$id container=${container.hashCode()} " +
+                "containerAttached=${container.isAttachedToWindow} " +
+                "containerWinToken=${container.windowToken?.hashCode()} " +
+                "webView=${webView.hashCode()} wvAttached=${webView.isAttachedToWindow} " +
+                "wvVisible=${webView.isShown} wvSize=${webView.width}x${webView.height}"
+        )
 
         webViewLongPressHandler.configure(webView, onLongClick = {
             longPressListener?.invoke(id, it)

@@ -329,6 +329,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         // Web 浏览器容器：WebView 挪进独立窗口（KeyphoneAuxWindows），
         // 渲染进程烧爆时只卡页面窗口，壳窗口照常出帧/收按键
         browserFrameHost = FrameLayout(this)
+        android.util.Log.d(
+            "AuxWindows",
+            "onInitViews browserFrame=${browserFrame.hashCode()} " +
+                "browserFrameHost=${browserFrameHost.hashCode()} activity=${this.hashCode()}"
+        )
         browserFrameHost?.addView(
             browserFrame,
             FrameLayout.LayoutParams(
