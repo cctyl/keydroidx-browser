@@ -75,12 +75,6 @@ class KeyphoneAuxWindows(private val activity: Activity) {
             try {
                 wm.addView(webRoot, webLp)
                 attached = true
-                android.util.Log.d(
-                    "AuxWindows",
-                    "webRoot addView webRoot=${webRoot.hashCode()} " +
-                        "winToken=${webRoot.windowToken?.hashCode()} attached=${webRoot.isAttachedToWindow} " +
-                        "size=${webRoot.width}x${webRoot.height}"
-                )
             } catch (t: Throwable) {
                 // 极少见：放弃 attach，WebView 走壳窗口旧路径由调用方处理
             }

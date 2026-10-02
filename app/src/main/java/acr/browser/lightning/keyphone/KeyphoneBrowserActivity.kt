@@ -329,11 +329,6 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         // Web 浏览器容器：WebView 挪进独立窗口（KeyphoneAuxWindows），
         // 渲染进程烧爆时只卡页面窗口，壳窗口照常出帧/收按键
         browserFrameHost = FrameLayout(this)
-        android.util.Log.d(
-            "AuxWindows",
-            "onInitViews browserFrame=${browserFrame.hashCode()} " +
-                "browserFrameHost=${browserFrameHost.hashCode()} activity=${this.hashCode()}"
-        )
         browserFrameHost?.addView(
             browserFrame,
             FrameLayout.LayoutParams(
@@ -449,6 +444,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         // Web 独立窗口在此之后才 addView：Activity 窗口已注册，后加的窗口栈序在上，
         // 不然会被不透明壳窗口盖住（黑屏根因）
         auxWindows?.onActivityResumed()
+        // addView 时 webLp 尺寸还是 0×0（contentFrame 尚未首次布局）；等首帧布局完成后
+        // 用真实尺寸 sync 一次，否则窗口永远 0×0 → WebView 0×0 → 内容区空白
+        contentFrame?.let { cf -> cf.post { auxWindows?.sync(cf) } }
         KeyphoneUrlGuard.attach(guardHost)
         // 只有当前挂在浏览容器里的 WebView 才算「可见页」：后台标签页的弹窗一律静默处理，
         // 否则广告站的后台标签能随时把确认框盖到用户正在看的页面上
