@@ -21,6 +21,8 @@ import android.webkit.WebView
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import javax.inject.Inject
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 
 /**
  * Constructs [WebView] instances configured for the browser based on user's preferences and create
@@ -35,22 +37,30 @@ class WebViewFactory @Inject constructor(
 
     /**
      * Create the request headers that notify websites of various privacy and data preferences.
+     *
+     * 三项偏好并发取（同 [acr.browser.lightning.browser.tab.settings.TabSettings.create]）：
+     * 本方法在 `TabFactory.constructTab` 的主线程上下文里被 await，串行读会白白多付两轮
+     * 「主线程 → IO → 主线程」往返，而这正好卡在「点书签 → 新标签开始加载」的路径上。
      */
-    suspend fun createRequestHeaders(): Map<String, String> {
+    suspend fun createRequestHeaders(): Map<String, String> = coroutineScope {
+        val doNotTrack = async { userPreferencesDataStore.doNotTrackEnabled.get() }
+        val saveData = async { userPreferencesDataStore.saveDataEnabled.get() }
+        val removeIdentifying = async { userPreferencesDataStore.removeIdentifyingHeadersEnabled.get() }
+
         val requestHeaders = mutableMapOf<String, String>()
-        if (userPreferencesDataStore.doNotTrackEnabled.get()) {
+        if (doNotTrack.await()) {
             requestHeaders[HEADER_DNT] = "1"
         } else {
             requestHeaders.remove(HEADER_DNT)
         }
 
-        if (userPreferencesDataStore.saveDataEnabled.get()) {
+        if (saveData.await()) {
             requestHeaders[HEADER_SAVEDATA] = "on"
         } else {
             requestHeaders.remove(HEADER_SAVEDATA)
         }
 
-        if (userPreferencesDataStore.removeIdentifyingHeadersEnabled.get()) {
+        if (removeIdentifying.await()) {
             requestHeaders[HEADER_REQUESTED_WITH] = ""
             requestHeaders[HEADER_WAP_PROFILE] = ""
         } else {
@@ -58,7 +68,7 @@ class WebViewFactory @Inject constructor(
             requestHeaders.remove(HEADER_WAP_PROFILE)
         }
 
-        return requestHeaders
+        requestHeaders
     }
 
     /**

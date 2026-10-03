@@ -171,6 +171,7 @@
     <string name="keyphone_browser_title">浏览器</string>
     <string name="keyphone_tab_home">主页</string>
     <string name="keyphone_tab_untitled">新标签页</string>
+    <string name="keyphone_page_loading">正在打开…</string>
 
     <!-- 标签页列表页（竖向一行一个，显示标题 + 页面预览） -->
     <string name="keyphone_tabs_title">标签页</string>

@@ -142,6 +142,22 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private lateinit var browserFrame: FrameLayout
     private var contentFrame: FrameLayout? = null
 
+    /** 加载中占位层（网页态但页面还没加载完时盖在内容区上，见 keyphone_browser.xml） */
+    private var pageLoading: View? = null
+    private var pageLoadingText: TextView? = null
+
+    /**
+     * 已点击打开、但页面还没呈现出来的 URL（非空即「网页态 + 内容区正在加载」）。
+     *
+     * 背景：主页点书签走 [openUrlInNewTab] 时，要等 `KeyphoneUrls.normalize` 读 DataStore、
+     * 新建 WebView 时读 19 项 TabSettings、拼请求头再读 3 项偏好，整条链走完才
+     * `loadUrl`，而 `presenter.onEvent` 只是异步 `launch` 不 await —— 中间这几百毫秒
+     * 里主页已隐藏、内容区是空的，顶栏 2dp 进度线又因为 `progressStateFlow` 初值为 100
+     * 而不显示，用户看到的就是「点了没反应、像卡住」。本字段让点击瞬间就切到网页态
+     * 并显示加载提示，等 WebView 真正 attach、state 也确认已切页后由 [observeState] 清除。
+     */
+    private var pendingOpenUrl: String? = null
+
     /** 鼠标模式（仅网页态）：微型光标（RenderNode 纯矩阵变换）+ 全屏菜单浮层（按需展示） */
     private var cursorView: KeyphoneCursorView? = null
     private var shellOverlay: KeyphoneShellOverlay? = null
@@ -319,6 +335,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         findCountText = findViewById(R.id.keyphone_find_count_text)
 
         progressBar = findViewById<View>(R.id.keyphone_progress)?.apply { pivotX = 0f }
+        pageLoading = findViewById(R.id.keyphone_page_loading)
+        pageLoadingText = findViewById(R.id.keyphone_page_loading_text)
 
         homeScroll = findViewById(R.id.keyphone_home_scroll)
         homeRowsContainer = findViewById(R.id.keyphone_home_rows)
@@ -516,7 +534,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     /** 刷新 UC 风格顶部标签栏与主内容区可见性 */
     private fun updateTabMode() {
         val currentTab = presenter.state.value.tabs.firstOrNull { it.isSelected }
-        isHomeSelected = (currentTab == null || isTabHome(currentTab))
+        // pendingOpenUrl 非空 =「刚点了书签/历史/提交地址，页面还在路上」。此刻 state 往往
+        // 还停在被点中的那个主页标签（切页尚未落定），若按 state 重算就会继续留在主页，
+        // 用户点了完全看不到反应。这里强制走网页态，等 observeState 确认 state 已切页后
+        // 再把归属交回 state。
+        isHomeSelected = pendingOpenUrl == null && (currentTab == null || isTabHome(currentTab))
         val wv = currentWebView()
         KeydroidxLog.i(TAG, "updateTabMode: isHomeSelected=$isHomeSelected, tab=${currentTab?.url}, wv=$wv (w=${wv?.width}, h=${wv?.height}, vis=${wv?.visibility}, parent=${wv?.parent})")
 
@@ -584,7 +606,28 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
 
         renderTabBar()
+        updatePageLoading(wv)
         updateMouseCursorVisibility()
+    }
+
+    /**
+     * 加载中占位层的显隐（见 [pendingOpenUrl]）。
+     *
+     * 判据是「页面还没加载完」，三种情况都要盖住：
+     * - [currentWebView] 取到 null：该标签的 WebView 还没被 TabPager addView 进容器
+     *   （建 WebView 要读 18 项 TabSettings、再设 40 多个 settings）；
+     * - [pendingOpenUrl] 非空：已经点了，但 `loadUrl` 还没让页面跑起来；
+     * - progress < 100：已经开始加载，但首屏还没画完 —— **这一段最长（实测 1.5s+）**。
+     *
+     * 为什么一直盖到 progress 100：WebView 一 attach 就是白底，从 attach 到首帧绘制之间
+     * （实测 1.5s 以上）什么都没有，正是用户说的「点了没反应、以为卡住」。中途撤遮罩就会
+     * 把这段白屏露出来，所以宁可让「正在打开…」多挂一会儿，也不要给用户一片空白。
+     */
+    private fun updatePageLoading(webView: WebView?) {
+        val host = pageLoading ?: return
+        val progress = presenter.state.value.progress
+        val show = !isHomeSelected && (webView == null || pendingOpenUrl != null || progress < 100)
+        host.visibility = if (show) View.VISIBLE else View.GONE
     }
 
     /** 渲染顶部标签栏：所有打开的标签页（主页 / 各网页） */
@@ -634,6 +677,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     /** 切换到主页标签页（若当前未处于主页标签，切到现存主页或新建主页） */
     private fun switchToHome() {
+        pendingOpenUrl = null
         isScrolledToBottom = false
         val tabs = presenter.state.value.tabs
         val currentTab = tabs.firstOrNull { it.isSelected }
@@ -689,6 +733,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     internal fun switchToTab(index: Int) {
         val tabs = presenter.state.value.tabs
         if (index in tabs.indices) {
+            // 用户主动切走 → 放弃上一个还没打开完的地址，别让加载中遮住新页面
+            pendingOpenUrl = null
             if (isFindMode) {
                 exitFindMode()
             }
@@ -720,10 +766,20 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             exitFreeCopyMode()
         }
         clearReadingModeOnNavigation()
+
+        // 点击瞬间就切到「网页态 + 加载中」，把反馈放在协程之前：
+        // 下面 normalize 要读 DataStore，新建 WebView 要串行读 18 项 TabSettings 和
+        // 3 项请求头偏好（且都跑在主线程上），整条链走完才有 loadUrl。这些时间里
+        // 页面一行都画不出来，若还停在主页，用户就是「点了没反应」。
+        pendingOpenUrl = url
+        isHomeSelected = false
+        addressText = url
+        isScrolledToBottom = false
+        showPageLoadingNow()
+
         lifecycleScope.launch {
             try {
                 val normalizedUrl = KeyphoneUrls.normalize(url, searchEngineProvider)
-                isScrolledToBottom = false
                 val currentTab = presenter.state.value.tabs.firstOrNull { it.isSelected }
                 if (currentTab != null && isTabHome(currentTab)) {
                     presenter.onEvent(BrowserUiEvent.SearchConfirmed(normalizedUrl))
@@ -734,13 +790,41 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                         )
                     )
                 }
-                isHomeSelected = false
                 updateTabMode()
                 presenter.onViewShown()
             } catch (t: Throwable) {
                 KeydroidxLog.e(TAG, "打开网址失败: $url", t)
+                // 失败时不能把「加载中」挂着，否则内容区永远卡在转圈
+                clearPendingOpen()
             }
         }
+    }
+
+    /** 放弃「页面正在打开」状态并按当前 state 重算界面（打开失败或用户切走了） */
+    private fun clearPendingOpen() {
+        if (pendingOpenUrl == null) return
+        pendingOpenUrl = null
+        updateTabMode()
+    }
+
+    /**
+     * 点击瞬间把内容区切到「网页态 + 加载中」，**只动可见性**。
+     *
+     * 为什么不在这里直接调 [updateTabMode]：它的网页态分支在没有 WebView 时会调
+     * `presenter.onViewShown()` → `currentTab.foreground()` → `TabPager.selectTab(id)`，
+     * 而 `selectTab` 里是 `webViews[id]!!` —— 被点中的主页标签（NoOp 初始化）若还没
+     * 真正创建 WebView，这里就会 NPE。此刻 presenter 还没收到事件，正是那个最危险的时刻。
+     *
+     * 顶栏标签栏、底部软键这些由紧随其后的 state 发射经 [observeState] → [updateTabMode]
+     * 补齐（通常几十毫秒内），用户无感。
+     */
+    private fun showPageLoadingNow() {
+        homeScroll?.visibility = View.GONE
+        browserFrameHost?.visibility = View.VISIBLE
+        addressBarContainer?.visibility = View.VISIBLE
+        findBarContainer?.visibility = View.GONE
+        pageLoading?.visibility = View.VISIBLE
+        applyAddressBar()
     }
 
     // endregion
@@ -2799,13 +2883,26 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private fun observeState() {
         lifecycleScope.launch {
             presenter.state.collectLatest { state ->
-                addressText = state.displayUrl
+                // 正在打开时 state.displayUrl 还是上一个主页标签的地址（甚至为空），
+                // 直接覆盖会把点击瞬间写进去的目标地址抹掉，地址栏又退回占位文案。
+                // pendingOpenUrl 期间一律显示用户刚点/刚输的那个。
+                addressText = pendingOpenUrl ?: state.displayUrl
                 // 退出阅读模式后的历史补写：等新章节页面加载完成（标题 / URL 都已上报）再覆盖
                 if (state.progress == 100) {
                     reassertTrailHistory()
                 }
                 if (state.tabs.isEmpty()) {
                     isHomeSelected = true
+                }
+                // 「正在打开」何时结束：WebView 已经 attach 进容器（用户看得见页面了），
+                // 且 state 也确认当前标签不再是主页。两者都满足才交回 state 判定
+                // isTabHome，否则清早了会闪回上一个主页标签。
+                if (pendingOpenUrl != null) {
+                    val selected = state.tabs.firstOrNull { it.isSelected }
+                    if (currentWebView() != null && (selected == null || !isTabHome(selected))) {
+                        KeydroidxLog.i(TAG, "页面已呈现，结束加载中: $pendingOpenUrl")
+                        pendingOpenUrl = null
+                    }
                 }
                 updateTabMode()
                 if (!isHomeSelected) {

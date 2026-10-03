@@ -128,6 +128,38 @@
             android:focusable="false"
             android:focusableInTouchMode="false"
             android:visibility="gone" />
+
+        <!-- 加载中占位：已切到网页态但页面还没开始加载时盖在内容区上。建 WebView 要串行读
+             偏好、首次加载还要拉起渲染进程，这段时间内容区是空的（主页已隐藏、网页还没画出来），
+             表现为「点了没反应、像卡住」。这里盖一层转圈提示，收到首个真实加载进度就撤掉，
+             让用户尽早看到页面本身。背景与顶部标签栏同色，避免透出 WebView 的白底导致白字看不见。 -->
+        <LinearLayout
+            android:id="@+id/keyphone_page_loading"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="#121D2C"
+            android:clickable="true"
+            android:focusable="false"
+            android:focusableInTouchMode="false"
+            android:visibility="gone">
+
+            <ProgressBar
+                android:id="@+id/keyphone_page_loading_spinner"
+                android:layout_width="26dp"
+                android:layout_height="26dp"
+                android:indeterminate="true" />
+
+            <TextView
+                android:id="@+id/keyphone_page_loading_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="@string/keyphone_page_loading"
+                android:textSize="12sp"
+                android:textColor="#FFFFFF" />
+        </LinearLayout>
     </FrameLayout>
 
 </LinearLayout>
