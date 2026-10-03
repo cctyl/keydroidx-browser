@@ -158,6 +158,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
      */
     private var pendingOpenUrl: String? = null
 
+    /** [ensureHomeWindow] 最近一次派发新建主页的时间戳，用于在途短路（见该方法注释） */
+    private var homeWindowDispatchAt = 0L
+
     /** 鼠标模式（仅网页态）：微型光标（RenderNode 纯矩阵变换）+ 全屏菜单浮层（按需展示） */
     private var cursorView: KeyphoneCursorView? = null
     private var shellOverlay: KeyphoneShellOverlay? = null
@@ -720,6 +723,18 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         val homeIndex = tabs.indexOfFirst { isTabHome(it) }
         when {
             homeIndex < 0 -> {
+                // 光靠 tabs 判幂等是不够的：presenter.onEvent(AddTab) 是异步派发，
+                // state 要几百毫秒才落定，这段窗口里 closeTab / switchToHome /
+                // onAllTabsClosed 可能各来一次（实测日志里两次 ensureHomeWindow 只隔
+                // 5ms，读到的 tabs 是同一个旧快照），于是各派发一次 AddTab，
+                // 顶栏就多出一个主页。用在途时间戳短路，等 state 里真的出现主页标签
+                // 或超时（3s，兜住事件丢失）后再放行。
+                val now = SystemClock.uptimeMillis()
+                if (now - homeWindowDispatchAt < HOME_WINDOW_DISPATCH_TIMEOUT) {
+                    KeydroidxLog.i(TAG, "ensureHomeWindow: 已有在途的新建，跳过（tabs=${tabs.size}）")
+                    return
+                }
+                homeWindowDispatchAt = now
                 KeydroidxLog.i(TAG, "ensureHomeWindow: 无主页标签，新建一个（tabs=${tabs.size}）")
                 createNewWindow()
             }
@@ -2886,6 +2901,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private fun observeState() {
         lifecycleScope.launch {
             presenter.state.collectLatest { state ->
+                // 主页标签已真正落定 → 解除在途短路（见 ensureHomeWindow）
+                if (state.tabs.any { isTabHome(it) }) {
+                    homeWindowDispatchAt = 0L
+                }
                 // 正在打开时 state.displayUrl 还是上一个主页标签的地址（甚至为空），
                 // 直接覆盖会把点击瞬间写进去的目标地址抹掉，地址栏又退回占位文案。
                 // pendingOpenUrl 期间一律显示用户刚点/刚输的那个。
@@ -4428,6 +4447,13 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         private const val GRID_COLUMNS = 3
         private const val MAX_HISTORY_ROWS = 10
         private const val MAX_INPUT_CHARS = 100
+
+        /**
+         * [ensureHomeWindow] 的在途短路窗口：新建主页的事件派发出去后，state 里要过
+         * 几百毫秒才出现主页标签，这段时间内重复调用直接忽略。超时是为了兜住事件丢失
+         * （否则一旦 onEvent 失败，主页就再也建不出来）。
+         */
+        private const val HOME_WINDOW_DISPATCH_TIMEOUT = 3000L
 
         /** 网页 alert：提示条节流间隔（弹窗风暴时避免刷屏，掩盖真正的拦截提示） */
         private const val WEB_ALERT_TOAST_GAP_MS = 1500L
