@@ -100,6 +100,22 @@
 - `build_release.bat`：全量 Lint + Release 混淆打包并打开输出文件夹。
 - `install_debug.bat [serial]`：只安装已有 Debug APK，不重新编译。
 
+### 2.5 启动与调试（ADB）
+- **启动应用必须显式指定 activity-alias**（唯一可靠方式，`<serial>` 为设备序列号）：
+  ```powershell
+  adb -s <serial> shell am start -n acr.browser.lightning/acr.browser.lightning.DefaultBrowserActivityOrange
+  ```
+  - **严禁使用 `monkey -p acr.browser.lightning -c android.intent.category.LAUNCHER 1`**：Debug 包的 LeakCanary 在同一包内也注册了 `LAUNCHER` 入口（`com.squareup.leakcanary.internal.LauncherActivity`），`monkey` 会随机命中并弹出 LeakCanary 泄漏详情页（重装 APK 后它常自行拉起，`0 Distinct Leaks` 也照弹），该页面既不是浏览器也不是设置页。
+  - 只能通过 alias 启动：alias 标记为 `exported="true"`；而启动链上的 `keyphone.BrowserHomeActivity` 与 `keyphone.KeyphoneBrowserActivity` 均为 **not exported**，直接 `am start` 会抛 `SecurityException: Permission Denial: ... not exported from uid ...`。
+  - Lite 变体启动组件：`acr.browser.barebones/acr.browser.barebones.DefaultBrowserActivityBlue`（Blue alias 默认 `enabled="false"`，需先在应用内「更换应用图标」启用）。
+- 安装 Debug APK：
+  ```powershell
+  adb -s <serial> install -r app\build\outputs\apk\lightningPlus\debug\app-lightningPlus-debug.apk
+  ```
+  重装后若停留在 LeakCanary 页，先执行 `adb -s <serial> shell input keyevent KEYCODE_BACK` 退回。
+- 截屏：Windows PowerShell 下 `adb exec-out screencap -p > x.png` 会把二进制流按文本重定向而损坏 PNG，必须用 `adb -s <serial> shell screencap -p /sdcard/x.png` 后 `adb -s <serial> pull /sdcard/x.png .`。
+- 日志：复现前先 `adb -s <serial> logcat -c` 清空缓冲区，再用 `adb -s <serial> logcat -d -v time -s KeyphoneBrowser` 抓取按键、标签页与主页切换日志。
+
 ---
 
 ## 3. 按键机（KeydroidX）开发规范与红线

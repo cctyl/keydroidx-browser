@@ -33,6 +33,21 @@ Windows PowerShell，在包含 `gradlew.bat` 的项目根目录执行。
 - `install_debug.bat` [serial] — 只安装不构建。
 - 切 Lite 变体：把脚本里的任务名、输出目录、启动组件（`acr.browser.barebones` / `DefaultBrowserActivityBlue`）一起改。
 
+启动与调试（adb）：
+
+- **启动应用必须显式指定 activity-alias**，命令如下（这是唯一可靠的启动方式）：
+
+  ```powershell
+  adb -s <serial> shell am start -n acr.browser.lightning/acr.browser.lightning.DefaultBrowserActivityOrange
+  ```
+
+  - **不要用 `monkey -p acr.browser.lightning -c android.intent.category.LAUNCHER 1`**：debug 包的 LeakCanary 在同一包内也注册了 `LAUNCHER` 入口（`com.squareup.leakcanary.internal.LauncherActivity`），`monkey` 会随机命中它并弹出 LeakCanary 泄漏详情页（重装 APK 后它常自行 `startActivity` 拉起，`0 Distinct Leaks` 也照弹），既不是浏览器也不是设置页。
+  - 只能启 alias：alias 是 `exported="true"`；`keyphone.BrowserHomeActivity` / `keyphone.KeyphoneBrowserActivity` 均 **not exported**，`am start` 会报 `SecurityException: Permission Denial: ... not exported from uid ...`，别在这上面浪费时间。
+  - Lite 变体：`acr.browser.barebones/acr.browser.barebones.DefaultBrowserActivityBlue`。Blue alias 默认 `enabled="false"`，需先在应用内「更换应用图标」启用它，否则启动命令同样失败。
+- 安装：`adb -s <serial> install -r app\build\outputs\apk\lightningPlus\debug\app-lightningPlus-debug.apk`。重装后若停在 LeakCanary 页，先 `adb -s <serial> shell input keyevent KEYCODE_BACK` 退回。
+- 截图：**PowerShell 下 `adb exec-out screencap -p > x.png` 会按文本处理二进制流导致 PNG 损坏**，一律用 `adb -s <serial> shell screencap -p /sdcard/x.png` + `adb -s <serial> pull /sdcard/x.png .`，用完 `adb shell rm` 清掉。
+- 日志：`adb -s <serial> logcat -c` 先清空再复现（`updateTabMode` / `closeCurrentTabOrExit` 这类关键日志量大且会被冲掉）；`adb -s <serial> logcat -d -v time -s KeyphoneBrowser` 读按键与标签页日志。
+
 打包与签名（已按 `../android-gradle-build/SKILL.md` 配好）：
 
 - `app/test.jks` 是生态统一测试密钥（来源 `../android-gradle-build/test.jks`），已被 `.gitignore` 的 `*.jks` 规则排除，**不要提交**。
