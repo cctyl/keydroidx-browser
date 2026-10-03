@@ -1430,7 +1430,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 getString(if (isReadingMode()) R.string.keyphone_qm_exit_reading else R.string.keyphone_qm_reading)
             ) { toggleReadingMode() },
             KeyphoneViews.QuickMenuItem("7", getString(R.string.keyphone_qm_clear_tabs)) { confirmClearAllTabs() },
-            KeyphoneViews.QuickMenuItem("0", getString(R.string.keyphone_qm_new_tab)) { createNewWindow() },
+            // 「新建标签」占用 8 而不是 0：0 在菜单外已经是「循环切换标签」，
+            // 菜单开着时若也占 0，用户以为在切标签、实际建了个主页窗口（顶栏凭空多一个
+            // 「主页」），且菜单是常驻的，误触很容易发生。8 此前是空位。
+            KeyphoneViews.QuickMenuItem("8", getString(R.string.keyphone_qm_new_tab)) { createNewWindow() },
             KeyphoneViews.QuickMenuItem("*", getString(R.string.keyphone_qm_close_tab)) { closeCurrentTabOrExit() }
         )
     }
@@ -3141,6 +3144,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     if (matchedItem != null) {
                         hideQuickMenu()
                         matchedItem.action()
+                    } else if (keyLabel == "0") {
+                        // 菜单里不再有 0 项：按 0 统一为「循环切换标签」，与菜单外一致。
+                        // 此前这里既不执行也不关菜单，用户会觉得按键失灵。
+                        hideQuickMenu()
+                        cycleNextTab()
                     } else if (keyLabel == "#" && activeMenuType == QuickMenuType.PAGE_MENU) {
                         // 在 * 键菜单打开时按 # 直接切到全局 # 菜单
                         showGlobalMenu()

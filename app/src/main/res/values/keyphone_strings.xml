@@ -24,7 +24,7 @@
     <string name="keyphone_soft_clear">清空</string>
     <string name="keyphone_soft_reset">重置</string>
 
-    <!-- 按键 * 数字快捷菜单（UC 经典页面/窗口上下文菜单，按 * 关闭窗口、按 0 新建窗口） -->
+    <!-- 按键 * 数字快捷菜单（UC 经典页面/窗口上下文菜单，按 * 关闭窗口、按 8 新建窗口） -->
     <string name="keyphone_qm_refresh">1.刷新/停止</string>
     <string name="keyphone_qm_add_bookmark">2.加入书签</string>
     <string name="keyphone_qm_copy_link">3.复制链接</string>
@@ -33,7 +33,7 @@
     <string name="keyphone_qm_reading">6.阅读模式</string>
     <string name="keyphone_qm_exit_reading">6.退出阅读</string>
     <string name="keyphone_qm_clear_tabs">7.清空标签页</string>
-    <string name="keyphone_qm_new_tab">0.新建窗口</string>
+    <string name="keyphone_qm_new_tab">8.新建窗口</string>
     <string name="keyphone_qm_close_tab">*.关闭窗口</string>
 
     <!-- 按键 # 全局快捷工具菜单（UC 经典 # 键全局菜单） -->
