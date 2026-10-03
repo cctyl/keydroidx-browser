@@ -22,6 +22,7 @@ import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
+import android.os.Build
 import android.os.Message
 import android.os.SystemClock
 import android.view.LayoutInflater
@@ -32,6 +33,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AlertDialog
 import androidx.webkit.WebViewAssetLoader.InternalStoragePathHandler
 import dagger.assisted.Assisted
@@ -102,6 +104,10 @@ class TabWebViewClient @AssistedInject constructor(
      */
     var renderProcessGoneHandler: ((WebView, android.webkit.RenderProcessGoneDetail) -> Boolean)? = null
 
+    // WebViewClient.onRenderProcessGone 本身就是 API 26 才引入的覆写点，
+    // 系统只会在 API 26+ 派发，故用 @RequiresApi 而非运行期判版本：
+    // 覆写方法体内部对 API 26 的调用（detail.didCrash()）由此获得静态检查豁免。
+    @RequiresApi(Build.VERSION_CODES.O)
     override fun onRenderProcessGone(
         view: WebView,
         detail: android.webkit.RenderProcessGoneDetail

@@ -22,6 +22,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.os.Build
 import android.os.Bundle
 import android.os.Message
 import android.os.SystemClock
@@ -181,9 +182,18 @@ class TabAdapter @AssistedInject constructor(
         // 渲染进程死亡回调（API 26+，经由 WebViewClient.onRenderProcessGone）。
         // 不处理时系统默认会连 App 进程一起杀（网页崩 → 浏览器闪退）。
         tabWebViewClient.renderProcessGoneHandler = { view, detail ->
+            // didCrash() 自身是 API 26+ 的方法。本回调确实只在 API 26+ 才会被系统触发，
+            // 但这里是 lambda，不在 onRenderProcessGone 的 @RequiresApi 作用域内，
+            // 静态检查无法推断，且本项目 minSdk 24 —— 直接调用在旧机上会 NoSuchMethodError，
+            // 故显式判版本（Lint NewApi 的正解，不是单纯抑制）。
+            val didCrash = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                detail.didCrash()
+            } else {
+                true
+            }
             Log.w(
                 "TabAdapter",
-                "渲染进程死亡 tab=$id didCrash=${detail.didCrash()} url=${urlStateFlow.value}"
+                "渲染进程死亡 tab=$id didCrash=$didCrash url=${urlStateFlow.value}"
             )
             _acquiredWebView = null
             // 先摘除再 destroy：attached 状态 destroy 会撕裂 AwContents（destroy while attached 警告）
