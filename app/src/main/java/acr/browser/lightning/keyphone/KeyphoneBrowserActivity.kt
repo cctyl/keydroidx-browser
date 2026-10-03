@@ -537,9 +537,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         } else {
             homeScroll?.visibility = View.GONE
             browserFrameHost?.visibility = View.VISIBLE
-            currentWebView()?.apply {
-                onResume()
-                resumeTimers()
+            val wv = currentWebView()
+            if (wv != null) {
+                wv.onResume()
+                wv.resumeTimers()
+            } else {
+                presenter.onViewShown()
             }
             if (isFindMode) {
                 addressBarContainer?.visibility = View.GONE
@@ -1759,7 +1762,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             exitFreeCopyMode()
         }
         val tabs = presenter.state.value.tabs
-        val currentIndex = tabs.indexOfFirst { it.isSelected }
+        var currentIndex = tabs.indexOfFirst { it.isSelected }
+        if (currentIndex < 0 && tabs.isNotEmpty()) {
+            currentIndex = tabs.indexOfFirst { !isTabHome(it) }.takeIf { it >= 0 } ?: 0
+        }
+        KeydroidxLog.i(TAG, "closeCurrentTabOrExit: tabsCount=${tabs.size}, currentIndex=$currentIndex")
 
         if (tabs.size > 1 && currentIndex >= 0) {
             closeTab(currentIndex)
@@ -3032,6 +3039,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
             if (keyLabel != null) {
                 if (isFirstDown) {
+                    lastConsumedDownKeyCode = event.keyCode
                     val items = getActiveMenuItems()
                     val matchedItem = items.firstOrNull { it.keyLabel == keyLabel }
                     if (matchedItem != null) {

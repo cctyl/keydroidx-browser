@@ -304,7 +304,11 @@ class TabAdapter @AssistedInject constructor(
     override suspend fun loadUrl(url: String) {
         // 按键机提交兜底拦截：用户主动输入/选择的地址放行一次
         tabWebViewClient.allowExplicitNavigation(url)
-        webView().loadUrl(url, requestHeaders)
+        val wv = webView()
+        wv.loadUrl(url, requestHeaders)
+        if (priority == Priority.HIGH) {
+            tabPager.selectTab(id)
+        }
     }
 
     override fun loadFromInitializer(tabInitializer: TabInitializer) {
@@ -522,7 +526,9 @@ class TabAdapter @AssistedInject constructor(
     }
 
     override suspend fun save(): Bundle = latentInitializer?.bundle
-        ?: Bundle(ClassLoader.getSystemClassLoader()).also(webView()::saveState)
+        ?: Bundle(ClassLoader.getSystemClassLoader()).also { b ->
+            webViewIfInitialized()?.saveState(b)
+        }
 
     private fun createToolbarAwareTouchListener(context: Context): View.OnTouchListener {
         val gestureListener = CustomGestureListener(

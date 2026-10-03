@@ -89,31 +89,19 @@ class TabsRepository @Inject constructor(
     override var selectedTab: TabModel? = null
 
     override suspend fun deleteTab(id: Int): Unit = withContext(coroutineDispatchers.main) {
-        val tab = tabsList.forId(id)
-        // 渲染进程繁忙时：save()/destroy() 都会同步跨进程阻塞主线程。
-        // 先把标签从列表移除、刷新 UI（用户立即看到标签消失，presenter 随即切到相邻标签，
-        // busy WebView 被 TabPager 本地 removeView 摘下——本地操作不等渲染进程）；
-        // 把 save()+destroy() 推迟到下一轮主线程循环，此刻按键已返回、用户已拿回控制权，
-        // 即便推迟后的销毁仍短暂阻塞，影响也远小于现在卡死整壳。
-        if (rendererBusyProvider.isRendererBusy()) {
-            android.util.Log.w("TabsRepository", "关标签繁忙快速路径：先从列表移除，推迟销毁")
-            tabsList = tabsList - tab
-            tabsListStateFlow.emit(tabsList)
-            scheduleSaveTabs()
-            // save()/destroy() 是 suspend 且会跨进程阻塞：推迟到下一轮主线程循环执行，
-            // 此刻按键已返回、用户已拿回控制权
-            appCoroutineScope.launch(coroutineDispatchers.main) {
-                runCatching {
-                    recentTabModel.addClosedTab(tab.save())
-                    tab.destroy()
-                }
+        val tab = tabsList.find { it.id == id } ?: return@withContext
+        tabsList = tabsList - tab
+        if (selectedTab?.id == id) {
+            selectedTab = null
+        }
+        tabsListStateFlow.emit(tabsList)
+        scheduleSaveTabs()
+
+        appCoroutineScope.launch(coroutineDispatchers.main) {
+            runCatching {
+                recentTabModel.addClosedTab(tab.save())
+                tab.destroy()
             }
-        } else {
-            recentTabModel.addClosedTab(tab.save())
-            tab.destroy()
-            tabsList = tabsList - tab
-            tabsListStateFlow.emit(tabsList)
-            scheduleSaveTabs()
         }
     }
 

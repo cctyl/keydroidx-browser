@@ -365,6 +365,7 @@ class BrowserPresenter @Inject constructor(
 
     private suspend fun selectTab(tabModel: TabModel?, focusTab: Boolean = true) {
         if (currentTab == tabModel) {
+            currentTab?.foreground()
             state.updateSelf { copy(openTabs = false) }
             return
         }
@@ -767,18 +768,18 @@ class BrowserPresenter @Inject constructor(
     }
 
     private suspend fun onTabClose(index: Int) {
-        if (index == -1) {
-            // If the user clicks on close multiple times, the index may be -1 if the view is in the
+        if (index !in state.value.tabs.indices) {
+            // If the user clicks on close multiple times, the index may be invalid if the view is in the
             // process of being removed.
             return
         }
+        val closingTab = state.value.tabs[index]
         val nextTab = state.value.tabs.nextSelected(index)
 
         val currentTabId = currentTab?.id
-        val needToSelectNextTab = state.value.tabs[index].id == currentTabId
+        val needToSelectNextTab = closingTab.id == currentTabId || currentTab == null || !state.value.tabs.any { it.id == currentTabId }
 
-        model.deleteTab(state.value.tabs[index].id)
-        state.updateSelf { updateTabViewState() }
+        model.deleteTab(closingTab.id)
         if (needToSelectNextTab) {
             nextTab?.id?.let {
                 val shouldClose = currentTab?.tabType == TabModel.Type.EPHEMERAL
@@ -797,6 +798,8 @@ class BrowserPresenter @Inject constructor(
                 selectTab(tabModel = null)
                 navigator.closeBrowser()
             }
+        } else {
+            state.updateSelf { updateTabViewState() }
         }
     }
 
