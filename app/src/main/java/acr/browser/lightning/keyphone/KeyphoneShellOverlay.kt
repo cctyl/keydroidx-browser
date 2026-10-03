@@ -5,28 +5,18 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.PixelFormat
-import android.graphics.PorterDuff
 import android.graphics.RectF
 import android.graphics.Typeface
-import android.os.Handler
-import android.os.HandlerThread
-import android.os.Looper
 import android.view.MotionEvent
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.view.View
 
 /**
- * 浏览器外壳覆盖层：**独立 Surface + 专用渲染线程**绘制光标与快捷菜单。
+ * 浏览器外壳覆盖层：轻量级全透明自定义视图，负责在 WebView 上层自绘虚拟光标与快捷菜单。
  *
- * 为什么要独立 Surface：
- * 巨型页面把 WebView 渲染进程烧爆时（日志实证 `IntendedVsync→Vsync` 5.4s、`SwapBuffers` 2.7s），
- * 主窗口的帧同步被拖垮，主窗口里所有 View（光标、菜单）都要等那一帧才能画出来 → 用户感知
- * 「光标卡死、菜单卡死」。本层用 [SurfaceHolder.lockCanvas]（软件 Canvas）在自建线程上直接出帧，
- * **不经过主线程 Choreographer、不经过 RenderThread、不参与主窗口帧同步**——WebView 再烧，
- * 光标和菜单照样 60fps 跟手。页面本体不受任何影响：不冻结、不隐藏、照常渲染。
+ * 采用硬件加速的普通 View，而非 SurfaceView 或独立窗口，从根源上杜绝 SurfaceView 打孔穿透、
+ * 窗口 Z-order 栈序竞争以及黑屏/遮挡问题。
  */
-class KeyphoneShellOverlay(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
+class KeyphoneShellOverlay(context: Context) : View(context) {
 
     companion object {
         /** 方向常量，与旧 KeyphoneCursorView / KeyphoneMouseController 保持一致 */
@@ -54,7 +44,7 @@ class KeyphoneShellOverlay(context: Context) : SurfaceView(context), SurfaceHold
 
     private val stateLock = Any()
 
-    // ---- 光标状态（主线程写，渲染线程读） ----
+    // ---- 光标状态 ----
     private var cursorX = -1f
     private var cursorY = -1f
     private var edgeDir = DIR_NONE
@@ -65,12 +55,6 @@ class KeyphoneShellOverlay(context: Context) : SurfaceView(context), SurfaceHold
     private var menuFocusIndex = 0
     private var menuVisible = false
     private var menuGravityRight = false
-
-    // ---- 渲染线程 ----
-    private var renderThread: HandlerThread? = null
-    private var renderHandler: Handler? = null
-    @Volatile
-    private var renderQueued = false
 
     private val ringFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
@@ -118,56 +102,15 @@ class KeyphoneShellOverlay(context: Context) : SurfaceView(context), SurfaceHold
     }
 
     init {
-        holder.addCallback(this)
-        holder.setFormat(PixelFormat.TRANSLUCENT)
-        // 透明 surface 浮在主窗口一切内容之上（含 WebView）；不抢焦点、不响应触摸，
-        // 触摸事件默认返回 false 透传给下层视图（WebView）
-        setZOrderOnTop(true)
         isFocusable = false
         isFocusableInTouchMode = false
     }
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean = false
 
-    // region Surface 生命周期
-
-    override fun surfaceCreated(holder: SurfaceHolder) {
-        startRenderThread()
-        requestRender()
-    }
-
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        requestRender()
-    }
-
-    override fun surfaceDestroyed(holder: SurfaceHolder) {
-        stopRenderThread()
-    }
-
-    private fun startRenderThread() {
-        if (renderThread != null) return
-        val thread = HandlerThread("keyphone-shell-overlay", android.os.Process.THREAD_PRIORITY_DISPLAY)
-        thread.start()
-        renderThread = thread
-        renderHandler = Handler(thread.looper)
-    }
-
-    private fun stopRenderThread() {
-        renderHandler = null
-        renderThread?.quitSafely()
-        renderThread = null
-    }
-
-    override fun onDetachedFromWindow() {
-        super.onDetachedFromWindow()
-        stopRenderThread()
-    }
-
-    // endregion
-
     // region 主线程 API（Activity / MouseController 调用）
 
-    /** 更新光标位置与贴边态；状态未变时跳过（渲染线程按需出帧） */
+    /** 更新光标位置与贴边态；状态未变时跳过 */
     fun updateCursor(x: Int, y: Int, atEdgeDir: Int) {
         synchronized(stateLock) {
             if (cursorX == x.toFloat() && cursorY == y.toFloat() && edgeDir == atEdgeDir) return
@@ -175,7 +118,7 @@ class KeyphoneShellOverlay(context: Context) : SurfaceView(context), SurfaceHold
             cursorY = y.toFloat()
             edgeDir = atEdgeDir
         }
-        requestRender()
+        postInvalidate()
     }
 
     fun setCursorVisible(visible: Boolean) {
@@ -183,7 +126,7 @@ class KeyphoneShellOverlay(context: Context) : SurfaceView(context), SurfaceHold
             if (cursorVisible == visible) return
             cursorVisible = visible
         }
-        requestRender()
+        postInvalidate()
     }
 
     /** 弹出快捷菜单；gravityRight=true 时靠右弹出（级联子面板），否则居中 */
@@ -194,7 +137,7 @@ class KeyphoneShellOverlay(context: Context) : SurfaceView(context), SurfaceHold
             menuGravityRight = gravityRight
             menuVisible = rows.isNotEmpty()
         }
-        requestRender()
+        postInvalidate()
     }
 
     fun updateMenuFocus(index: Int) {
@@ -202,7 +145,7 @@ class KeyphoneShellOverlay(context: Context) : SurfaceView(context), SurfaceHold
             if (menuFocusIndex == index) return
             menuFocusIndex = index
         }
-        requestRender()
+        postInvalidate()
     }
 
     fun hideMenu() {
@@ -211,44 +154,15 @@ class KeyphoneShellOverlay(context: Context) : SurfaceView(context), SurfaceHold
             menuVisible = false
             menuRows = emptyList()
         }
-        requestRender()
+        postInvalidate()
     }
 
     // endregion
 
-    // region 渲染线程
-
-    /** 按需渲染：状态变更时合并为一帧（高频连发按键也只触发一次绘制） */
-    private fun requestRender() {
-        val handler = renderHandler ?: return
-        if (renderQueued) return
-        renderQueued = true
-        handler.post {
-            renderQueued = false
-            drawFrame()
-        }
-    }
-
-    private fun drawFrame() {
-        if (renderThread == null) return
-        val canvas = try {
-            holder.lockCanvas() ?: return
-        } catch (t: Throwable) {
-            return
-        }
-        try {
-            canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-            drawCursor(canvas)
-            drawMenu(canvas)
-        } catch (t: Throwable) {
-            // 渲染线程自绘不能崩：任何异常都吞掉，下一帧照常
-        } finally {
-            try {
-                holder.unlockCanvasAndPost(canvas)
-            } catch (t: Throwable) {
-                // surface 已销毁，忽略
-            }
-        }
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        drawCursor(canvas)
+        drawMenu(canvas)
     }
 
     private fun drawCursor(canvas: Canvas) {
@@ -366,6 +280,4 @@ class KeyphoneShellOverlay(context: Context) : SurfaceView(context), SurfaceHold
         menuTextPaint.color = COLOR_MENU_TEXT
         menuTextPaint.isFakeBoldText = false
     }
-
-    // endregion
 }

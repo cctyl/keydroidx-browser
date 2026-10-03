@@ -140,9 +140,6 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     /** Web 宿主容器 */
     private var browserFrameHost: FrameLayout? = null
     private lateinit var browserFrame: FrameLayout
-
-    /** 独立窗口管理（WebView 窗口 + 几何同步基准），null = 尚未初始化 */
-    private var auxWindows: KeyphoneAuxWindows? = null
     private var contentFrame: FrameLayout? = null
 
     /** 鼠标模式（仅网页态）：光标/菜单绘制走独立 Surface 覆盖层（不参与主窗口帧同步） */
@@ -326,9 +323,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         homeRowsContainer = findViewById(R.id.keyphone_home_rows)
         focusHelper = homeScroll?.let { KeydroidxListFocusHelper(it) }
 
-        // Web 浏览器容器：WebView 挪进独立窗口（KeyphoneAuxWindows），
-        // 渲染进程烧爆时只卡页面窗口，壳窗口照常出帧/收按键
-        browserFrameHost = FrameLayout(this)
+        val contentFrameView = findViewById<FrameLayout>(R.id.keyphone_content_frame)
+        contentFrame = contentFrameView
+
+        browserFrameHost = findViewById(R.id.keyphone_browser_frame_host)
         browserFrameHost?.addView(
             browserFrame,
             FrameLayout.LayoutParams(
@@ -337,18 +335,15 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             )
         )
 
-        // 外壳覆盖层：独立 Surface 自绘光标与快捷菜单（也放进 Web 窗口，其独立 surface
-        // 不受 Web 窗口帧卡影响；坐标系与 browserFrameHost 天然一致）
+        // 外壳覆盖层：硬件加速普通 View 自绘光标与快捷菜单，挂在 contentFrame 顶层
         val overlay = KeyphoneShellOverlay(this).apply { setCursorVisible(false) }
-        auxWindows = KeyphoneAuxWindows(this).apply {
-            attach(browserFrameHost!!, overlay)
-        }
-        val contentFrameView = findViewById<FrameLayout>(R.id.keyphone_content_frame)
-        contentFrame = contentFrameView
-        contentFrameView?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            auxWindows?.sync(contentFrameView)
-        }
-        contentFrameView?.post { auxWindows?.sync(contentFrameView) }
+        contentFrameView?.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
         shellOverlay = overlay
         mouseController = KeyphoneMouseController(
             host = browserFrameHost!!,
@@ -441,12 +436,6 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     override fun onResume() {
         super.onResume()
-        // Web 独立窗口在此之后才 addView：Activity 窗口已注册，后加的窗口栈序在上，
-        // 不然会被不透明壳窗口盖住（黑屏根因）
-        auxWindows?.onActivityResumed()
-        // addView 时 webLp 尺寸还是 0×0（contentFrame 尚未首次布局）；等首帧布局完成后
-        // 用真实尺寸 sync 一次，否则窗口永远 0×0 → WebView 0×0 → 内容区空白
-        contentFrame?.let { cf -> cf.post { auxWindows?.sync(cf) } }
         KeyphoneUrlGuard.attach(guardHost)
         // 只有当前挂在浏览容器里的 WebView 才算「可见页」：后台标签页的弹窗一律静默处理，
         // 否则广告站的后台标签能随时把确认框盖到用户正在看的页面上
@@ -482,8 +471,6 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     override fun onDestroy() {
         // 复位，避免 holder 持有已销毁 Activity 的 lambda（其它浏览器 Activity 默认 false）
         rendererBusyHolder.provider = { false }
-        auxWindows?.detach()
-        auxWindows = null
         super.onDestroy()
         presenter.onViewDetached()
     }
@@ -525,6 +512,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private fun updateTabMode() {
         val currentTab = presenter.state.value.tabs.firstOrNull { it.isSelected }
         isHomeSelected = (currentTab == null || isTabHome(currentTab))
+        val wv = currentWebView()
+        KeydroidxLog.i(TAG, "updateTabMode: isHomeSelected=$isHomeSelected, tab=${currentTab?.url}, wv=$wv (w=${wv?.width}, h=${wv?.height}, vis=${wv?.visibility}, parent=${wv?.parent})")
 
         // 内容区切换
         if (isHomeSelected) {
@@ -538,7 +527,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 exitFreeCopyMode()
             }
             homeScroll?.visibility = View.VISIBLE
-            auxWindows?.setWebVisible(false)
+            browserFrameHost?.visibility = View.GONE
             addressBarContainer?.visibility = View.GONE
             findBarContainer?.visibility = View.GONE
             progressBar?.visibility = View.INVISIBLE
@@ -547,7 +536,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
         } else {
             homeScroll?.visibility = View.GONE
-            auxWindows?.setWebVisible(true)
+            browserFrameHost?.visibility = View.VISIBLE
+            currentWebView()?.apply {
+                onResume()
+                resumeTimers()
+            }
             if (isFindMode) {
                 addressBarContainer?.visibility = View.GONE
                 findBarContainer?.visibility = View.VISIBLE
@@ -704,7 +697,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                         )
                     )
                 }
+                isHomeSelected = false
                 updateTabMode()
+                presenter.onViewShown()
             } catch (t: Throwable) {
                 KeydroidxLog.e(TAG, "打开网址失败: $url", t)
             }

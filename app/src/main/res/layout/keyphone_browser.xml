@@ -120,7 +120,14 @@
                 android:orientation="vertical"
                 android:paddingBottom="8dp" />
         </ScrollView>
-        <!-- WebView 容器已迁出本窗口（见 KeyphoneAuxWindows：独立窗口承载，防渲染进程烧爆拖垮壳窗口） -->
+        <!-- Web 浏览器容器（WebView 挂在里面） -->
+        <FrameLayout
+            android:id="@+id/keyphone_browser_frame_host"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:focusable="false"
+            android:focusableInTouchMode="false"
+            android:visibility="gone" />
     </FrameLayout>
 
 </LinearLayout>
