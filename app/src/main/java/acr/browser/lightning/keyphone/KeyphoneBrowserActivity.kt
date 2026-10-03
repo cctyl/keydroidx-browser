@@ -127,6 +127,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private var tabBarScroll: HorizontalScrollView? = null
     private var tabBarContainer: LinearLayout? = null
 
+    /** 标签栏上次渲染签名（id/title/选中态/主页归属），签名不变时 [renderTabBar] 跳过重渲染 */
+    private var lastTabBarSignature: List<TabBarEntry>? = null
+
+    /** [lastTabBarSignature] 的条目；cell 只依赖这四个字段渲染，其余字段变化不触发重建 */
+    private data class TabBarEntry(val id: Int, val title: String, val selected: Boolean, val home: Boolean)
+
     /** 顶栏地址栏容器与输入框 */
     private var addressBarContainer: LinearLayout? = null
     private var addressInput: EditText? = null
@@ -636,9 +642,21 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     /** 渲染顶部标签栏：所有打开的标签页（主页 / 各网页） */
     private fun renderTabBar() {
         val container = tabBarContainer ?: return
-        container.removeAllViews()
-
         val tabs = presenter.state.value.tabs
+
+        // 签名守卫：标签结构 / 标题 / 选中态 / 主页归属都没变时跳过整棵重建。
+        // updateTabMode 的调用方很多（state 脉冲、按键、onResume、软键刷新…），
+        // 加载期 progress 脉冲曾让这里每次 removeAllViews + 全量重建 cell（弱机假死主因之一）。
+        val signature = ArrayList<TabBarEntry>(tabs.size)
+        for (tab in tabs) {
+            signature.add(TabBarEntry(tab.id, tab.title, tab.isSelected, isTabHome(tab)))
+        }
+        if (signature == lastTabBarSignature) {
+            return
+        }
+        lastTabBarSignature = signature
+
+        container.removeAllViews()
         if (tabs.isEmpty()) return
 
         var selectedChildView: View? = null
@@ -2895,6 +2913,27 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     // region 状态监听
 
+    /** [observeState] 上次处理过的字段快照，用于字段级分流（progress 脉冲不碰重 UI） */
+    private var lastObservedTabs: List<TabViewState>? = null
+    private var lastObservedDisplayUrl: String? = null
+    private var lastObservedProgress: Int = -1
+
+    /**
+     * tabs 列表的语义比较：只看会影响 [updateTabMode] 的字段（id/标题/选中态/URL），
+     * 引用不同但语义相同时返回 false，跳过整棵标签栏与内容区重排。
+     */
+    private fun tabsMeaningfullyChanged(prev: List<TabViewState>?, next: List<TabViewState>): Boolean {
+        if (prev == null || prev.size != next.size) return true
+        for (i in next.indices) {
+            val a = prev[i]
+            val b = next[i]
+            if (a.id != b.id || a.title != b.title || a.isSelected != b.isSelected || a.url != b.url) {
+                return true
+            }
+        }
+        return false
+    }
+
     private fun observeState() {
         lifecycleScope.launch {
             presenter.state.collectLatest { state ->
@@ -2916,6 +2955,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 // 「正在打开」何时结束：WebView 已经 attach 进容器（用户看得见页面了），
                 // 且 state 也确认当前标签不再是主页。两者都满足才交回 state 判定
                 // isTabHome，否则清早了会闪回上一个主页标签。
+                val hadPendingOpenUrl = pendingOpenUrl != null
                 if (pendingOpenUrl != null) {
                     val selected = state.tabs.firstOrNull { it.isSelected }
                     if (currentWebView() != null && (selected == null || !isTabHome(selected))) {
@@ -2923,10 +2963,29 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                         pendingOpenUrl = null
                     }
                 }
-                updateTabMode()
-                if (!isHomeSelected) {
-                    applyAddressBar()
+
+                // 字段级分流：目录页这类资源密集页加载时，progress 每秒可达上百次脉冲。
+                // progress-only 脉冲只允许更新进度条与加载遮罩；标签栏 / 地址栏 / 软键 /
+                // 内容区可见性的全量刷新，只在 tabs / displayUrl 真正变化时执行。
+                // （否则每次脉冲都走 updateTabMode → renderTabBar 全量重建，主线程消息队列
+                // 被 UI 重建消息占满，按键事件长时间排队，表现为「按什么键都没用」。）
+                val tabsChanged = tabsMeaningfullyChanged(lastObservedTabs, state.tabs)
+                val displayUrlChanged = state.displayUrl != lastObservedDisplayUrl
+                val progressChanged = state.progress != lastObservedProgress
+                val pendingConsumed = hadPendingOpenUrl && pendingOpenUrl == null
+                lastObservedTabs = state.tabs
+                lastObservedDisplayUrl = state.displayUrl
+                lastObservedProgress = state.progress
+
+                if (tabsChanged) {
+                    updateTabMode()
                     applyProgress(state.progress)
+                } else if (progressChanged || displayUrlChanged || pendingConsumed) {
+                    applyProgress(state.progress)
+                    updatePageLoading(currentWebView())
+                }
+                if (!isHomeSelected && (displayUrlChanged || tabsChanged)) {
+                    applyAddressBar()
                     // 网页态预注入输入劫持 JS（幂等；按「标签:URL」去重，导航/换标签后重注入）
                     val selectedTab = state.tabs.firstOrNull { it.isSelected }
                     val key = "${selectedTab?.id}:${state.displayUrl}"

@@ -59,6 +59,9 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.time.Duration.Companion.milliseconds
 
+/** 进度上报量化步进（百分比），见 init 块 progressSharedFlow 收集处的节流注释。 */
+private const val PROGRESS_UI_STEP = 5
+
 /**
  * Creates the adaptation between a [WebView] and the [TabModel] interface used by the browser.
  */
@@ -305,8 +308,21 @@ class TabAdapter @AssistedInject constructor(
             }
         }
         tabCoroutineScope.launch {
-            tabWebChromeClient.progressSharedFlow.collect {
-                progressStateFlow.emit(it)
+            // 进度量化节流：Chromium 在资源密集页（如起点目录）的 onProgressChanged 可达
+            // 每秒上百次，全部透传会让主线程上的 combine/collector 每秒重算上百遍 UI。
+            // 按 PROGRESS_UI_STEP 量化 + 去重，终点 100 永远透传（停止/刷新切换、
+            // 加载遮罩撤除都依赖它）；消费方只有「==100 / <100」两类判断，量化安全。
+            var lastEmitted = -1
+            tabWebChromeClient.progressSharedFlow.collect { raw ->
+                val quantized = when {
+                    raw >= 100 -> 100
+                    raw <= 0 -> 0
+                    else -> (raw / PROGRESS_UI_STEP) * PROGRESS_UI_STEP
+                }
+                if (quantized != lastEmitted) {
+                    lastEmitted = quantized
+                    progressStateFlow.emit(quantized)
+                }
             }
         }
     }
