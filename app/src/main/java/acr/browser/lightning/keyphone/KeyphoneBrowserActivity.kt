@@ -645,15 +645,44 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (homeIndex >= 0) {
             switchToTab(homeIndex)
         } else {
-            createNewWindow()
+            // 走幂等版本：本函数也会与 Presenter 侧 closeBrowser → onAllTabsClosed
+            // 抢跑（标签页页删最后一个标签时 deleteFocused 同时调 closeTab 和
+            // goHomeFromTabs），无条件建主页会多出一个窗口。
+            ensureHomeWindow()
         }
     }
 
     /** 新建一个主页窗口（在顶栏新建一个标签页，底层 WebView 保持空白静止不发起网络请求） */
     private fun createNewWindow() {
         isScrolledToBottom = false
+        KeydroidxLog.i(TAG, "createNewWindow: 派发新建主页窗口")
         presenter.onEvent(BrowserUiEvent.NewAction(BrowserContract.Action.LoadUrl("")))
         loadHomeData()
+    }
+
+    /**
+     * 幂等地确保「当前处于主页窗口」——关掉标签后的**唯一**兜底入口。
+     *
+     * 背景：新建主页有三条会汇合的路径（[closeTab] 的空列表兜底、Presenter 的
+     * `onTabClose`/`CLOSE_ALL` → `navigator.closeBrowser` → [onAllTabsClosed]、
+     * [switchToHome]），而 [presenter] 的事件是**异步派发**的，keyphone 侧读
+     * `state.value` 常常还是关闭前的旧快照，于是同一轮关闭里两条路径都会各自
+     * 建一个主页窗口（顶栏出现两个「首页」）。本方法按当前 tabs 状态收敛：
+     * 已有主页就切过去（没有才新建），重复调用不会多建。
+     */
+    private fun ensureHomeWindow() {
+        if (isFinishing || isDestroyed) return
+        val tabs = presenter.state.value.tabs
+        val homeIndex = tabs.indexOfFirst { isTabHome(it) }
+        when {
+            homeIndex < 0 -> {
+                KeydroidxLog.i(TAG, "ensureHomeWindow: 无主页标签，新建一个（tabs=${tabs.size}）")
+                createNewWindow()
+            }
+
+            tabs[homeIndex].isSelected -> loadHomeData()
+            else -> switchToTab(homeIndex)
+        }
     }
 
     /** 切换到指定 Web 标签页 */
@@ -2849,8 +2878,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (closingId != null) {
             readingModeTabs.remove(closingId)
         }
+        // 标签被清空时补主页。走幂等的 ensureHomeWindow：与 Presenter 侧
+        // navigator.closeBrowser → onAllTabsClosed 的兜底撞车时也只会有一个主页。
         if (presenter.state.value.tabs.isEmpty()) {
-            createNewWindow()
+            ensureHomeWindow()
         }
     }
 
@@ -2870,7 +2901,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             BrowserUiEvent.CloseBrowser(currentId, BrowserContract.CloseTabEvent.CLOSE_ALL)
         )
         Toast.makeText(this, R.string.keyphone_tabs_cleared, Toast.LENGTH_SHORT).show()
-        createNewWindow()
+        // 这里**不能**再本地建主页：CLOSE_ALL 在 Presenter 侧必然走
+        // navigator.closeBrowser → onAllTabsClosed → ensureHomeWindow 补主页，
+        // 两边都建就会多出一个主页窗口。而此刻本地 state 还是删除前的旧快照，
+        // 若在此调 ensureHomeWindow/switchToTab，还会把 TabClick 排到 deleteAllTabs
+        // 之后执行，onTabClick 里 state.value.tabs[index] 直接越界。
     }
 
     internal fun confirmClearAllTabs() {
@@ -2884,9 +2919,14 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             .show()
     }
 
+    /**
+     * Presenter 侧 `navigator.closeBrowser()` / `backgroundBrowser()` 在 keyphone
+     * 下的落点：标签已全部关闭，此处是补主页窗口的**权威**信号（幂等，见 [ensureHomeWindow]）。
+     */
     internal fun onAllTabsClosed() {
         if (isFinishing || isDestroyed) return
-        createNewWindow()
+        KeydroidxLog.i(TAG, "onAllTabsClosed: 标签已全部关闭，补主页窗口")
+        ensureHomeWindow()
     }
 
     internal fun goHomeFromTabs() {
