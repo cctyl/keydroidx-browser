@@ -27,4 +27,18 @@
     <issue id="GestureBackNavigation">
         <ignore path="**/keyphone/KeyphoneBrowserActivity.kt" />
     </issue>
+
+    <!-- GestureBackNavigation 豁免（仅针对 keyphone/KeyphoneOptionSheetDialog.kt 这一个文件）。
+         背景：与上面 KeyphoneBrowserActivity.kt 同源 —— 按键机（诺基亚功能机）的返回键
+         以物理 KEYCODE_BACK 键事件送达，这个底部选项卡弹窗（审批卡 / 规则操作卡共用）
+         必须在 dispatchKeyEvent 内消费 KEYCODE_BACK 才能调 cancel()，否则事件穿透到
+         底层 Activity（宿主 KeyphoneBrowserActivity 会把返回键当作退出/返回上一层处理），
+         出现「弹窗没关、底层页面反而被退掉」的错乱。这是按键机模态交互的硬需求，
+         不是绕过系统返回回调；取消语义仍经由 Dialog 自身的 dismiss 生命周期完成。
+         该检查面向手势导航（Android 触屏预测性返回），对物理按键机型不适用，
+         属于平台形态差异导致的误报，按文件豁免。
+         注意：不要顺手在这里豁免 NewApi / 任何 API 级别相关检查。 -->
+    <issue id="GestureBackNavigation">
+        <ignore path="**/keyphone/KeyphoneOptionSheetDialog.kt" />
+    </issue>
 </lint>
