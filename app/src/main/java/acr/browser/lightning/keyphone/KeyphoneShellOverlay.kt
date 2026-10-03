@@ -104,30 +104,12 @@ class KeyphoneShellOverlay(context: Context) : View(context) {
     init {
         isFocusable = false
         isFocusableInTouchMode = false
+        visibility = View.GONE
     }
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean = false
 
     // region 主线程 API（Activity / MouseController 调用）
-
-    /** 更新光标位置与贴边态；状态未变时跳过 */
-    fun updateCursor(x: Int, y: Int, atEdgeDir: Int) {
-        synchronized(stateLock) {
-            if (cursorX == x.toFloat() && cursorY == y.toFloat() && edgeDir == atEdgeDir) return
-            cursorX = x.toFloat()
-            cursorY = y.toFloat()
-            edgeDir = atEdgeDir
-        }
-        postInvalidate()
-    }
-
-    fun setCursorVisible(visible: Boolean) {
-        synchronized(stateLock) {
-            if (cursorVisible == visible) return
-            cursorVisible = visible
-        }
-        postInvalidate()
-    }
 
     /** 弹出快捷菜单；gravityRight=true 时靠右弹出（级联子面板），否则居中 */
     fun showMenu(rows: List<MenuRow>, focusIndex: Int, gravityRight: Boolean) {
@@ -137,6 +119,7 @@ class KeyphoneShellOverlay(context: Context) : View(context) {
             menuGravityRight = gravityRight
             menuVisible = rows.isNotEmpty()
         }
+        visibility = if (rows.isNotEmpty()) View.VISIBLE else View.GONE
         postInvalidate()
     }
 
@@ -154,6 +137,7 @@ class KeyphoneShellOverlay(context: Context) : View(context) {
             menuVisible = false
             menuRows = emptyList()
         }
+        visibility = View.GONE
         postInvalidate()
     }
 
@@ -161,63 +145,7 @@ class KeyphoneShellOverlay(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        drawCursor(canvas)
         drawMenu(canvas)
-    }
-
-    private fun drawCursor(canvas: Canvas) {
-        val visible: Boolean
-        val x: Float
-        val y: Float
-        val dir: Int
-        synchronized(stateLock) {
-            visible = cursorVisible
-            x = cursorX
-            y = cursorY
-            dir = edgeDir
-        }
-        if (!visible || x < 0f || y < 0f) return
-
-        val d = resources.displayMetrics.density
-        val radius = 7f * d
-        val strokeW = 1.5f * d
-        ringStroke.strokeWidth = strokeW
-        edgeStroke.strokeWidth = strokeW
-        cross.strokeWidth = strokeW
-
-        canvas.save()
-        canvas.translate(x, y)
-
-        if (dir == DIR_NONE) {
-            canvas.drawCircle(0f, 0f, radius, ringFill)
-            canvas.drawCircle(0f, 0f, radius, ringStroke)
-            val crossLen = radius + 3.5f * d
-            canvas.drawLine(0f, -radius, 0f, -crossLen, cross)
-            canvas.drawLine(0f, radius, 0f, crossLen, cross)
-            canvas.drawLine(-radius, 0f, -crossLen, 0f, cross)
-            canvas.drawLine(radius, 0f, crossLen, 0f, cross)
-            canvas.drawCircle(0f, 0f, 1.8f * d, dot)
-        } else {
-            canvas.drawCircle(0f, 0f, radius + 1.5f * d, edgeFill)
-            canvas.drawCircle(0f, 0f, radius + 1.5f * d, edgeStroke)
-            val arrowW = 3.6f * d
-            val arrowH = 5f * d
-            arrowPath.reset()
-            arrowPath.moveTo(0f, -arrowH)
-            arrowPath.lineTo(arrowW, arrowH * 0.5f)
-            arrowPath.lineTo(0f, arrowH * 0.1f)
-            arrowPath.lineTo(-arrowW, arrowH * 0.5f)
-            arrowPath.close()
-            canvas.save()
-            when (dir) {
-                DIR_DOWN -> canvas.rotate(180f)
-                DIR_LEFT -> canvas.rotate(-90f)
-                DIR_RIGHT -> canvas.rotate(90f)
-            }
-            canvas.drawPath(arrowPath, cross)
-            canvas.restore()
-        }
-        canvas.restore()
     }
 
     private fun drawMenu(canvas: Canvas) {

@@ -36,9 +36,9 @@ import io.github.cctyl.nokia.common.log.KeydroidxLog
  */
 class KeyphoneMouseController(
     private val host: FrameLayout,
-    private val cursorView: KeyphoneShellOverlay,
+    private val cursorView: KeyphoneCursorView,
     private val webViewProvider: () -> WebView?,
-    private val ensureScrollModule: (WebView) -> Unit = {},
+    private val ensureScrollModule: (WebView) -> Unit,
     private val pageBusyProvider: () -> Boolean = { false }
 ) {
 
@@ -55,11 +55,11 @@ class KeyphoneMouseController(
         private const val REPEAT_STEP_RATIO = 0.005f
         private const val REPEAT_STEP_MIN_PX = 2
 
-        private const val PAGE_SCROLL_INTERVAL_MS = 700L
-        private const val PAGE_SCROLL_INTERVAL_H_MS = 280L
-        // foucs 原值为 0.18f/0.54f，实测偏慢，按用户反馈提速至 0.32f/0.72f（约 1.8x/1.3x）
-        private const val PAGE_SCROLL_STEP_RATIO_V = 0.32f
-        private const val PAGE_SCROLL_STEP_RATIO_H = 0.72f
+        private const val PAGE_SCROLL_INTERVAL_MS = 450L
+        private const val PAGE_SCROLL_INTERVAL_H_MS = 240L
+        // 提升滚动灵敏度与顺畅度，长按长页面流畅推进
+        private const val PAGE_SCROLL_STEP_RATIO_V = 0.45f
+        private const val PAGE_SCROLL_STEP_RATIO_H = 0.65f
 
         /** 1~9 热区跳转动画时长 */
         private const val JUMP_DURATION_MS = 180L
@@ -97,18 +97,8 @@ class KeyphoneMouseController(
     /** 1~9 热区跳转动画，null 表示未在跳转 */
     private var jumpAnimator: ValueAnimator? = null
 
-    /** 松手标记：置位后滚动到「一个步长」即自停（速度不变） */
+    /** 松手标记：置位后平滑减速缓冲一个微步即停 */
     private var edgeReleased = false
-
-    /** 下一次滚动请求是否重新判定目标元素（每个新手势开始时置位） */
-    private var scrollResolvePending = true
-
-    /** 攒批：距上次真正发请求的增量与时间 */
-    private var pendingScrollDelta = 0
-    private var lastScrollRequestAt = 0L
-
-    /** 每个手势只记一条结果日志，避免刷屏 */
-    private var scrollLogPending = false
 
     /** 当前光标位置（宿主坐标系），供确认键转触摸点击使用 */
     val posX: Int get() = cursorX
@@ -176,7 +166,7 @@ class KeyphoneMouseController(
                 val t = a.animatedValue as Float
                 cursorX = Math.round(startX + (targetX - startX) * t)
                 cursorY = Math.round(startY + (targetY - startY) * t)
-                cursorView.updateCursor(cursorX, cursorY, KeyphoneShellOverlay.DIR_NONE)
+                cursorView.updatePosition(cursorX, cursorY, KeyphoneShellOverlay.DIR_NONE)
             }
         }
         jumpAnimator = anim
@@ -198,7 +188,7 @@ class KeyphoneMouseController(
         if (cursorX < 0 || cursorY < 0 || cursorX > w - 1 || cursorY > h - 1) {
             cursorX = w / 2
             cursorY = h / 2
-            cursorView.updateCursor(cursorX, cursorY, KeyphoneShellOverlay.DIR_NONE)
+            cursorView.updatePosition(cursorX, cursorY, KeyphoneShellOverlay.DIR_NONE)
         }
     }
 
@@ -264,9 +254,9 @@ class KeyphoneMouseController(
         if (atEdge != KeyphoneShellOverlay.DIR_NONE) {
             // 光标已在边界：不再移动，转为基于光标位置的网页滚动
             applyEdgeScroll(dir)
-            cursorView.updateCursor(cursorX, cursorY, atEdge)
+            cursorView.updatePosition(cursorX, cursorY, atEdge)
         } else {
-            cursorView.updateCursor(cursorX, cursorY, KeyphoneShellOverlay.DIR_NONE)
+            cursorView.updatePosition(cursorX, cursorY, KeyphoneShellOverlay.DIR_NONE)
         }
     }
 
@@ -284,16 +274,6 @@ class KeyphoneMouseController(
      */
     private fun startEdgeScroll(dir: Int) {
         val webView = webViewProvider() ?: return
-        // 页面无响应：这次贴边滚动先不开始，等页面缓过来（避免把 UI 线程堵在渲染进程上）
-        if (pageBusy()) {
-            KeydroidxLog.d(TAG, "页面繁忙，暂不启动贴边滚动 dir=$dir")
-            return
-        }
-        // 新手势：重新判定光标下的滚动目标，并确保脚本已注入（脚本幂等）
-        scrollResolvePending = true
-        scrollLogPending = true
-        pendingScrollDelta = 0
-        lastScrollRequestAt = 0L
         KeydroidxLog.d(
             TAG,
             "贴边滚动开始 dir=$dir cursor=($cursorX,$cursorY) host=${host.width}x${host.height}"
@@ -331,7 +311,7 @@ class KeyphoneMouseController(
                 if (d <= 0) return@addUpdateListener
                 remainder -= d
                 if (edgeReleased) {
-                    // 松手后：以同样速度滚满一个步长即停
+                    // 松手后：以平滑缓冲减速，滚满一个微步即停
                     val remain = (oneStep - scrolled).toInt()
                     if (remain <= 0) {
                         handler.post { cancelEdgeAnimator() }
@@ -339,17 +319,13 @@ class KeyphoneMouseController(
                     }
                     if (d > remain) d = remain
                 }
-                // 攒批后再发：贴边滚动不需要每帧一次跨进程调用（页面卡住时它会堵死 UI 线程）
-                pendingScrollDelta += d
-                val nowMs = SystemClock.elapsedRealtime()
-                if (nowMs - lastScrollRequestAt >= SCROLL_REQUEST_INTERVAL_MS) {
-                    val flush = pendingScrollDelta
-                    pendingScrollDelta = 0
-                    lastScrollRequestAt = nowMs
-                    if (flush > 0 && !requestScroll(webView, vertical, sign, flush)) {
-                        handler.post { cancelEdgeAnimator() }
-                        return@addUpdateListener
-                    }
+                // 原生硬件加速平滑滚动：直接驱动视口位移，零 JS 解释开销，帧率稳定 60FPS
+                val dx = if (vertical) 0 else sign * d
+                val dy = if (vertical) sign * d else 0
+                try {
+                    webView.scrollBy(dx, dy)
+                } catch (t: Throwable) {
+                    KeydroidxLog.e(TAG, "滚动异常", t)
                 }
                 scrolled += d
                 if (edgeReleased && scrolled >= oneStep) {
@@ -359,123 +335,6 @@ class KeyphoneMouseController(
         }
         edgeAnimator = anim
         anim.start()
-    }
-
-    /**
-     * 一次滚动请求：目标由**光标下的元素**决定（[KeyphoneScroll] 脚本，含浮层规则）。
-     *
-     * 结果异步回来，只用于处理「到头」：封住该方向并停掉动画。返回 false 表示请求没能发出
-     * （WebView 异常），调用方停动画；其余一律 true，由异步结果决定是否封方向。
-     */
-    private fun requestScroll(webView: WebView, vertical: Boolean, sign: Int, delta: Int): Boolean {
-        if (pageBusy()) {
-            // 页面无响应：一律不碰 WebView（跨进程调用会把 UI 线程堵在等渲染进程上），
-            // 这次增量直接丢掉；动画也别再空转烧帧，直接停掉，等下次按键再重新开始
-            pendingScrollDelta = 0
-            KeydroidxLog.d(TAG, "页面繁忙，贴边滚动暂停（丢弃增量）")
-            handler.post { cancelEdgeAnimator() }
-            return true
-        }
-        val dir = directionOf(vertical, sign)
-        if (dir in limitDirs) return false
-        val dx = if (vertical) 0 else sign * delta
-        val dy = if (vertical) sign * delta else 0
-        val resolve = if (scrollResolvePending) 1 else 0
-        scrollResolvePending = false
-        val script = "window.__keyphone_scroll__&&window.__keyphone_scroll__.by(" +
-            "$cursorX,$cursorY,$dx,$dy,${host.width},${host.height},$resolve)"
-        return try {
-            val t0 = SystemClock.elapsedRealtime()
-            webView.evaluateJavascript(script) { raw ->
-                val callLatency = SystemClock.elapsedRealtime() - t0
-                if (callLatency >= 100) {
-                    KeydroidxLog.w(TAG, "【主线程耗时】滚动JS回调滞后 ${callLatency}ms")
-                }
-                val status = raw?.trim('"')
-                if (scrollLogPending) {
-                    scrollLogPending = false
-                    KeydroidxLog.d(
-                        TAG,
-                        "滚动判定 status=$status cursor=($cursorX,$cursorY)" +
-                            " host=${host.width}x${host.height} delta=$delta vertical=$vertical"
-                    )
-                }
-                when (status) {
-                    // 脚本已自行处理（consume = 这次滚动被模态浮层吃掉，不动背后页面）
-                    "scroll", "consume" -> Unit
-
-                    // 目标已到尽头：封住该方向并停动画
-                    "end" -> sealDirection(dir)
-
-                    else -> {
-                        // "doc"（光标下没有元素滚动容器）以及脚本未注入 / 返回异常，
-                        // 一律回退到老路径滚文档根 —— 任何情况下都不能出现「完全滚不动」
-                        if (status == "none") scrollResolvePending = true
-                        if (!scrollWindow(webView, vertical, sign, delta)) {
-                            sealDirection(dir)
-                        }
-                    }
-                }
-            }
-            val callMs = SystemClock.elapsedRealtime() - t0
-            if (callMs >= 100) {
-                KeydroidxLog.w(TAG, "【主线程耗时】滚动 evaluateJavascript 调用本身阻塞 ${callMs}ms")
-            }
-            true
-        } catch (t: Throwable) {
-            KeydroidxLog.e(TAG, "元素滚动请求失败 vertical=$vertical sign=$sign", t)
-            false
-        }
-    }
-
-    /** 封住某个方向（滚到内容尽头），并停掉贴边动画，等松手 / 换向再解除 */
-    private fun sealDirection(dir: Int) {
-        limitDirs.add(dir)
-        handler.post { cancelEdgeAnimator() }
-    }
-
-    /** 老路径：直接滚文档根（光标下没有元素滚动容器时的兜底） */
-    private fun scrollWindow(webView: WebView, vertical: Boolean, sign: Int, delta: Int): Boolean {
-        // 渲染进程繁忙时绝不碰同步调用：canScrollVertically/scrollBy 都是跨进程同步等待，
-        // 页面把渲染进程占死时它会一口气堵主线程好几秒（实测单次 5.1s）
-        if (pageBusy()) {
-            KeydroidxLog.d(TAG, "页面繁忙，跳过滚动兜底（canScroll/scrollBy 同步阻塞）")
-            return true
-        }
-        return try {
-            val t0 = SystemClock.elapsedRealtime()
-            val canScroll = if (vertical) {
-                webView.canScrollVertically(sign)
-            } else {
-                webView.canScrollHorizontally(sign)
-            }
-            if (!canScroll) {
-                false
-            } else {
-                if (vertical) {
-                    webView.scrollBy(0, sign * delta)
-                } else {
-                    webView.scrollBy(sign * delta, 0)
-                }
-                true
-            }.also {
-                val dt = SystemClock.elapsedRealtime() - t0
-                if (dt >= 100) {
-                    KeydroidxLog.w(TAG, "【主线程耗时】滚动兜底 canScroll/scrollBy = ${dt}ms")
-                }
-            }
-        } catch (t: Throwable) {
-            KeydroidxLog.e(TAG, "窗口滚动失败 vertical=$vertical sign=$sign", t)
-            false
-        }
-    }
-
-    private fun directionOf(vertical: Boolean, sign: Int): Int {
-        return if (vertical) {
-            if (sign < 0) KeyphoneShellOverlay.DIR_UP else KeyphoneShellOverlay.DIR_DOWN
-        } else {
-            if (sign < 0) KeyphoneShellOverlay.DIR_LEFT else KeyphoneShellOverlay.DIR_RIGHT
-        }
     }
 
     private fun cancelEdgeAnimator() {

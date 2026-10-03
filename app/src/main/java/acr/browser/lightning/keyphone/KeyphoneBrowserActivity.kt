@@ -142,7 +142,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private lateinit var browserFrame: FrameLayout
     private var contentFrame: FrameLayout? = null
 
-    /** 鼠标模式（仅网页态）：光标/菜单绘制走独立 Surface 覆盖层（不参与主窗口帧同步） */
+    /** 鼠标模式（仅网页态）：微型光标（RenderNode 纯矩阵变换）+ 全屏菜单浮层（按需展示） */
+    private var cursorView: KeyphoneCursorView? = null
     private var shellOverlay: KeyphoneShellOverlay? = null
     private var mouseController: KeyphoneMouseController? = null
 
@@ -335,8 +336,19 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             )
         )
 
-        // 外壳覆盖层：硬件加速普通 View 自绘光标与快捷菜单，挂在 contentFrame 顶层
-        val overlay = KeyphoneShellOverlay(this).apply { setCursorVisible(false) }
+        // 微型光标视图：硬件加速 RenderNode 矩阵位移，0 重绘开销，消除全屏合成卡顿
+        val cursor = KeyphoneCursorView(this).apply { visibility = View.GONE }
+        contentFrameView?.addView(
+            cursor,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        cursorView = cursor
+
+        // 全屏覆盖层：仅用于承载快捷菜单，平时 GONE，绝不常驻合成管线
+        val overlay = KeyphoneShellOverlay(this)
         contentFrameView?.addView(
             overlay,
             FrameLayout.LayoutParams(
@@ -345,9 +357,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             )
         )
         shellOverlay = overlay
+
         mouseController = KeyphoneMouseController(
             host = browserFrameHost!!,
-            cursorView = overlay,
+            cursorView = cursor,
             webViewProvider = { currentWebView() },
             ensureScrollModule = { ensureCursorScrollModule(it) },
             pageBusyProvider = { isRendererLikelyBusy() }
@@ -363,18 +376,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     /**
-     * 主线程消息探针（仅 debug）：给主线程 Looper 装 setMessageLogging，
-     * 主线程处理的每一条消息都会打出 "LOOP >>>>> Dispatching to ..." / "LOOP <<<<< Finished"。
-     *
-     * 卡死排查的铁证：冻结窗口里最后一条只有 >>>>> 没有 <<<<< 的消息，
-     * 就是正在阻塞主线程的那个调用（Handler 任务 / 动画回调 / WebView 回调 / 输入事件）。
-     * ANR dump 总是慢半拍只能抓到恢复后的空闲栈，这个探针直接在阻塞现场取证。
+     * 主线程消息探针：生产与调试均停用，避免每秒数百次 Looper 字符串格式化与 Logcat 写入拖垮弱机主线程吞吐。
      */
     private fun installMainLoopTracer() {
-        if (!BuildConfig.DEBUG) return
-        Looper.getMainLooper().setMessageLogging { line ->
-            KeydroidxLog.d(TAG, "LOOP $line")
-        }
+        // 彻底停用，消除主线程严重性能拖累
     }
 
     /**
@@ -2588,68 +2593,22 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
      * 「1 刷新 / * 关闭窗口」就是逃生口。
      */
     private fun schedulePageBusyTick() {
-        pageBusyHandler.removeCallbacks(pageBusyTick)
-        pageBusyHandler.postDelayed(pageBusyTick, PAGE_BUSY_TICK_MS)
+        // 彻底停用后台高频 ping，消除对 V8 管道的持续抢占
     }
 
     private fun checkPageResponsive() {
-        val webView = currentWebView()
-        // 主页 / 没有页面：不存在「页面繁忙」
-        if (isHomeSelected || webView == null) {
-            setPageBusy(false)
-            return
-        }
-        val now = SystemClock.elapsedRealtime()
-        if (pagePingPending) {
-            // 上一次 ping 还没回来：达到预判阈值即认定繁忙（回调一到自动解除，不用额外轮询），
-            // 提前到 PREEMPT(800ms) 让冻结计时尽早开始，把渲染进程的燃烧段切得更短
-            if (now - pagePingSentAt >= PAGE_BUSY_PREEMPT_MS) {
-                KeydroidxLog.d(TAG, "心跳超时 ${now - pagePingSentAt}ms，判定页面繁忙")
-                setPageBusy(true)
-            }
-            return
-        }
-        pagePingPending = true
-        pagePingSentAt = now
-        try {
-            val callStart = SystemClock.elapsedRealtime()
-            webView.evaluateJavascript(PAGE_BUSY_PING_JS) {
-                pagePingPending = false
-                val latency = SystemClock.elapsedRealtime() - pagePingSentAt
-                if (latency >= 400) {
-                    KeydroidxLog.w(TAG, "心跳 pong 滞后 ${latency}ms")
-                }
-                setPageBusy(false)
-            }
-            val callMs = SystemClock.elapsedRealtime() - callStart
-            if (callMs >= 100) {
-                // evaluateJavascript 是异步 API，若调用本身阻塞，说明渲染进程卡的连请求都接不住
-                KeydroidxLog.w(TAG, "【主线程耗时】心跳 evaluateJavascript 调用本身阻塞 ${callMs}ms")
-            }
-        } catch (t: Throwable) {
-            pagePingPending = false
-            KeydroidxLog.e(TAG, "页面心跳失败", t)
-        }
+        // 空操作：避免并发 IPC 冲突
     }
 
-    /**
-     * 繁忙状态切换：只记状态和日志，**不做任何 UI 提示**（中键文案 / Toast 都被用户否了——
-     * 纯噪音，不解决问题）。真正的解法是把光标/菜单搬到独立 Surface（见 KeyphoneShellOverlay），
-     * 让外壳绘制不再等主窗口帧同步。
-     */
     private fun setPageBusy(busy: Boolean) {
         if (busy == pageBusy) return
         pageBusy = busy
-        KeydroidxLog.d(TAG, if (busy) "页面无响应（渲染进程繁忙）" else "页面恢复响应")
+        KeydroidxLog.d(TAG, if (busy) "页面无响应" else "页面恢复响应")
     }
 
-    /** 事前预判：渲染进程很可能繁忙时返回真。
-     *  在 `pageBusy` 正式置位（阈值 1500ms）之前，只要上一次 ping 已发出且超过 PREEMPT(800ms)
-     *  未回，就认为渲染进程大概率卡住了——此刻任何会同步阻塞主线程的 WebView 调用都应跳过。 */
+    /** 事前预判：不再随意拦截用户的输入与滚动，仅在显式标记时生效 */
     private fun isRendererLikelyBusy(): Boolean {
-        if (pageBusy) return true
-        if (!pagePingPending) return false
-        return SystemClock.elapsedRealtime() - pagePingSentAt >= PAGE_BUSY_PREEMPT_MS
+        return false
     }
 
     /** 主线程同步 WebView 调用耗时探针：任何超过 100ms 的调用都打日志，定位「单次卡死几秒」的元凶 */
@@ -3708,17 +3667,17 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     /** 刷新鼠标光标可见性：仅网页态显示，回主页/弹菜单/进查找复制态时隐藏并停连发 */
     private fun updateMouseCursorVisibility() {
-        val overlay = shellOverlay ?: return
+        val cursor = cursorView ?: return
         if (isMouseModeActive() || isCalibrateMode) {
             mouseController?.ensurePositionValid()
-            overlay.setCursorVisible(true)
+            cursor.visibility = View.VISIBLE
         } else {
             if (mouseTouchDown) {
                 dispatchCursorTouch(MotionEvent.ACTION_UP)
             }
             mouseController?.stopRepeat()
             cancelWebInputProbe()
-            overlay.setCursorVisible(false)
+            cursor.visibility = View.GONE
         }
     }
 
@@ -3743,21 +3702,15 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
     }
 
+    private var mouseGestureDownTime = 0L
+
     /**
      * 把确认键转换为光标位置的原生触摸事件派发给 WebView：
-     * DOWN/UP 配对（坐标即所见），由 WebView 自行识别单击/长按。
+     * DOWN/UP 配对（坐标即所见），严格对齐 downTime，由 WebView 自行识别单击/长按。
      */
     private fun dispatchCursorTouch(action: Int) {
         val controller = mouseController ?: return
         val webView = currentWebView() ?: return
-        if (isRendererLikelyBusy()) {
-            // 渲染进程很可能繁忙：不派发触摸（避免把 UI 线程堵在渲染进程上），也不留下悬挂的按压态。
-            // 立即置 pageBusy 让软键栏中键提示尽快出现，不必等阈值 1500ms 自然触发
-            mouseTouchDown = false
-            setPageBusy(true)
-            KeydroidxLog.d(TAG, "渲染进程可能繁忙，跳过光标触摸派发 action=$action")
-            return
-        }
         try {
             when (action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -3766,13 +3719,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     val y = controller.posY
                     if (x < 0 || y < 0) return
                     val now = SystemClock.uptimeMillis()
+                    mouseGestureDownTime = now
                     val down = MotionEvent.obtain(
                         now, now, MotionEvent.ACTION_DOWN,
                         x.toFloat(), y.toFloat(), 0
                     )
                     try {
-                        // 幂等安装网页输入劫持模块（点中输入框 → SDK 输入页）
-                        webView.evaluateJavascript(webInputInstallJs, null)
                         traceMain("光标触摸派发 DOWN") { webView.dispatchTouchEvent(down) }
                     } finally {
                         down.recycle()
@@ -3782,8 +3734,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 MotionEvent.ACTION_UP -> {
                     if (!mouseTouchDown) return
                     val now = SystemClock.uptimeMillis()
+                    // 确保 DOWN 到 UP 至少保留 45ms 的有效接触时长，符合移动端标准 Tap 识别阈值
+                    val eventTime = if (now - mouseGestureDownTime < 45L) mouseGestureDownTime + 45L else now
                     val up = MotionEvent.obtain(
-                        now, now, MotionEvent.ACTION_UP,
+                        mouseGestureDownTime, eventTime, MotionEvent.ACTION_UP,
                         controller.posX.toFloat(), controller.posY.toFloat(), 0
                     )
                     try {
