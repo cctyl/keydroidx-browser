@@ -3718,6 +3718,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     val x = controller.posX
                     val y = controller.posY
                     if (x < 0 || y < 0) return
+                    cursorView?.setPressedState(true)
+                    try {
+                        window.decorView.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                    } catch (_: Throwable) {}
                     val now = SystemClock.uptimeMillis()
                     mouseGestureDownTime = now
                     val down = MotionEvent.obtain(
@@ -3732,6 +3736,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     mouseTouchDown = true
                 }
                 MotionEvent.ACTION_UP -> {
+                    cursorView?.setPressedState(false)
                     if (!mouseTouchDown) return
                     val now = SystemClock.uptimeMillis()
                     // 确保 DOWN 到 UP 至少保留 45ms 的有效接触时长，符合移动端标准 Tap 识别阈值
@@ -3751,6 +3756,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "光标触摸派发失败 action=$action", t)
+            cursorView?.setPressedState(false)
             mouseTouchDown = false
         }
     }
