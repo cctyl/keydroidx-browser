@@ -255,6 +255,9 @@
     var lastTurnAt = 0;       // debounce: stale contentHeight after a turn must not skip a chapter
     var lastFailAt = 0;
     var failCount = 0;
+    // Boot-time SSR self-check of the entry chapter's next URL (see selfCheckEntryNext):
+    // while true, stitching is paused so a possibly wrong live-DOM next can never race in.
+    var entryNextCheckPending = false;
     var loadTimer = null;
     var pumpTimer = null;
     var endNotified = false;
@@ -368,6 +371,63 @@
             return false;
         }
         return node.closest('#' + ROOT_ID) !== null;
+    }
+
+    /** Numeric chapter id found at the end of a chapter URL (e.g. /chapter/1/12345/). */
+    function chapterIdFromUrl(url) {
+        if (!url) {
+            return null;
+        }
+        var path = '';
+        try {
+            path = new URL(url).pathname.replace(/\/+$/, '');
+        } catch (e) {
+            return null;
+        }
+        var segments = path.split('/');
+        for (var i = segments.length - 1; i >= 0; i--) {
+            if (/^\d+$/.test(segments[i])) {
+                return segments[i];
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Best article container whose id is anchored to the chapter id of [baseUrl]
+     * (matches `c-12345` / `chapter-12345` etc.) - see extractHtml. Returns null when
+     * the URL has no numeric chapter id, no element matches, or nothing has enough text.
+     */
+    function findContainerByChapterId(doc, chapterId) {
+        if (!chapterId || !doc) {
+            return null;
+        }
+        var anchorRe = new RegExp('^(c|chapter|chp|content|article|read|reader)[-_]?' + chapterId + '$', 'i');
+        var best = null;
+        var bestScore = 0;
+        var all = [];
+        try {
+            all = doc.querySelectorAll('[id]');
+        } catch (e) {
+            return null;
+        }
+        var cap = Math.min(all.length, SCAN_LIMIT);
+        for (var i = 0; i < cap; i++) {
+            var el = all[i];
+            if (insideReader(el)) {
+                continue;
+            }
+            var id = String(el.id || '').trim();
+            if (!id || !anchorRe.test(id)) {
+                continue;
+            }
+            var score = scoreCandidate(el);
+            if (score > bestScore) {
+                bestScore = score;
+                best = el;
+            }
+        }
+        return best && bestScore >= MIN_CONTENT_CHARS ? best : null;
     }
 
     function pickContainer(doc) {
@@ -520,8 +580,36 @@
         }
     }
 
+    /**
+     * Source element for one chapter: prefer the container anchored to the chapter id in
+     * [baseUrl], but never let a small id-matching widget replace a much larger body.
+     */
+    function pickSource(doc, baseUrl) {
+        var fallback = pickContainer(doc);
+        var anchored = findContainerByChapterId(doc, chapterIdFromUrl(baseUrl));
+        if (!anchored) {
+            return fallback;
+        }
+        if (!fallback || anchored === fallback || fallback === doc.body) {
+            return anchored;
+        }
+        // chapters of the same book are of comparable length, so an anchored candidate less
+        // than half the best-scoring one is an id-carrying widget, not the article body
+        if (scoreCandidate(anchored) * 2 < scoreCandidate(fallback)) {
+            trace('id-anchored container too small, keeping scored one');
+            return fallback;
+        }
+        return anchored;
+    }
+
     function extractHtml(doc, baseUrl) {
-        var source = pickContainer(doc);
+        // Prefer a container whose id is anchored to the chapter id in the URL. Sites that
+        // stitch the next chapter into the live page while scrolling (Qidian's in-line
+        // next-chapter load) leave several chapter containers in the DOM; the id-anchored
+        // element is always the chapter the URL refers to, while naive scoring may pick the
+        // appended one (which turns the entry itself into the next chapter). Falls back to
+        // generic scoring when there is nothing to anchor to.
+        var source = pickSource(doc, baseUrl);
         if (!source) {
             return null;
         }
@@ -1030,7 +1118,7 @@
 
     /** Quietly download the next chapter so a page turn never waits for the network. */
     function prefetchNext() {
-        if (!active || fetching || turning || ended || !nextUrl) {
+        if (!active || fetching || turning || ended || !nextUrl || entryNextCheckPending) {
             return;
         }
         if (lastFailAt && Date.now() - lastFailAt < retryGap()) {
@@ -1047,6 +1135,87 @@
     }
 
     /**
+     * SSR self-check of the entry chapter's next URL (see enterWithContent).
+     *
+     * The live page the host extracted from may have had the next chapter stitched into
+     * the DOM by the site itself (Qidian loads the next chapter into the page as you
+     * scroll), so the live-DOM detection can resolve to the chapter AFTER next - one
+     * full chapter gets skipped. The entry chapter's own SSR HTML carries the canonical
+     * next link, so it is re-detected here on the fetched (clean) document before any
+     * stitching starts. [fallback] is the live-DOM value and is only used when the SSR
+     * check itself fails (network / no page / parse error).
+     */
+    function selfCheckEntryNext(url, fallback) {
+        trace('entry SSR check ' + (url ? shortUrl(url) : 'none'));
+        var timeout = new Promise(function (resolve, reject) {
+            setTimeout(function () {
+                reject(new Error('timeout'));
+            }, LOAD_TIMEOUT_MS);
+        });
+        Promise.race([
+            fetch(url, { credentials: 'include', cache: 'force-cache' }).then(function (response) {
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status);
+                }
+                return response.text();
+            }),
+            timeout
+        ])
+            .then(function (html) {
+                var doc = null;
+                try {
+                    doc = new DOMParser().parseFromString(html, 'text/html');
+                } catch (e) {
+                    doc = null;
+                }
+                var detected = null;
+                if (doc) {
+                    try {
+                        detected = findNextUrl(doc, url);
+                    } catch (e) {
+                        detected = null;
+                    }
+                }
+                resolveEntryNext(detected, fallback);
+            })
+            .catch(function (error) {
+                trace('entry SSR check failed: ' +
+                    (error && error.message ? error.message : 'network error'));
+                resolveEntryNext(null, fallback);
+            });
+    }
+
+    /** Apply the SSR-checked entry next (or its live-DOM fallback) and start stitching. */
+    function resolveEntryNext(ssrNext, fallback) {
+        entryNextCheckPending = false;
+        if (!active) {
+            // reader torn down while the SSR check was in flight: nothing to resume
+            return;
+        }
+        var next = ssrNext || fallback || null;
+        if (next && seen[normalizeUrl(next)]) {
+            // the detected next loops back to an already-visited chapter: treat as the end
+            next = null;
+        }
+        if (next && normalizeUrl(next) !== normalizeUrl(currentEntry.url)) {
+            nextUrl = next;
+            ended = false;
+            endNotified = false;
+        } else {
+            nextUrl = null;
+            ended = true;
+        }
+        if (ssrNext && fallback && normalizeUrl(ssrNext) !== normalizeUrl(fallback)) {
+            trace('entry next corrected by SSR: live=' + shortUrl(fallback) +
+                ' ssr=' + shortUrl(ssrNext));
+        }
+        trace('entry next resolved to ' + (nextUrl ? shortUrl(nextUrl) : 'none'));
+        if (!ended) {
+            setTimeout(prefetchNext, 300);
+        }
+    }
+
+    /**
      * Append the next chapter below the current one. Called by the host when the
      * viewport gets close to the end of the stitched document - the page simply grows,
      * the scroll position is not touched, so the boundary is seamless (nothing at the
@@ -1056,7 +1225,7 @@
      * network (in-page "loading next chapter" hint while it does).
      */
     function appendNext() {
-        if (!active || turning || ended) {
+        if (!active || turning || ended || entryNextCheckPending) {
             return 'busy';
         }
         if (!nextUrl) {
@@ -1240,6 +1409,7 @@
         currentEntry = null;
         pageLog = [];
         nextUrl = null;
+        entryNextCheckPending = false;
         ended = false;
         loading = false;
         turning = false;
@@ -1369,8 +1539,14 @@
         chapterCache = { prev: null, current: entry, next: null };
         pages = [];
         currentEntry = entry;
-        nextUrl = entry.next;
-        ended = !nextUrl;
+        // The live-DOM next (entry.next) is deliberately NOT trusted at boot: the site may
+        // have stitched the next chapter into the source page, in which case the live DOM
+        // resolves to the chapter AFTER the real next, skipping one full chapter. The
+        // entry's own SSR page is fetched and its canonical next used instead; the
+        // live-DOM value only remains as a fallback for a failed SSR check.
+        entryNextCheckPending = true;
+        nextUrl = null;
+        ended = false;
         loading = false;
         turning = false;
         lastTurnAt = 0;
@@ -1388,9 +1564,8 @@
         trace('enter(content) ' + shortUrl(entry.url) +
             ' next=' + (nextUrl ? shortUrl(nextUrl) : 'none'));
         notify('enter', String(textLen(root)));
-        if (!ended) {
-            setTimeout(prefetchNext, 300);
-        }
+        // read-only, never blocks the first screen: stitching waits for the result
+        selfCheckEntryNext(entry.url, entry.next);
         return 'ok';
     }
 
@@ -1451,6 +1626,7 @@
                 'cur=' + (currentEntry ? shortUrl(currentEntry.url) : '-'),
                 'next=' + (nextUrl ? shortUrl(nextUrl) : '-'),
                 'root=' + (root ? 1 : 0),
+                'entryCheck=' + (entryNextCheckPending ? 1 : 0),
                 'scroll=' + Math.round(scrollY),
                 'viewport=' + (window.innerHeight || 0),
                 'docHeight=' + (Math.max(docEl.scrollHeight || 0, document.body ? document.body.scrollHeight || 0 : 0)),
