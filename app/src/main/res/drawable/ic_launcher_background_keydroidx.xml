@@ -1,0 +1,24 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="192"
+    android:viewportHeight="192">
+    <!-- 浅色径向渐变底：蓝色地球前景需要浅底才清晰（深底会糊成一团） -->
+    <path
+        android:pathData="M0,0h192v192h-192z"
+        android:strokeWidth="1"
+        android:fillType="evenOdd"
+        android:strokeColor="#00000000">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="96"
+                android:centerY="88"
+                android:gradientRadius="118"
+                android:type="radial">
+                <item android:offset="0" android:color="#FFFFFFFF"/>
+                <item android:offset="1" android:color="#FFC9D8E8"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

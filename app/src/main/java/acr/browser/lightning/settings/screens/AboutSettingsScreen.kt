@@ -25,6 +25,13 @@ class AboutSettingsScreen @Inject constructor(
                 summary = { BuildConfig.VERSION_NAME },
                 onClick = ClickableOnClick.Action {}
             ),
+            // 上游署名：本项目基于 Anthony Restaino 的 Lightning Browser（MPL 2.0）分叉，
+            // 代码可复用但名称/图标不随许可证授权，故在关于页显式标注来源。
+            ClickableState(
+                title = resourceProvider.stringResource(R.string.upstream_project),
+                summary = { resourceProvider.stringResource(R.string.upstream_author) },
+                onClick = ClickableOnClick.WebLink("https://github.com/anthonycr/Lightning-Browser")
+            ),
             ClickableState(
                 title = resourceProvider.stringResource(R.string.app_name),
                 summary = { resourceProvider.stringResource(R.string.mpl_license) },
