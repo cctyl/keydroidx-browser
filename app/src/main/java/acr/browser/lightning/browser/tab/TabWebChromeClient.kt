@@ -22,6 +22,7 @@ import android.net.Uri
 import android.os.Message
 import android.view.View
 import android.webkit.GeolocationPermissions
+import android.webkit.ConsoleMessage
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.webkit.PermissionRequest
@@ -43,6 +44,7 @@ import com.permissionx.guolindev.PermissionX
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedFactory
 import dagger.assisted.AssistedInject
+import io.github.cctyl.nokia.common.log.KeydroidxLog
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -199,6 +201,29 @@ class TabWebChromeClient @AssistedInject constructor(
         tabCoroutineScope.launch {
             progressSharedFlow.emit(newProgress)
         }
+    }
+
+    /**
+     * 页面控制台消息（仅 ERROR 级）。
+     *
+     * 阅读模式是「把正文提纯后重排」的原地改 DOM 操作，一旦页面脚本报错（站点自己的定时器 /
+     * 观察器与我们的重排打架），正文可能被脚本清空——这属于「文字突然全没了」的候选原因之一，
+     * 而控制台消息默认只在 logcat 的 `chromium` tag 里，且会被系统日志冲掉。这里把页面自身的
+     * ERROR 落盘（WARN 及以下太吵，不记录）。
+     */
+    override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+        try {
+            if (consoleMessage.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                KeydroidxLog.w(
+                    TAG,
+                    "页面控制台错误: ${consoleMessage.message()} " +
+                        "@${consoleMessage.sourceId()}:${consoleMessage.lineNumber()}"
+                )
+            }
+        } catch (t: Throwable) {
+            KeydroidxLog.w(TAG, "记录页面控制台消息失败", t)
+        }
+        return super.onConsoleMessage(consoleMessage)
     }
 
     override fun onReceivedTitle(view: WebView, title: String) {
@@ -363,5 +388,11 @@ class TabWebChromeClient @AssistedInject constructor(
                     //TODO show message and/or turn off setting
                 }
             }
+    }
+
+    private companion object {
+
+        /** 日志 TAG（页面控制台错误等诊断用） */
+        const val TAG = "TabWebChromeClient"
     }
 }

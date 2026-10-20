@@ -463,3 +463,185 @@ OkHttp 的 `ResponseBody.string()` 在响应头无 charset 时默认按 **UTF-8*
 3. 同意前两轮：`KEEP_PAGES` 调小为后续优化。
 4. 并存策略维持；灰度 fallback 与 C 的关系需要理清——若走 C，fallback 形态就是
    「C 页面内 fetch 失败 → 退回寄生式重进」，比 A 的 native 提取失败判定更简单。
+
+---
+
+## 九、方案 C 真机验证结果（2026-10-20 11:57，通过）
+
+### 验证环境
+
+- 设备：`192.168.1.5:5555`（Q968 / Android 13 / WebView `101.0.4951.61`），即本次复现的同机型；
+- 被测章节：`https://m.qidian.com/chapter/1037806577/763880334/`（09:27 日志里正在读的那章）；
+- 手段：debug-only 临时探针（`app/src/debug/.../ReaderBaseUrlProbeActivity.kt` +
+  `app/src/debug/AndroidManifest.xml`，release 不含、验证完删除），三阶段各做一次
+  「读环境 + 同源 fetch 本章 URL」，结果走 logcat tag `ReadingProbe`。
+
+### 三阶段结果
+
+| 阶段 | 宿主方式 | `location.origin` | `document.cookie` | fetch | 长度 | 耗时 |
+|---|---|---|---|---|---|---|
+| 1 `1-real-page` | `loadUrl(章节URL)`（基准） | `https://m.qidian.com` | 450 字节 | 200 | 43157 | 385ms |
+| 2 `2-data-baseurl` | `loadDataWithBaseURL(章节URL, 外壳, …)` | `https://m.qidian.com` | 450 字节 | 200 | 43113 | 352ms |
+| 3 `3-data-nobase` | `loadDataWithBaseURL(null, 外壳, …)`（对照） | — | `SecurityError: Access is denied` | `Failed to fetch` | — | — |
+
+补充：阶段 2 的 `shellRan=true`（data 页内联 `<script>` 正常执行），`href` / `document.URL`
+均为真实章节 URL，`navigator.userAgent` 为标准 WebView UA（`…wv… Chrome/101…`）。
+
+### 结论
+
+**方案 C 成立**：`loadDataWithBaseURL` 以章节 URL 为 baseUrl 载入外壳后，文档 origin 就是
+`https://m.qidian.com`，cookie 可读、同源 fetch 拿到与真实页面**同量级（43113 vs 43157，
+差 0.1%）** 的章节 HTML。阶段 3 的对照失败证明阶段 2 的成功不是「什么页面都能 fetch」。
+
+由此，第三轮 P1-11 里列的三个坑在 C 路线下**全部不需要**：
+
+- P0-1 cookie 桥 —— 不需要，WebView 自己带 cookie；
+- P1-B.2 UA —— 不需要，请求由 WebView 发出，UA / Accept-Language 与现网完全一致；
+- P1-B.1 字符集 —— 不需要，WebView 按响应头 + meta 自行解码，GBK 站天然正确。
+
+A 路线（OkHttp + jsoup）仍需要这三项，故 C 作为第一阶段的风险显著低于 A。
+
+### 附带事实（对 A 也有用）
+
+- **章节页确为 SSR**：同 UA 直接 `curl` 得到 55947 字节 HTML，`<div id="app" data-pid=mqd_P_bookread>`
+  内已含正文 DOM，`<title>` 含章节名 → P1-B.3 的 SSR 前置验证对起点通过（其它站点仍需各自确认）。
+- 起点的章节标题格式是 `10.潜龙灵体，脱胎换骨`（数字+点，**不是**「第 10 章」），探针里
+  `hasChapter` 的正则因此为 false —— 是标题格式问题，不是正文缺失，不要误读。
+- 阶段 2 的 `document.referrer` 为空（data 页没有导航来路）；fetch 请求头的 Referer 由文档 URL
+  派生，起点实测不校验（200 正常返回）。若后续接入防盗链严格的站点，需要抓包确认这一项。
+
+### 决策更新
+
+- 决策点 1 由「选 A」改为 **「M0 = 方案 C 宿主隔离，M1 = 方案 A 可选」**：
+  M0 只需要 `loadDataWithBaseURL` 外壳 + 正文缓存（P0-2）+ URL 分离（P0-8），
+  **不需要** jsoup port、cookie 桥、UA/charset 处理；A 可在一个版本稳定后再评估是否值得做。
+- 前两轮留下的 P1-B.3 / P2-12 / P2-D 仍是 A 路线的工作项，不阻塞 M0。
+- 临时探针代码（`app/src/debug/AndroidManifest.xml`、`ReaderBaseUrlProbeActivity.kt`）在
+  路线锁定后删除，**不得提交**。
+
+---
+
+## 十、M0 实施记录（2026-10-20）
+
+M0（方案 C 宿主隔离）已落地，真机验证通过。改动三个文件：
+
+- `app/src/main/js/KeyphoneReadingMode.js`
+  - 新增 `extract()`：只读提取（复用 `extractHtml` / `findNextUrl` / `pageTitleOf`），
+    不清 body、不动 viewport、不挂监听，返回 JSON（url / title / html / next / textLen）；
+  - 新增 `enterWithContent(payload)`：在干净外壳上用外部正文起阅读器，`backup` 保持 null
+    （外壳是我们自己的页，没有「原页面」可还原）；
+  - boot 分流：`__keyphone_rm_boot__`（宿主已提取好正文）→ `enterWithContent`；
+    `__keyphone_rm_noenter__`（宿主只想要 API，用于源页提取）→ 直接返回；
+    都没有 → 旧的就地重排行为（保留，作为兜底与回归对照）。
+- `app/src/main/java/.../keyphone/KeyphoneBrowserActivity.kt`
+  - `enterReadingMode()` 改为三步：源页 `extract()` → `loadDataWithBaseURL(章节URL, 外壳)`
+    → 外壳内联脚本用正文启动；
+  - `buildReaderShell()`：外壳 = viewport + `<title>` + `__keyphone_rm_init__`（主题/字号）
+    + `__keyphone_rm_boot__`（正文）+ 阅读脚本，**不含任何站点脚本**；脚本位于 body 末尾，
+    执行时 body 已存在，省掉「等 onPageFinished」的竞态；
+  - `verifyReaderBoot()`：350ms 起检查 `isActive()`，最多重试 4 次，失败则导航回章节页，
+    绝不把用户留在空白 data 页上；
+  - `exitReadingMode()`：删除「只读一章就地还原 DOM」分支——外壳上没法原地还原，
+    一律 `loadUrl(lastUrl)`；拉取失败时用会话里记着的章节兜底；
+  - `pullReadingProgress()` 自带自愈：`progress`/`diag` 都为空说明 `__keyphone_rm__`
+    已不存在（阅读页被替换），直接清阅读态，避免按键卡在阅读路由；
+  - 刷新（页面菜单 1 / 选项页刷新）在阅读态下改为退出阅读并回到真实章节页。
+- `app/src/main/java/.../KeyphoneBrowserActivity.kt` 的 `ReadingModeJs`
+  新增 `extractScript()`（注入 `__keyphone_rm_noenter__` + 阅读脚本 + 提取调用）。
+
+### 真机实测补充的两个事实（决定实现细节）
+
+- **`webView.getUrl()` 在 data 页上返回 `about:blank`**（`originalUrl` 是 data URL），
+  只有 `onPageFinished` 的 `url` 参数与页面内 `document.URL` 是 baseUrl。因此：
+  - 地址栏 / 标签标题 / URL 历史 / 会话快照不受影响（它们走 `onPageFinished` 的 url）；
+  - 任何需要真实地址的新代码必须用 `currentRealUrl()`（阅读态下取 `ReadingSession.lastUrl`），
+    `addCurrentPageToHome` 已按此修正，否则会存成 `about:blank`。
+- **`postVisualStateCallback` 在 data 页上 8ms 就返回**，帧看门狗不会误判「合成卡死」；
+  `canGoBack() = true`（data 页会在历史栈里压一条）。
+
+### 真机验证（Q968 / Android 13 / WebView 101）
+
+| 验证项 | 结果 |
+|---|---|
+| 进入阅读模式 | 日志 `进入阅读模式提取结果: textLen=2725 next=…/763880334/` → `打开阅读页: baseUrl=…/763771959/ shellChars=69515` → `阅读页已就绪`（约 200ms） |
+| 拼章（同源 fetch） | 翻到页尾后 `fetch#1 https://m.qidian.com/chapter/…/763880334/` → 桥事件 `append 2`，正文接着往下排 |
+| 章节入库 | `阅读模式章节入库: 8.上上签12`、`10.潜龙灵体，脱胎换骨`（历史记录与退出落点正确） |
+| 退出（菜单 6 / 返回键） | `退出阅读模式导航: -> …/763880334/`，落到真实章节页（站点原版排版、地址栏正常） |
+| 二次进入 / 字号 / 主题 | 正常（字号实时变化，主题轮换提示正确） |
+| 阅读态 CPU | 渲染进程 0.0%（旧实现在大 DOM 上持续烧 CPU） |
+| 进程被杀后重启 | 回到主页，历史里最后读的章节在最上（标签快照 URL 为真实章节 URL） |
+
+### 与评审结论的差异（有意为之）
+
+- **P0-2「native 正文缓存」未做**：渲染隔离后正文由 JS 侧持有，native 只在进入时传一次。
+  渲染进程死亡时 `TabAdapter` 重载 `deadUrl`（真实章节 URL）→ 用户回到可读的章节页，
+  按阅读键可重新进入；缓存整条 trail 的 HTML 只为了省一次重新提取，不值得这份复杂度。
+  若后续要做「恢复后自动回到阅读态」，再补缓存（届时正文已在 native 手里，成本更低）。
+- **P0-8「URL 分离」大部分免费**：地址栏 / 历史 / 快照都走 `onPageFinished` 的 url，
+  只需修掉直接问 `webView.getUrl()` 的地方（已修 `addCurrentPageToHome`）。
+- **P1-10「只读一章退出要重载」** 已按评审预期接受：退出恒为一次完整导航。
+
+### 已知边界（后续）
+
+- 标签冻结 / `saveState` 恢复：恢复出来的是进入时那一章的外壳（`__keyphone_rm_boot__`
+  会重跑），拼过的后续章节不在了；Kotlin 侧阅读会话也已丢失，按键回到普通浏览语义。
+  不影响可读性，属于后续优化。
+- 看门狗恢复后不自动重进阅读态（仍停在真实章节页），需要用户再按一次。
+- `KEEP_PAGES`（trim）未动，仍按第二轮 P1-A 的结论列为后续优化。
+
+---
+
+## 十一、M1：连续文字阅读 + 高度窗口 + 丢失自愈（2026-10-20）
+
+### 演进过程（两次修正）
+
+1. **M0 之后仍复现**「文字消失 → 重载 → 退出阅读」两次（12:39、21:11）。日志证明：帧看门狗
+   静默（合成器正常）、`webView.url` 变 `about:blank`、视口高度突变（`389→192`）、滚动指令
+   失灵。根因是 **阅读页是 data 页**：被 WebView 池回收 / 标签冻结 / Activity 重建后，
+   `restoreState` 恢复不出 data 页 → `about:blank` → `isTabHome()` 当主页 → 阅读态丢失。
+   普通页面在同一条链路上恢复完好，所以「正常浏览没事，只有阅读模式出事」。
+2. **第一版修复「一章一页」硬切章**：内存问题解决了，但阅读体验退化——章尾不足一屏的内容被
+   同一个按键吞掉、下一章从顶部硬切，用户感觉「跳」。这一版**已废弃**。
+
+### 现在的形态（M1.5）
+
+> 源页只读提取一次 → 源页随导航销毁 → 阅读页里**连续追加纯文字**（章与章的接缝就是一条
+> 分隔标题，滚动不中断、不跳）；窗口按**文档高度**上限裁剪，超出就丢弃最早读过的章节。
+
+**关键实测**：这台设备上，拼到 **9 章左右（docHeight ≈ 10 万 px）时沙箱渲染进程被系统杀掉**
+（logcat `cr_AwContents` 警告 + `TabAdapter: 渲染进程死亡后已重新加载`）。所以窗口不能按章数
+给（10 章 ≈ 15 万 px，必死），必须按高度给：`MAX_DOM_PX = 40000`（约 2~3 章）。
+
+**JS（`KeyphoneReadingMode.js`）**
+
+- `appendChapter()`：把「章节标题条 + 正文」追加到 root 尾部，**不动滚动位置**；
+- `appendNext()`：页尾附近由宿主/心跳触发；命中 `chapterCache.next` 即刻追加，未命中才
+  `fetchChapter()`（页内显示「正在加载下一章」）；
+- `pump()`（800ms）：保持视口下方至少 `PRE_READ_SCREENS = 1.5` 屏未读文字，并重试预读；
+- `trimChapters()`：`docHeight() > MAX_DOM_PX` 且最早章节已在视口上方
+  `TRIM_SAFE_SCREENS = 2` 屏之外时才丢弃；补偿用**可见锚点相对 `scrollBy`**
+  （不能用被删块高度：Chromium 锚定已补偿一次）；
+- 删除：`turnNext/turnPrev`（章首回退）、`renderChapter`（清空重渲染）、
+  `KEEP_PAGES` 按章数裁剪。
+
+**宿主（`KeyphoneBrowserActivity.kt`）**
+
+- 按键路由：`remaining <= 1.5 屏` 时按 `READING_JS_APPEND` 催追加，其余按键只拉章节轨迹；
+- **阅读页丢失自愈 `recoverReaderPage()`**：按键拉取发现 `__keyphone_rm__` 消失，或看门狗
+  2 秒采样发现「阅读态下 WebView 的 url 变成 http 页」→ 清阅读态 → 导航回
+  `ReadingSession.lastUrl` → `maybeReenterReading()` 自动重进阅读（主页状态下保留待重进标记，
+  等回到该标签再重进）；
+- `readerSettledAt` 记录就绪时刻，作为看门狗 3 秒静默窗口。
+
+### 真机验证（Q968 / Android 13 / WebView 101）
+
+| 验证项 | 结果 |
+|---|---|
+| 进入阅读 | 提取 → `打开阅读页` → `阅读页已就绪`（约 0.5 s） |
+| 章接缝 | 追加后 `docHeight 15924→30318`，`scroll 17471→17859` 连续，接缝处是章节标题条 |
+| 长跑 400+ 键 / 9 章 | `dom=2~3`、`docHeight` 稳定在 29k~46k、`fails=0`、无渲染进程死亡 |
+| 裁剪补偿 | `trim dom=2 scroll=14125 / 14062 / 13288…`，滚动位置只差几十 px，无回跳 |
+| 自动追加 | `fetch#n` 预读 + `append … dom=2/3` + 桥事件 `turn` |
+| 退出（返回键） | 导航到 `lastUrl` 真实章节页，`reading=false` |
+| 标题正确性 | 追加章节标题与站点 `<h1>` 一致（14→16 是站点自身跳号，非丢章） |
+| lint | `:app:lintLightningPlusDebug` 通过 |

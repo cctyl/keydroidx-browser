@@ -5,6 +5,7 @@ import acr.browser.lightning.R
 import acr.browser.lightning.browser.BrowserContract
 import io.github.cctyl.nokia.common.R as CommonR
 import acr.browser.lightning.browser.BrowserPresenter
+import acr.browser.lightning.browser.BrowserViewState
 import acr.browser.lightning.browser.menu.MenuSelection
 import acr.browser.lightning.browser.search.IntentExtractor
 import acr.browser.lightning.browser.tab.ImeBlockableWebView
@@ -34,6 +35,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.text.Editable
+import android.text.TextUtils
 import android.text.TextWatcher
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -163,6 +165,16 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
      * 并显示加载提示，等 WebView 真正 attach、state 也确认已切页后由 [observeState] 清除。
      */
     private var pendingOpenUrl: String? = null
+
+    /**
+     * 加载遮罩开始显示的时刻（0 = 当前遮罩不显示）。仅用于诊断日志：
+     * 遮罩一盖上就把内容区全挡住，用户感知是「黑屏 / 一直加载」，必须能看到它挂了多久。
+     */
+    private var pageLoadingShownAt = 0L
+
+    /** 遮罩已显示多久（未显示返回 0） */
+    private fun pageLoadingBusyMs(): Long =
+        if (pageLoadingShownAt == 0L) 0L else SystemClock.elapsedRealtime() - pageLoadingShownAt
 
     /** [ensureHomeWindow] 最近一次派发新建主页的时间戳，用于在途短路（见该方法注释） */
     private var homeWindowDispatchAt = 0L
@@ -397,6 +409,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
         registerWebPromptLifecycle()
         installMainThreadWatchdog()
+        installReadingWatchdog()
+        installReadingFrameWatchdog()
         installMainLoopTracer()
         updateTabMode()
         loadHomeData()
@@ -637,6 +651,26 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         val progress = presenter.state.value.progress
         val show = !isHomeSelected && (webView == null || pendingOpenUrl != null || progress < 100)
         host.visibility = if (show) View.VISIBLE else View.GONE
+        if (show && pageLoadingShownAt == 0L) {
+            pageLoadingShownAt = SystemClock.elapsedRealtime()
+        } else if (!show) {
+            pageLoadingShownAt = 0L
+        }
+        // 遮罩盖住整个内容区（背景 #121D2C），只要它一直 VISIBLE，用户看到的就永远是
+        // 「正在打开…」或者一片空白——阅读模式黑屏事故的头号嫌疑就在这里，故每次显隐都记日志
+        // 落盘走生态标准 KeydroidxLog（BrowserApp 已 init，详见 BrowserApp.onCreate 的说明）
+        KeydroidxLog.d(TAG, "加载遮罩 ${if (show) "显示" else "隐藏"}: home=$isHomeSelected" +
+            " wv=${webView != null} pending=${pendingOpenUrl} progress=$progress" +
+            " busy=${pageLoadingBusyMs()}ms id=${System.identityHashCode(webView)}")
+    }
+
+    /** 内容区当前标签的现场快照（阅读模式黑屏排查用，见 [reportReadingTabState]） */
+    private fun describeReadingTab(): String {
+        val page = getCurrentPage()
+        return "home=$isHomeSelected tab=${selectedTabId()}" +
+            " wv=${currentWebView() != null} progress=${presenter.state.value.progress}" +
+            " pending=$pendingOpenUrl overlay=${activeMenuType} find=$isFindMode copy=$isFreeCopyMode" +
+            " fullscreen=$isFullScreenMode page=${page?.javaClass?.simpleName}"
     }
 
     /** 渲染顶部标签栏：所有打开的标签页（主页 / 各网页） */
@@ -809,6 +843,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         addressText = url
         isScrolledToBottom = false
         showPageLoadingNow()
+        armPendingOpenWatchdog()
 
         lifecycleScope.launch {
             try {
@@ -830,6 +865,45 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 // 失败时不能把「加载中」挂着，否则内容区永远卡在转圈
                 clearPendingOpen()
             }
+        }
+    }
+
+    /**
+     * 「页面正在打开」兜底：到点还在 pending 就记日志并检查 WebView 是否其实早就有内容了。
+     *
+     * 背景：pendingOpenUrl 只在 [observeState] 看到「WebView 已 attach 且当前标签不再是主页」时清除。
+     * 这条判据依赖 state 在**打开之后**还发射一次；一旦那次发射恰好发生在 WebView attach 之前
+     * （弱机上很常见：建 WebView 要串行读 20 多项偏好），pending 就再也没人清，遮罩
+     * （pageLoading，全屏不透明底）永久盖住内容区 —— 用户看到的就是「界面全空 / 黑屏」，
+     * 且它会连带让 [sendPendingOpenUrl] 永久跳过重新导航。
+     *
+     * 这里只在**兜底**时清：到点后若当前页已有 URL（不是空白页）说明页面其实已经打开了，
+     * 清 pending 并重算界面；若仍是空白页则保留 pending（导航可能真在路上），只留日志。
+     */
+    private fun armPendingOpenWatchdog() {
+        pendingOpenWatchHandler.removeCallbacks(pendingOpenWatchdog)
+        pendingOpenWatchHandler.postDelayed(pendingOpenWatchdog, PENDING_OPEN_TIMEOUT_MS)
+    }
+
+    private val pendingOpenWatchHandler = Handler(Looper.getMainLooper())
+
+    private val pendingOpenWatchdog = Runnable {
+        val pending = pendingOpenUrl ?: return@Runnable
+        val current = try {
+            currentWebView()?.url.orEmpty()
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "兜底检查待打开地址失败: $pending", t)
+            ""
+        }
+        val alreadyLoaded = current.isNotBlank() && !current.isSpecialUrl()
+        KeydroidxLog.w(
+            TAG,
+            "待打开地址超时未确认: pending=$pending wvUrl=$current alreadyLoaded=$alreadyLoaded" +
+                " ${describeReadingTab()}"
+        )
+        if (alreadyLoaded) {
+            pendingOpenUrl = null
+            updateTabMode()
         }
     }
 
@@ -867,11 +941,14 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     /**
      * 阅读模式会话。
      *
-     * 阅读模式把「进入时那一章 → 后面拼进来的每一章」放进同一张 DOM 里连续滚动，而浏览器
-     * 仍认为当前页是进入时那一章。为了让阅读模式等价于**普通浏览**（地址栏、历史记录、
-     * 关掉浏览器后下次启动恢复都停在最后读到的那一章），这里跟着 JS 的拼页进展记账：
+     * 阅读模式把「进入时那一章 → 后面拼进来的每一章」放进同一张 DOM 里连续滚动。为了让阅读模式
+     * 等价于**普通浏览**（地址栏、历史记录、关掉浏览器后下次启动恢复都停在最后读到的那一章），
+     * 这里跟着 JS 的拼页进展记账：
      * - [recorded]：已写进 URL 历史的章节，逐条入库（见 [pullReadingProgress]）；
-     * - [lastUrl]：最后拼进来的一章，已不是 [entryUrl] 时退出即导航过去（见 [exitReadingMode]）。
+     * - [lastUrl]：最后拼进来的一章，退出即导航过去（见 [exitReadingMode]）。
+     *
+     * 渲染隔离后阅读页是 `loadDataWithBaseURL` 的外壳，`webView.getUrl()` 返回 `about:blank`，
+     * 因此 [lastUrl] 同时是「这个标签的真实 URL」的唯一事实源（见 [currentRealUrl]）。
      */
     private class ReadingSession(val entryUrl: String) {
         val recorded = HashSet<String>()
@@ -882,6 +959,21 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         var lastTitle: String = ""
         var chapterCount: Int = 1
     }
+
+    /** 阅读页启动校验定时器（见 [verifyReaderBoot]） */
+    private val readerBootHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * 阅读页被宿主替换后的恢复落点：恢复导航的目标章节 URL。
+     * 页面加载完成（progress==100 且 URL 命中）后自动重进阅读模式（见 [maybeReenterReading]）。
+     */
+    private var pendingReadingReenterUrl: String? = null
+
+    /**
+     * 阅读页就绪时刻（[verifyReaderBoot] 成功时置位，[openReaderPage] 重新载入时清零）。
+     * 看门狗的「阅读页丢失」判定以此做静默窗口，避免把刚发起的外壳载入误判成丢失。
+     */
+    private var readerSettledAt = 0L
 
     /**
      * 退出阅读模式后待补写的章节轨迹。
@@ -944,6 +1036,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     /** 按键 * 菜单 6：进入 / 退出阅读模式 */
     private fun toggleReadingMode() {
+        KeydroidxLog.d(
+            TAG,
+            "阅读模式切换: from=${if (isReadingMode()) "阅读态" else "普通态"} ${describeReadingTab()}"
+        )
         if (isReadingMode()) {
             exitReadingMode()
         } else {
@@ -951,7 +1047,24 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
     }
 
-    /** 进入阅读模式：注入脚本，脚本内用当前渲染后的 DOM 提取正文并原地重排 */
+    /**
+     * 进入阅读模式（渲染隔离版，方案 C；背景见 docs/reading-mode-render-isolation-plan.md）。
+     *
+     * 三步：
+     * 1. 在**源页面上**只装 API、做一次只读提取（`extract()` 只读 DOM：不清 body、不动
+     *    viewport、不挂监听），拿到当前章正文 + 下一章 URL + 章节标题；
+     * 2. 把 WebView 导航到一个干净外壳：`loadDataWithBaseURL(章节URL, 外壳, …)`。源页面连同
+     *    它注册的 setInterval / rAF / scroll 监听 / 埋点一起随导航消亡 —— 「越拼越大的 DOM 上
+     *    循环 reflow 把渲染进程烧死」的根被从结构上拔掉（这正是空屏 15 分钟的成因）；
+     * 3. 外壳里内联执行阅读脚本并用第 1 步的正文直接渲染（`enterWithContent`），后续拼章仍是
+     *    同源 fetch（baseUrl 决定 document.origin，origin / cookie / UA 与源页面完全一致）。
+     *
+     * 为什么 baseUrl 必须是章节 URL：它决定文档 origin。origin 一致，脚本里的
+     * `fetch(next, {credentials:'include'})` 才带 cookie 且不受 CORS 限制。副作用是地址栏、
+     * 标签标题、历史记录、会话恢复都自然停在真实章节 URL —— 但要注意
+     * `webView.getUrl()` 在 data 页上返回 `about:blank`，所以凡需要真实 URL 的地方一律走
+     * [currentRealUrl] / [ReadingSession.lastUrl]，不要问 WebView。
+     */
     private fun enterReadingMode() {
         val tab = presenter.state.value.tabs.firstOrNull { it.isSelected }
         val webView = currentWebView()
@@ -970,26 +1083,247 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
         installReadingBridge(webView)
         probeReadingBridge(webView)
-        webView.evaluateJavascript(readingAppearanceInitJs() + keyphoneReadingMode.provideJs()) { rawResult ->
-            val result = decodeJsString(rawResult)
-            when (result) {
-                "ok" -> {
-                    readingModeTabs[tab.id] = ReadingSession(url)
-                    updateBackPressedEnabled()
-                    // 阅读模式下隐藏鼠标光标层（方向键已改为整屏翻页）
-                    updateMouseCursorVisibility()
+        KeydroidxLog.d(TAG, "进入阅读模式: 提取源页面 url=$url tab=${tab.id} ${describeReadingTab()}")
+        probeReadingVisuals(webView, "进入前")
+        try {
+            webView.evaluateJavascript(
+                ReadingModeJs.extractScript(keyphoneReadingMode.provideJs())
+            ) { rawResult ->
+                val entry = ReadingEntry.fromJson(decodeJsString(rawResult))
+                KeydroidxLog.d(
+                    TAG,
+                    "进入阅读模式提取结果: ${entry?.describe() ?: "无正文"} url=$url ${describeReadingTab()}"
+                )
+                if (entry == null) {
+                    showReadingToast(getString(R.string.keyphone_reading_no_content))
+                    return@evaluateJavascript
+                }
+                openReaderPage(tab.id, entry)
+            }
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "进入阅读模式提取失败 url=$url", t)
+            showReadingToast(getString(R.string.keyphone_reading_failed))
+        }
+    }
+
+    /** 一次成功提取的结果（见 [enterReadingMode] 第 1 步）。 */
+    private data class ReadingEntry(
+        val url: String,
+        val title: String,
+        val html: String,
+        val next: String,
+        val textLen: Int
+    ) {
+        fun describe(): String = "textLen=$textLen next=${next.ifBlank { "-" }} title=$title"
+
+        companion object {
+            /** 解析 `extract()` 的 JSON；不是合法提取结果（空正文 / API 缺失 / 解析失败）时返回 null */
+            fun fromJson(text: String): ReadingEntry? {
+                if (text.isBlank() || text == "null") return null
+                return try {
+                    val obj = JSONObject(text)
+                    if (!obj.optBoolean("ok")) return null
+                    val html = obj.optString("html")
+                    if (html.isBlank()) return null
+                    ReadingEntry(
+                        url = obj.optString("url"),
+                        title = obj.optString("title"),
+                        html = html,
+                        next = obj.optString("next"),
+                        textLen = obj.optInt("textLen")
+                    )
+                } catch (t: Throwable) {
+                    KeydroidxLog.e(TAG, "阅读模式提取结果解析失败", t)
+                    null
+                }
+            }
+        }
+    }
+
+    /**
+     * 打开干净阅读页（见 [enterReadingMode] 第 2/3 步）。
+     *
+     * 阅读脚本随外壳内联执行（脚本位于 `<body>` 末尾，执行时 body 一定已存在），避免
+     * 「等 onPageFinished 再 evaluateJavascript」的竞态；正文经 `__keyphone_rm_boot__` 传入。
+     */
+    private fun openReaderPage(tabId: Int, entry: ReadingEntry) {
+        val webView = currentWebView()
+        if (webView == null) {
+            KeydroidxLog.w(TAG, "打开阅读页跳过：WebView 不可用 tabId=$tabId")
+            showReadingToast(getString(R.string.keyphone_reading_failed))
+            return
+        }
+        val session = ReadingSession(entry.url).also {
+            it.lastTitle = entry.title
+            it.chapterCount = 1
+        }
+        readingModeTabs[tabId] = session
+        updateBackPressedEnabled()
+        // 阅读模式下隐藏鼠标光标层（方向键已改为整屏翻页）
+        updateMouseCursorVisibility()
+        val shell = buildReaderShell(entry)
+        KeydroidxLog.d(
+            TAG,
+            "打开阅读页: baseUrl=${entry.url} shellChars=${shell.length} ${entry.describe()}"
+        )
+        try {
+            // baseUrl = 章节 URL：文档 origin / cookie / 相对链接 / 地址栏全靠它
+            readerSettledAt = 0L
+            webView.loadDataWithBaseURL(entry.url, shell, "text/html", "utf-8", null)
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "打开阅读页失败 baseUrl=${entry.url}", t)
+            readingModeTabs.remove(tabId)
+            updateBackPressedEnabled()
+            updateTabMode()
+            showReadingToast(getString(R.string.keyphone_reading_failed))
+            return
+        }
+        readerBootHandler.postDelayed({ verifyReaderBoot(tabId, entry, 0) }, READER_BOOT_CHECK_MS)
+    }
+
+    /**
+     * 干净阅读页外壳：只有正文与阅读脚本，**不含任何站点脚本**。
+     *
+     * JSONObject 会把 `<` 后面的 `/` 转义成 `\/`，正文里即使出现 `</script>` 也不会截断脚本块。
+     */
+    private fun buildReaderShell(entry: ReadingEntry): String {
+        val boot = JSONObject().apply {
+            put("url", entry.url)
+            put("title", entry.title)
+            put("html", entry.html)
+            put("next", entry.next)
+        }.toString()
+        return buildString {
+            append("<!DOCTYPE html><html><head><meta charset=\"utf-8\">")
+            append("<meta name=\"viewport\" content=\"")
+            append(READER_VIEWPORT)
+            append("\">")
+            append("<title>").append(TextUtils.htmlEncode(entry.title)).append("</title>")
+            append("</head><body><script>")
+            append(readingAppearanceInitJs())
+            append("window.__keyphone_rm_boot__=").append(boot).append(";\n")
+            append(keyphoneReadingMode.provideJs())
+            append("</script></body></html>")
+        }
+    }
+
+    /**
+     * 确认阅读页真的跑起来了（见 [openReaderPage]）。
+     *
+     * 外壳是本地页面，正常几百毫秒内 `isActive()` 就是 true。起不来时（脚本没跑 / 正文注入
+     * 失败）绝不能把用户扔在一个空白 data 页上：直接导航回真实章节 URL。
+     */
+    private fun verifyReaderBoot(tabId: Int, entry: ReadingEntry, attempt: Int) {
+        if (readingModeTabs[tabId] == null) return
+        val webView = currentWebView() ?: return
+        try {
+            webView.evaluateJavascript(READER_JS_IS_ACTIVE) { raw ->
+                val active = decodeJsString(raw) == "true"
+                if (active) {
+                    readerSettledAt = SystemClock.elapsedRealtime()
+                    KeydroidxLog.d(TAG, "阅读页已就绪: ${entry.describe()} ${describeReadingTab()}")
                     // 首次进入弹按键使用引导；弹了就不必再叠一个进模式提示
                     if (!showReadingGuideIfNeeded()) {
                         showReadingToast(getString(R.string.keyphone_reading_enter))
                     }
+                    return@evaluateJavascript
                 }
-                "empty" -> showReadingToast(getString(R.string.keyphone_reading_no_content))
-                else -> {
-                    KeydroidxLog.w(TAG, "进入阅读模式失败: result=$result url=$url")
-                    showReadingToast(getString(R.string.keyphone_reading_failed))
+                if (attempt < READER_BOOT_RETRIES) {
+                    KeydroidxLog.w(TAG, "阅读页尚未就绪，重试 attempt=${attempt + 1} tabId=$tabId")
+                    readerBootHandler.postDelayed(
+                        { verifyReaderBoot(tabId, entry, attempt + 1) },
+                        READER_BOOT_CHECK_MS
+                    )
+                    return@evaluateJavascript
+                }
+                KeydroidxLog.e(TAG, "阅读页启动失败，回到章节页: ${entry.describe()}")
+                readingModeTabs.remove(tabId)
+                updateBackPressedEnabled()
+                updateTabMode()
+                showReadingToast(getString(R.string.keyphone_reading_failed))
+                try {
+                    webView.loadUrl(entry.url)
+                } catch (t: Throwable) {
+                    KeydroidxLog.e(TAG, "阅读页启动失败后回到章节页也失败 url=${entry.url}", t)
                 }
             }
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "阅读页就绪检查失败 tabId=$tabId", t)
         }
+    }
+
+    /**
+     * 当前标签的**真实** URL。
+     *
+     * 阅读态下 WebView 实际停在 data 页（`getUrl()` 返回 `about:blank`），只有
+     * [ReadingSession] 记着章节 URL。书签 / 分享这类要真实地址的地方都走这里。
+     */
+    private fun currentRealUrl(): String {
+        val tabId = selectedTabId()
+        val session = tabId?.let { readingModeTabs[it] }
+        if (session != null) {
+            return session.lastUrl.ifBlank { session.entryUrl }
+        }
+        return try {
+            currentWebView()?.url.orEmpty()
+        } catch (t: Throwable) {
+            KeydroidxLog.w(TAG, "读取 WebView url 失败", t)
+            ""
+        }
+    }
+
+    /**
+     * 阅读页丢失后的恢复（2026-10-20 两次复现的根因：阅读页是 data 页，WebView 被池回收 /
+     * Activity 重建后 `restoreState` 恢复出 about:blank，随后被 [isTabHome] 当成主页，
+     * 阅读态丢失 —— 用户视角就是「文字消失 → 重载 → 退出阅读」）。
+     *
+     * 恢复动作：清阅读态 → 导航回会话记着的最后章节（真实页面，可正常冻结/恢复）→
+     * 页面加载完成后自动重进阅读模式（[maybeReenterReading]）。用户最多损失「重新提取
+     * 一次正文」的时间，不再被踢出阅读。
+     */
+    private fun recoverReaderPage(reason: String) {
+        val tabId = selectedTabId() ?: return
+        val session = readingModeTabs.remove(tabId) ?: return
+        readerSettledAt = 0L
+        updateBackPressedEnabled()
+        updateTabMode()
+        val target = session.lastUrl.ifBlank { session.entryUrl }
+        pendingReadingReenterUrl = target
+        KeydroidxLog.e(
+            TAG,
+            "【阅读现场】阅读页丢失，恢复到 $target reason=$reason " +
+                "已读 ${session.chapterCount} 章 last=${session.lastUrl} ${describeReadingTab()}"
+        )
+        val webView = currentWebView()
+        if (webView == null) {
+            // WebView 也没了：交给渲染进程死亡回调链路重建，重进交给下次 progress==100
+            KeydroidxLog.w(TAG, "【阅读现场】恢复时 WebView 不可用，等待重建后重进 target=$target")
+            return
+        }
+        try {
+            webView.loadUrl(target)
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "【阅读现场】恢复导航失败 target=$target", t)
+        }
+    }
+
+    /**
+     * 恢复导航落地后自动重进阅读模式（见 [recoverReaderPage]）。
+     * 只在 displayUrl 已落到目标章节且加载完成时触发一次；提取失败只弹提示，不循环。
+     */
+    private fun maybeReenterReading(state: BrowserViewState) {
+        val target = pendingReadingReenterUrl ?: return
+        if (state.displayUrl != target) {
+            return
+        }
+        // 主页状态 / 已在阅读态：保留待重进标记，等用户回到该标签页再重进，
+        // 不能在这里清掉（否则恢复导航期间短暂回主页就把机会吞掉了）
+        if (isReadingMode() || isHomeSelected) {
+            return
+        }
+        pendingReadingReenterUrl = null
+        KeydroidxLog.d(TAG, "阅读恢复：自动重进阅读模式 target=$target")
+        enterReadingMode()
     }
 
     /**
@@ -1090,16 +1424,19 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 showReadingToast(getString(R.string.keyphone_reading_theme_switch, readingThemeName(index)))
             }
         } catch (t: Throwable) {
-            KeydroidxLog.e(TAG, "阅读模式切换背景失败", t)
+            KeydroidxLog.e(TAG,  "阅读模式切换背景失败", t)
         }
     }
 
     /**
      * 退出阅读模式。
      *
-     * 退出前先把拼页进展拉回来（见 [pullReadingProgress]）：已经读到别的章节时，按**普通浏览**
-     * 的语义直接导航到最后读到的那一章——地址栏、标签标题、URL 历史与「关掉浏览器下次启动
-     * 恢复」随之都停在第 59 章；只读了进入时那一章则就地还原 DOM（无刷新、保留滚动位置）。
+     * 退出前先把拼页进展拉回来（见 [pullReadingProgress]），然后按**普通浏览**的语义导航到
+     * 最后读到的那一章——地址栏、标签标题、URL 历史与「关掉浏览器下次启动恢复」随之都停在
+     * 那一章。
+     *
+     * 渲染隔离后这里**没有「原地还原 DOM」分支了**：WebView 停在 data 页外壳上，只有显式
+     * `loadUrl` 才能回到真实页面（只读了一章时 target == entryUrl，等价于重载一次源页面）。
      */
     private fun exitReadingMode() {
         val tabId = selectedTabId()
@@ -1110,20 +1447,21 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             updateTabMode()
             return
         }
-        val dispatched = pullReadingProgress(tabId, webView) { session ->
+        // 拉取失败（WebView 异常）时的兜底落点：会话里记着的最后章节
+        val fallbackTarget = readingModeTabs[tabId]?.let { it.lastUrl.ifBlank { it.entryUrl } }.orEmpty()
+        val dispatched = pullReadingProgress(tabId, webView, ReadingModeJs.progress(diag = true)) { session ->
             // 拉取是异步的：期间用户可能已经切走标签或又退了一次
             if (readingModeTabs.remove(tabId) == null) {
                 return@pullReadingProgress
             }
             updateBackPressedEnabled()
             updateTabMode()
-            val target = session.lastUrl.takeIf { it != session.entryUrl }
-            if (target == null) {
-                KeydroidxLog.d(TAG, "阅读模式退出：只读了进入时那一章，原地还原 DOM")
-                webView.evaluateJavascript(READING_JS_EXIT, null)
-                showReadingToast(getString(R.string.keyphone_reading_exit))
-                return@pullReadingProgress
-            }
+            KeydroidxLog.d(
+                TAG,
+                "退出阅读模式: 已读 ${session.chapterCount} 章 entry=${session.entryUrl}" +
+                    " last=${session.lastUrl} trail=${session.trail.size} ${describeReadingTab()}"
+            )
+            val target = session.lastUrl.ifBlank { session.entryUrl }
             KeydroidxLog.d(TAG, "阅读模式退出：已读 ${session.chapterCount} 章，导航到 $target")
             pendingTrailReassert = session.trail
             pendingTrailTargetUrl = target
@@ -1136,6 +1474,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             try {
                 // 走 WebView 原生导航（等价于普通浏览打开这一章）：标签 URL / 历史 / 会话快照
                 // 全部由既有链路接管，不做任何"暗改状态"
+                KeydroidxLog.d(TAG, "退出阅读模式导航: -> $target")
                 webView.loadUrl(target)
             } catch (t: Throwable) {
                 KeydroidxLog.e(TAG, "阅读模式退出导航失败: $target", t)
@@ -1146,11 +1485,20 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             )
         }
         if (!dispatched) {
-            // 拉取都没能发出去（WebView 异常）：直接按老路径原地还原，别把用户卡在阅读态
+            // 拉取都没能发出去（WebView 异常）：不能停在 data 页上，直接导航回会话里记着的章节
             readingModeTabs.remove(tabId)
             updateBackPressedEnabled()
             updateTabMode()
-            webView.evaluateJavascript(READING_JS_EXIT, null)
+            if (fallbackTarget.isNotBlank()) {
+                KeydroidxLog.w(TAG, "退出阅读模式：进展拉取失败，兜底导航到 $fallbackTarget")
+                try {
+                    webView.loadUrl(fallbackTarget)
+                } catch (t: Throwable) {
+                    KeydroidxLog.e(TAG, "退出阅读模式兜底导航失败: $fallbackTarget", t)
+                }
+            } else {
+                KeydroidxLog.w(TAG, "退出阅读模式：无兜底落点，仅清理阅读态")
+            }
             showReadingToast(getString(R.string.keyphone_reading_exit))
         }
     }
@@ -1163,6 +1511,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (readingModeTabs.isEmpty()) return
         val tabId = selectedTabId() ?: return
         if (readingModeTabs.remove(tabId) != null) {
+            KeydroidxLog.w(
+                TAG,
+                "阅读态被导航清掉（页面开始加载）: tabId=$tabId ${describeReadingTab()}"
+            )
             updateBackPressedEnabled()
         }
     }
@@ -1177,7 +1529,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private fun pullReadingProgress(
         tabId: Int,
         webView: WebView,
-        script: String = READING_JS_PROGRESS,
+        script: String = ReadingModeJs.progress(diag = false),
         onSynced: ((ReadingSession) -> Unit)? = null
     ): Boolean {
         if (!readingModeTabs.containsKey(tabId)) {
@@ -1186,7 +1538,21 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         return try {
             webView.evaluateJavascript(script) { rawResult ->
                 val session = readingModeTabs[tabId] ?: return@evaluateJavascript
-                val pages = parseReadingProgress(decodeJsString(rawResult))
+                val (progressText, diag, style) = ReadingModeJs.split(decodeJsString(rawResult))
+                if (diag.isNotEmpty()) {
+                    KeydroidxLog.d(TAG, "阅读 JS 现场: $diag")
+                }
+                if (style.isNotEmpty()) {
+                    KeydroidxLog.d(TAG, "阅读视觉现场: $style")
+                }
+                if (onSynced == null && progressText.isBlank() && diag.isBlank()) {
+                    // 阅读页已经被替换（WebView 被回收/重建后恢复成真实章节页或 about:blank）：
+                    // JS 侧的 __keyphone_rm__ 随页面一起消失。此时不能只是清掉阅读态了事——
+                    // 那正是「文字消失 → 被踢出阅读」的故障链。这里恢复到最后读的章节并自动重进。
+                    recoverReaderPage("按键拉取发现 __keyphone_rm__ 已消失 tabId=$tabId")
+                    return@evaluateJavascript
+                }
+                val pages = parseReadingProgress(progressText)
                 if (pages.isNotEmpty()) {
                     session.trail = pages
                 }
@@ -1306,23 +1672,38 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
     }
 
+    /**
+     * 视觉现场预检：进阅读模式（或怀疑出问题时）把主题 / 视口 / 阅读器几何打一次日志。
+     *
+     * 用户反馈「看着看着文字全部消失、只剩背景色」，而这条路原来只有拼页与滚动日志，
+     * 与「字看不见」直接相关的主题、滚动横向偏移、视口尺寸、阅读器节点几何一条都没有；
+     * 于是同样的问题复现后，日志里看不出到底是「内容没了」还是「内容被滚出了视口」还是
+     * 「主题切成了深底灰字」。这里补上，且只读不改页面。
+     *
+     * 注意：本方法在进阅读模式之前也会调用，那时页面里还没有 `__keyphone_rm__`，
+     * 打出来的是普通页面的状态（`theme=-1` 属正常）。
+     */
+    private fun probeReadingVisuals(webView: WebView, reason: String) {
+        try {
+            webView.evaluateJavascript(ReadingModeJs.styleProbe()) { rawResult ->
+                KeydroidxLog.d(TAG, "阅读视觉预检（$reason）: ${decodeJsString(rawResult)}")
+            }
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG,  "阅读视觉预检失败 reason=$reason", t)
+        }
+    }
+
     /** 阅读模式 JS 事件回调（已在主线程） */
     internal fun onReadingBridgeEvent(type: String, payload: String) {
+        KeydroidxLog.d(TAG, "阅读桥事件: $type ${payload.take(120)}")
         when (type) {
             "enter" -> KeydroidxLog.d(TAG, "阅读模式已进入，正文 ${payload} 字")
             "append" -> {
                 val page = payload.toIntOrNull() ?: 0
                 KeydroidxLog.d(TAG, "阅读模式已拼接第 $page 页")
-                showReadingToast(getString(R.string.keyphone_reading_appended, page))
             }
-            "end" -> {
-                KeydroidxLog.d(TAG, "阅读模式已到最后一页")
-                showReadingToast(getString(R.string.keyphone_reading_end))
-            }
-            "fail" -> {
-                KeydroidxLog.w(TAG, "阅读模式下一页加载失败: $payload")
-                showReadingToast(getString(R.string.keyphone_reading_page_failed))
-            }
+            "end" -> KeydroidxLog.d(TAG, "阅读模式已到最后一页")
+            "fail" -> KeydroidxLog.w(TAG, "阅读模式下一页加载失败: $payload")
             "link" -> {
                 // 阅读模式不参与跳转：正文里的残留链接（书名 / 作者 / 目录）被点击时
                 // 既不退出阅读态也不导航，避免误点后方向键回落到鼠标模式而"完全没反应"
@@ -1332,10 +1713,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 // 字号 / 背景不走桥（见 adjustReadingFont）：桥事件在部分 WebView 上收不到，
                 // 真收到说明该设备桥可用，此时忽略避免与脚本返回值重复提示
                 KeydroidxLog.d(TAG, "阅读模式忽略桥上的外观事件: type=$type payload=$payload")
-            "exit" -> {
-                KeydroidxLog.d(TAG, "阅读模式已退出")
-                showReadingToast(getString(R.string.keyphone_reading_exit))
-            }
+            "exit" -> KeydroidxLog.d(TAG, "阅读模式已退出")
             else -> KeydroidxLog.w(TAG, "未知的阅读模式事件: $type")
         }
     }
@@ -1378,6 +1756,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         val isThemeKey = digit == 7
         val isScrollKey = isUpKey || isDownKey || isDigitScroll
         if (!isScrollKey && !isHorizontalKey && !isConfirmKey && digit !in 1..9) {
+            // 阅读态下没被本函数消费的按键（软键 / 返回 / * # 菜单）会继续走分发链：
+            // 出问题时能据此判断「按键到底进了哪条分支」
+            KeydroidxLog.d(TAG, "阅读模式放行按键 keyCode=$keyCode repeat=${event.repeatCount}")
             return false
         }
         // 同键 UP/REPEAT 一律消费，避免穿透到 WebView 触发光标触摸或页面默认行为
@@ -1414,18 +1795,34 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     "阅读模式翻页 keyCode=$keyCode up=$scrollUp from=$fromY to=${webView.scrollY}" +
                         " step=$step content=$contentPx viewport=${webView.height} remain=$remaining"
                 )
+                // 阅读模式诊断：WebView 侧（滚动 / 内容高度）与外层壳的状态必须能对上，
+                // 黑屏事故第一件事就是确认「是页面滚不下去 / 拼页停了，还是壳本身出问题」
+                KeydroidxLog.d(
+                    TAG,
+                    "阅读翻页 wv: from=$fromY to=${webView.scrollY} content=$contentPx" +
+                        " viewport=${webView.height} remain=$remaining step=$step cur=${webView.url}" +
+                        " ${describeReadingTab()}"
+                )
                 if (tabId != null) {
-                    // 方向键滚动（WebView.scrollBy）不派发页面 scroll 事件：接近页尾时主动催 JS 拼接，
-                    // 否则会"翻到章尾后再也翻不动"。JS 侧有 loading / ended / 冷却守卫，重复调用无害。
-                    // 同一批脚本顺手把拼页进展拉回来（拼接是异步的，本次拿到的是上一键的进度，
-                    // 最后一次按键 / 退出时补齐），历史记录与退出落点都依赖它。
+                    // 连续阅读：阅读页内部按章追加文字（超出窗口才丢弃最早的章），边翻边续。
+                    // 方向键滚动（WebView.scrollBy）不派发页面 scroll 事件，所以接近页尾时
+                    // 主动催一次追加；JS 侧有 loading / ended / turning 守卫，重复调用无害。
+                    // 首次按键顺手把章节轨迹拉回来（历史记录与退出落点都依赖它）。
+                    val diag = event.repeatCount == 0
+                    // 页尾预读窗口与 JS 侧 PRE_READ_SCREENS 对齐（1.5 屏）
                     val nearTail = remaining <= (webView.height * READING_PRE_READ_RATIO).toInt()
                     when {
-                        !scrollUp && nearTail ->
-                            pullReadingProgress(tabId, webView, READING_JS_APPEND_PROGRESS)
+                        !scrollUp && nearTail -> {
+                            try {
+                                webView.evaluateJavascript(READING_JS_APPEND, null)
+                            } catch (t: Throwable) {
+                                KeydroidxLog.e(TAG, "阅读模式追加下一章失败", t)
+                            }
+                            pullReadingProgress(tabId, webView, ReadingModeJs.progress(diag = diag))
+                        }
 
                         event.repeatCount == 0 ->
-                            pullReadingProgress(tabId, webView, READING_JS_PROGRESS)
+                            pullReadingProgress(tabId, webView, ReadingModeJs.progress(diag = diag))
 
                         else -> Unit
                     }
@@ -1933,6 +2330,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private fun refreshCurrentPage() {
         if (isHomeSelected) {
             loadHomeData()
+        } else if (isReadingMode()) {
+            // 阅读页是 data 外壳：刷新它只会重放外壳（已拼的章节全丢，且仍停在 data 页上）。
+            // 按普通浏览语义处理 —— 退出阅读模式并导航回真实章节页。
+            KeydroidxLog.d(TAG, "阅读态刷新：改为退出阅读模式并回到真实章节页")
+            exitReadingMode()
         } else {
             clearReadingModeOnNavigation()
             presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
@@ -2948,6 +3350,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 // 退出阅读模式后的历史补写：等新章节页面加载完成（标题 / URL 都已上报）再覆盖
                 if (state.progress == 100) {
                     reassertTrailHistory()
+                    // 阅读页丢失恢复后的自动重进（见 [recoverReaderPage]）
+                    maybeReenterReading(state)
                 }
                 if (state.tabs.isEmpty()) {
                     isHomeSelected = true
@@ -2973,6 +3377,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 val displayUrlChanged = state.displayUrl != lastObservedDisplayUrl
                 val progressChanged = state.progress != lastObservedProgress
                 val pendingConsumed = hadPendingOpenUrl && pendingOpenUrl == null
+                logReadingStatePulse(state, tabsChanged, displayUrlChanged, progressChanged)
                 lastObservedTabs = state.tabs
                 lastObservedDisplayUrl = state.displayUrl
                 lastObservedProgress = state.progress
@@ -2997,6 +3402,349 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             }
         }
     }
+
+    // region 阅读模式黑屏诊断
+
+    /** 每帧状态脉冲最多打一条（tabs / url / progress 任一变化才算一帧，通常远低于 10 条/秒） */
+    private fun logReadingStatePulse(
+        state: BrowserViewState,
+        tabsChanged: Boolean,
+        displayUrlChanged: Boolean,
+        progressChanged: Boolean
+    ) {
+        if (!tabsChanged && !displayUrlChanged && !progressChanged) return
+        try {
+            val selected = state.tabs.firstOrNull { it.isSelected }
+            KeydroidxLog.d(
+                TAG,
+                "state: tabs=${state.tabs.size} tab=${state.tabs.indexOfFirst { it.isSelected }}" +
+                    "(${selected?.id}) progress=${state.progress} display=${state.displayUrl}" +
+                    " reading=${isReadingMode()} overlay=${activeMenuType}" +
+                    " pending=$pendingOpenUrl changed[tabs=$tabsChanged url=$displayUrlChanged" +
+                    " progress=$progressChanged]"
+            )
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "打印阅读模式状态日志失败", t)
+        }
+    }
+
+    /**
+     * 阅读模式现场采样（每 [READING_WATCH_INTERVAL_MS] 一次，仅 debug）。
+     *
+     * 用户反馈：「阅读模式滚一段距离后黑屏、界面全空；退出阅读模式发现它在加载页面且一直加载不出来」。
+     * 状态脉冲日志只有在 state 真的变化时才有输出，而事故现场很可能就是 WebView 卡在某个
+     * 导航上不再上报——那种时候日志会完全静默，排查无从下手。这里在阅读态、或页面正在加载时
+     * 定时采一次样：进度 / 遮罩 / 页面视图可见性 / WebView 的 url、progress、滚动位置、
+     * 可见性全部落盘；加载连续超过 [READING_STALL_MS] 时再抓一次 WebView 相关线程栈，
+     * 用来判断「一直加载不出来」卡在导航的哪一步。
+     *
+     * 另外 [detectBrokenReaderState] 会在识别出「阅读态无 WebView」「遮罩久挂」时立即打
+     * 一次 ERROR 级完整快照（会落盘），不必等用户察觉异常。
+     * release 构建不启动定时采样（与主线程看门狗同一策略）。
+     */
+    private fun installReadingWatchdog() {
+        // 不再限制 debug：release 包同样需要「自动识别异常并落盘」——
+        // 用户复现成本很高，不能因为包类型不同就丢掉现场。采样本身每 2 秒一次、只读几个
+        // 已缓存字段（不做同步跨进程调用），开销可忽略；详细采样日志在 release 下不会落盘
+        // （KeydroidxLog 默认只落 ERROR），但异常现场走 KeydroidxLog.e，一定会落盘。
+        val handler = Handler(Looper.getMainLooper())
+        val tick = object : Runnable {
+            override fun run() {
+                handler.postDelayed(this, READING_WATCH_INTERVAL_MS)
+                if (!isFinishing && !isDestroyed) {
+                    try {
+                        sampleReadingState()
+                    } catch (t: Throwable) {
+                        KeydroidxLog.e(TAG, "阅读模式现场采样失败", t)
+                    }
+                }
+            }
+        }
+        handler.postDelayed(tick, READING_WATCH_INTERVAL_MS)
+    }
+
+    /** 一次阅读模式现场采样（见 [installReadingWatchdog]） */
+    private fun sampleReadingState() {
+        val tabId = selectedTabId()
+        val inReading = tabId != null && readingModeTabs.containsKey(tabId)
+        val wv = currentWebView()
+        val loading = wv?.let {
+            try {
+                // progress < 100 即「导航已提交但首帧还没画完」；不再去碰 isLoading 之类
+                // 会跨进程同步取值的方法（弱机上这些同步调用本身就会堵主线程几秒）
+                it.progress < 100
+            } catch (t: Throwable) {
+                KeydroidxLog.e(TAG, "读取 WebView 加载状态失败", t)
+                false
+            }
+        }
+        // 阅读态下**无条件**采样（不再只在「加载中」才采）：黑屏时往往进度停在 100、
+        // WebView 也已不在，按旧判据会直接 return，恰恰错过要抓的现场
+        if (!inReading && loading != true) return
+        // 帧回调心跳：阅读态下即使日志里没有任何异常，也能发现「页面不再出帧」这种黑屏
+        probeReaderFrame()
+        val url = try {
+            wv?.url.orEmpty()
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "读取 WebView url 失败", t)
+            "<err>"
+        }
+        val detail = describeReadingTab()
+        val overlay = if (pageLoading != null && pageLoading!!.visibility == View.VISIBLE) {
+            "VISIBLE(${pageLoadingBusyMs()}ms)"
+        } else {
+            "GONE"
+        }
+        KeydroidxLog.d(
+            TAG,
+            "【阅读现场】$detail overlay=$overlay url=$url loading=$loading" +
+                " wvProgress=${wv?.progress} wvVis=${wv?.visibility}" +
+                " wvSize=${wv?.width}x${wv?.height} scrollY=${wv?.scrollY}" +
+                " canGoBack=${wv?.canGoBack()} contentPx=${wv?.let { (it.contentHeight * it.scale).toInt() }}" +
+                " host=${browserFrameHost?.visibility}"
+        )
+        // 只有「加载久挂」才抓线程栈（正常加载几秒内就结束，抓栈毫无意义且刷屏）：
+        // 连续 loading 超过阈值抓一次，之后最多每 2 个阈值时长补抓一次
+        if (loading == true) {
+            if (readingLoadingSince == 0L) {
+                readingLoadingSince = SystemClock.elapsedRealtime()
+                readingUrlAtLoadStart = url
+            }
+            val loadingMs = SystemClock.elapsedRealtime() - readingLoadingSince
+            if (loadingMs >= READING_STALL_MS &&
+                SystemClock.elapsedRealtime() - lastStackTraceAt >= READING_STALL_MS * 2
+            ) {
+                lastStackTraceAt = SystemClock.elapsedRealtime()
+                KeydroidxLog.e(
+                    TAG,
+                    "【阅读现场】加载已持续 ${loadingMs}ms 未结束 url=$url" +
+                        " 起始=$readingUrlAtLoadStart，WebView 线程栈:\n\t" + dumpWebViewThreads()
+                )
+            }
+        } else {
+            readingLoadingSince = 0L
+        }
+        // 阅读页丢失的主动检测：阅读态下 WebView 一定停在 data 页（getUrl()==about:blank，
+        // 见 [openReaderPage]）。若它变成了一个真实 http 页面（池回收/Activity 重建后恢复），
+        // 说明阅读页已经没了——不等用户按键，直接恢复。
+        if (inReading && wv != null && readerSettledAt != 0L &&
+            SystemClock.elapsedRealtime() - readerSettledAt > READER_SETTLE_GUARD_MS
+        ) {
+            val wvUrl = try {
+                wv.url.orEmpty()
+            } catch (t: Throwable) {
+                ""
+            }
+            if (wvUrl.startsWith("http")) {
+                recoverReaderPage("看门狗发现 WebView 已离开 data 页 url=$wvUrl")
+                return
+            }
+        }
+        detectBrokenReaderState(inReading, wv, overlay)
+    }
+
+    /**
+     * 自动识别「已经坏掉」的现场并立即打一次完整快照。
+     *
+     * 用户复现这个 bug 成本很高（要连续读很久），不能指望他察觉异常后再来喊人：
+     * 只要出现下面任一**明确异常**，就在这里立刻落一条 ERROR 日志（`KeydroidxLog.e` 会同时
+     * 落盘 + 生成待上传标记），把当时的全部状态固化下来，事后再看文件即可：
+     *
+     * 1. 处于阅读态但**当前标签已经没有 WebView** —— 渲染进程死亡后 WebView 被 destroy，
+     *    内容区空白且 `updatePageLoading` 会显示「正在打开…」，正是用户描述的症状；
+     * 2. 不透明遮罩（「正在打开…」）连续挂了超过 [BROKEN_OVERLAY_MS]；
+     * 3. 阅读态下页面进度长期卡在 <100 且没有推进（导航卡死）。
+     *
+     * 每种情况每次「故障窗口」只报一次（[brokenReported]），避免刷屏与配额浪费。
+     */
+    private fun detectBrokenReaderState(inReading: Boolean, webView: WebView?, overlay: String) {
+        val now = SystemClock.elapsedRealtime()
+        val overlayVisible = overlay.startsWith("VISIBLE")
+        val overlayMs = pageLoadingBusyMs()
+        val reason = when {
+            inReading && webView == null -> "阅读态但无 WebView（渲染进程可能已死亡）"
+            overlayVisible && overlayMs >= BROKEN_OVERLAY_MS ->
+                "「正在打开」遮罩已挂 ${overlayMs}ms"
+            else -> null
+        }
+        if (reason == null) {
+            brokenReported = false
+            return
+        }
+        if (brokenReported) return
+        brokenReported = true
+        KeydroidxLog.e(
+            TAG,
+            "【阅读异常现场】$reason | ${describeReadingTab()} | overlay=$overlay" +
+                " | 阅读会话=${readingModeTabs.keys} 章数=${readingModeTabs[selectedTabId()]?.chapterCount}" +
+                " | 最近章节=${readingModeTabs[selectedTabId()]?.lastUrl}" +
+                " | 遮罩=${pageLoading?.visibility} 内容区=${contentFrame?.childCount} 子View" +
+                " | 主线程栈:\n\t" +
+                Looper.getMainLooper().thread.stackTrace.take(READING_STACK_FRAMES)
+                    .joinToString("\n\t")
+        )
+        // 现场再补一次 JS 侧状态（可能因 WebView 已死而失败，失败本身也是证据）
+        currentWebView()?.let { wv ->
+            try {
+                wv.evaluateJavascript(ReadingModeJs.progress(diag = true)) { raw ->
+                    val (_, diag, style) = ReadingModeJs.split(decodeJsString(raw))
+                    KeydroidxLog.e(TAG, "【阅读异常现场】JS diag=$diag style=$style")
+                }
+            } catch (t: Throwable) {
+                KeydroidxLog.w(TAG, "【阅读异常现场】取 JS 状态失败（WebView 可能已不可用）", t)
+            }
+        }
+        // 记录本次异常发生时刻，供事后与系统侧日志（excessive cpu / 杀进程）对齐
+        KeydroidxLog.e(TAG, "【阅读异常现场】时间戳=${System.currentTimeMillis()} uptime=$now")
+        // 识别到故障后立即尝试自动恢复（见 recoverBrokenReader）：用户复现成本极高，
+        // 不能只落日志等人工。恢复带冷却，避免循环。
+        recoverBrokenReader(reason)
+    }
+
+    /**
+     * 阅读模式故障自动恢复（最后一道防线）。
+     *
+     * 触发条件见 [detectBrokenReaderState] 与 [probeReaderFrame]：
+     * - 渲染进程死亡后 WebView 未能重建（[webView] 修复后理论上不再发生，留作兜底）；
+     * - 「正在打开」遮罩久挂；
+     * - 帧回调长期不回（合成卡住，文字消失成背景色）—— 这是用户描述的头号症状，
+     *   主线程活、按键响、DOM 在，就是不出帧，只能强制重载逼渲染管线重来。
+     *
+     * 恢复动作：清掉阅读态（死态下 `exitReadingMode` 走不通，它要 evaluate JS），
+     * 然后——WebView 还活着就原地刷新当前标签（[RefreshOrStopClick]，会让卡住的合成
+     * 管线重新提交导航）；WebView 已死就新开一个标签载入最后读到的那一章
+     * （[Action.LoadUrl]，会从池里重建 WebView）。冷却 [READER_RECOVER_COOLDOWN_MS]，
+     * 防止反复触发开一堆标签。
+     */
+    private fun recoverBrokenReader(reason: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastReaderRecoverAt < READER_RECOVER_COOLDOWN_MS) {
+            KeydroidxLog.w(
+                TAG,
+                "【阅读现场】自动恢复在冷却中，跳过 reason=$reason 距上次=${now - lastReaderRecoverAt}ms"
+            )
+            return
+        }
+        lastReaderRecoverAt = now
+        val tabId = selectedTabId()
+        val session = tabId?.let { readingModeTabs[it] }
+        val lastUrl = session?.lastUrl?.takeIf { it.isNotBlank() }
+        // 重置帧心跳，避免恢复后旧回调没回仍报“停滞”
+        readerFramePending = false
+        readerFrameRequestedAt = 0L
+        KeydroidxLog.e(
+            TAG,
+            "【阅读现场】触发自动恢复 reason=$reason tabId=$tabId" +
+                " lastUrl=$lastUrl wv=${currentWebView() != null} ${describeReadingTab()}"
+        )
+        // 清阅读态：exitReadingMode 依赖 WebView，死态下会提前 return；这里直接清，
+        // 让 back 键 / 标签模式恢复正常，并防止 sampleReadingState 继续按“阅读态”采样
+        if (tabId != null) readingModeTabs.remove(tabId)
+        updateBackPressedEnabled()
+        updateTabMode()
+        val wv = currentWebView()
+        if (wv != null) {
+            // WebView 还活着（多是合成卡住）：原地刷新当前标签，逼渲染管线重新提交一帧
+            clearReadingModeOnNavigation()
+            presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
+        } else if (lastUrl != null) {
+            // WebView 已死且重建失败：新开一个标签载入最后读到的那一章
+            // （Action.LoadUrl 会 createNewTabAndSelect，从池里取全新 WebView）
+            presenter.onEvent(BrowserUiEvent.NewAction(BrowserContract.Action.LoadUrl(lastUrl)))
+        } else {
+            // 既无 WebView 也拿不到 lastUrl：刷新当前标签，交给渲染进程死亡回调链路自行重建
+            presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
+        }
+    }
+
+    /** 已就当前故障窗口报过一次异常现场（恢复后复位） */
+    private var brokenReported = false
+
+    /** 当前 WebView 连续处于 isLoading 的起点（0 = 没有在加载） */
+    private var readingLoadingSince = 0L
+
+    /** 本次「加载久挂」开始时的 URL（判断是否跳转到了别处） */
+    private var readingUrlAtLoadStart = ""
+
+    /** 上次抓线程栈的时刻（避免每 2 秒刷一遍栈） */
+    private var lastStackTraceAt = 0L
+
+    /** 把 WebView 相关线程（含 chromium 线程池）的栈抓出来，用于「一直加载不出来」定位 */
+    private fun dumpWebViewThreads(): String {
+        val builder = StringBuilder()
+        for (thread in Thread.getAllStackTraces().entries) {
+            val name = thread.key.name
+            if (name.contains("chromium", ignoreCase = true) ||
+                name.contains("JavaBridge", ignoreCase = true) ||
+                name == Looper.getMainLooper().thread.name
+            ) {
+                builder.append("\n[thread] ").append(name).append('\n')
+                thread.value.take(READING_STACK_FRAMES).forEach { frame ->
+                    builder.append("\t").append(frame).append('\n')
+                }
+            }
+        }
+        return if (builder.isEmpty()) "<无 WebView 相关线程>" else builder.toString()
+    }
+
+    /**
+     * WebView 帧回调心跳（API 23+ 的 `postVisualStateCallback`，回调运行在 UI 线程）。
+     *
+     * 「看着看着文字全部消失、只剩背景色」最麻烦的一种形态是：主线程活着、按键有响应、
+     * 页面 DOM 也在，但**合成不出帧**——这时日志里一行异常都没有，只有屏幕是空的。
+     * 这里每 2 秒让 WebView 出一帧并要求一次回调：回调超过 3 秒没回来就说明帧管线停了，
+     * 直接落一条 ERROR 日志（单独 tag，方便从别的日志里一眼捞出来）。
+     */
+    private fun probeReaderFrame() {
+        val webView = currentWebView() ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (readerFramePending) {
+            // 上一次请求还没回调：说明这段时间 WebView 没产出可用的帧
+            val waited = now - readerFrameRequestedAt
+            if (waited >= READER_FRAME_STALL_MS && now - readerFrameLastLogAt >= READER_FRAME_STALL_MS) {
+                readerFrameLastLogAt = now
+                KeydroidxLog.e(
+                    TAG,
+                    "【阅读现场】帧回调已等待 ${waited}ms 未返回（页面可能不再出帧 / 合成卡住）" +
+                        " ${describeReadingTab()}"
+                )
+            }
+            // 帧管线停得太久（远超“慢一帧”的合理范围）= 文字消失成背景色，强制恢复
+            if (waited >= READER_FRAME_RECOVER_MS) {
+                recoverBrokenReader("帧回调停滞 ${waited}ms 未返回")
+            }
+            return
+        }
+        readerFramePending = true
+        readerFrameRequestedAt = now
+        try {
+            webView.postVisualStateCallback(
+                now and 0x7FFFFFFF,
+                object : WebView.VisualStateCallback() {
+                    override fun onComplete(requestId: Long) {
+                        readerFramePending = false
+                    }
+                }
+            )
+        } catch (t: Throwable) {
+            readerFramePending = false
+            KeydroidxLog.e(TAG, "阅读模式帧回调请求失败", t)
+        }
+    }
+
+    /** 是否有未回来的帧回调（未回来 = 这段时间内没有合成出帧） */
+    private var readerFramePending = false
+
+    /** 当前帧回调请求发出的时刻 */
+    private var readerFrameRequestedAt = 0L
+
+    /** 「帧停滞」日志的节流时间戳 */
+    private var readerFrameLastLogAt = 0L
+
+    /** 上次自动恢复触发时刻（[recoverBrokenReader] 冷却用） */
+    private var lastReaderRecoverAt = 0L
+
+    // endregion
 
     private fun applyProgress(progress: Int) {
         val bar = progressBar ?: return
@@ -3114,7 +3862,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     private fun addCurrentPageToHome() {
-        val url = currentWebView()?.url.orEmpty()
+        // 阅读态下 WebView 的 getUrl() 是 about:blank，必须用会话里记着的真实章节 URL
+        val url = currentRealUrl()
         if (url.isBlank() || url.isSpecialUrl()) {
             Toast.makeText(this, R.string.keyphone_add_home_failed, Toast.LENGTH_SHORT).show()
             return
@@ -4438,10 +5187,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             KeyphoneOptionsActivity.ACTION_NEW_TAB -> switchToHome()
             KeyphoneOptionsActivity.ACTION_NEW_INCOGNITO_TAB ->
                 menuClick(MenuSelection.NEW_INCOGNITO_TAB)
-            KeyphoneOptionsActivity.ACTION_REFRESH -> {
-                clearReadingModeOnNavigation()
-                presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
-            }
+            // 统一走 refreshCurrentPage：阅读态下它会退出阅读模式并回到真实章节页，
+            // 直接 RefreshOrStopClick 只会重放 data 外壳
+            KeyphoneOptionsActivity.ACTION_REFRESH -> refreshCurrentPage()
             KeyphoneOptionsActivity.ACTION_STOP -> presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
             KeyphoneOptionsActivity.ACTION_SHARE -> menuClick(MenuSelection.SHARE)
             KeyphoneOptionsActivity.ACTION_COPY_LINK -> menuClick(MenuSelection.COPY_LINK)
@@ -4463,6 +5211,34 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             updateTabMode()
         }
         presenter.onEvent(BrowserUiEvent.MenuClick(selection))
+    }
+
+    /** 黑屏排查：阅读模式下的帧心跳（见 [installReadingFrameWatchdog]） */
+    private val readingFrameWatchdogHandler = Handler(Looper.getMainLooper())
+
+    private val readingFrameWatchdogTick = object : Runnable {
+        override fun run() {
+            readingFrameWatchdogHandler.postDelayed(this, READER_WATCHDOG_INTERVAL_MS)
+            try {
+                if (!isFinishing && !isDestroyed && isReadingMode()) {
+                    probeReaderFrame()
+                }
+            } catch (t: Throwable) {
+                KeydroidxLog.e(TAG, "阅读帧心跳异常", t)
+            }
+        }
+    }
+
+    /**
+     * 启动阅读模式帧心跳：阅读态下每 3 秒探一次 WebView 是否还在出帧。
+     *
+     * 「看着看着文字全部消失、只剩背景色」最棘手的一种形态是主线程活着、按键有响应、
+     * DOM 也在，但**合成不出帧**——这种时候日志里没有任何异常，只有屏幕是空的。
+     * 本心跳只在帧回调真的迟迟不返回时才落一条 ERROR 日志，平时没有任何日志输出。
+     */
+    private fun installReadingFrameWatchdog() {
+        readingFrameWatchdogHandler.removeCallbacks(readingFrameWatchdogTick)
+        readingFrameWatchdogHandler.postDelayed(readingFrameWatchdogTick, READER_WATCHDOG_INTERVAL_MS)
     }
 
     private fun confirmExit() {
@@ -4489,6 +5265,86 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     override fun showFileChooser(intent: Intent) {
         fileChooserLauncher.launch(intent)
+    }
+
+    /**
+     * 阅读模式脚本片段。
+     *
+     * 进展与诊断**同一次** evaluateJavascript 取回：脚本返回 `进展\n\n@@diag@@ <诊断串>`，
+     * 解析前先按分隔符把诊断行摘掉（[parseReadingProgress] 只认 http 开头的行，但标题里若出现
+     * 换行仍会串行，故显式剥离）。诊断只读，不改变拼页行为，也没有副作用。
+     */
+    private object ReadingModeJs {
+
+        private const val DIAG_MARK = "@@diag@@"
+
+        /** 视觉现场标记：主题 / 视口 / 阅读器几何（见 [STYLE_FN]） */
+        private const val STYLE_MARK = "@@style@@"
+
+        /**
+         * 进入阅读模式第 1 步：只装 API（`__keyphone_rm_noenter__`）不渲染，然后在源页面上做
+         * 一次只读提取（见 [KeyphoneReadingMode.js] 的 `extract()`）。
+         *
+         * 返回值是一段 JSON 字符串（evaluateJavascript 会再套一层 JSON 字面量，调用方先 decode）。
+         */
+        fun extractScript(readerJs: String): String =
+            "window.__keyphone_rm_noenter__=true;\n" + readerJs + "\n" + EXTRACT_CALL
+
+        private const val EXTRACT_CALL =
+            "(function(){var r=window.__keyphone_rm__;return r&&r.extract?r.extract():null;})()"
+
+        /** 只回传章节轨迹（不改动页面） */
+        fun progress(diag: Boolean): String =
+            COLLECT_FN + STYLE_FN +
+                "(function(){var r=window.__keyphone_rm__;return collect(r, $diag);})()"
+
+        /**
+         * 取数函数：拼页进展（每行一章）+ 可选的阅读模式诊断（见 [KeyphoneReadingMode.js] 的 diag()）。
+         * 以函数声明写在脚本开头，等价于一个语句后再执行 IIFE，不污染全局变量。
+         */
+        private const val COLLECT_FN =
+            "function collect(r,d){var p=r&&r.progress?r.progress():'';if(!d)return p;" +
+                "var g=r&&r.diag?r.diag():'';" +
+                "var s='';try{s=styleProbe();}catch(e){s='probe-error:'+e;}" +
+                "return p+'\\n$DIAG_MARK '+g+'\\n$STYLE_MARK '+s;}\n"
+
+        /**
+         * 视觉现场取数：与「文字消失只剩背景色」直接相关、又不会出现在 logcat 里的状态。
+         *
+         * - 主题：夜间黑/夜间灰主题本身就是深色底 + 浅灰字，主题被切错时正文会「看起来消失」；
+         * - 视口与滚动：阅读器用 `window.scrollTo/scrollBy` 翻页，横向滚走或页面尺寸异常时
+         *   内容会被带出可视区，结果就是满屏背景色；
+         * - 阅读器根节点与正文的几何：区分「DOM 真的没内容」和「有内容但不在视口里」。
+         */
+        private const val STYLE_FN =
+            "function styleProbe(){var r=window.__keyphone_rm__;" +
+                "var t=r&&r.themeIndex?r.themeIndex():-1;" +
+                "var d=document.documentElement,b=document.body;" +
+                "var bg='?';try{bg=window.getComputedStyle(b).backgroundColor;}catch(e){}" +
+                "var st=document.getElementById('__keyrm_style__');" +
+                "var m=/background:(#[0-9A-Fa-f]{3,6})/.exec(st?st.textContent:'');" +
+                "var root=document.getElementById('__keyrm_root__');" +
+                "var rr=root?root.getBoundingClientRect():null;" +
+                "return 'theme='+t+' cssBg='+(m?m[1]:'-')+' bodyBg='+bg+" +
+                "' scrollX='+Math.round(window.pageXOffset||0)+" +
+                "' scrollY='+Math.round(window.pageYOffset||0)+" +
+                "' vw='+d.clientWidth+' vh='+d.clientHeight+' docH='+d.scrollHeight+" +
+                "' rootTop='+(rr?Math.round(rr.top):'-')+' rootH='+(rr?Math.round(rr.height):'-')+" +
+                "' textLen='+(root?String(root.textContent||'').replace(/\\s+/g,'').length:'-');}\n"
+
+        /** 单独取一次视觉现场（进阅读模式前预检用，见 [probeReadingVisuals]） */
+        fun styleProbe(): String = STYLE_FN + "(function(){return styleProbe();})()"
+
+        /** 从脚本返回值里拆出（进展, 诊断, 视觉现场）；返回值的引号由调用方先 decode */
+        fun split(raw: String): Triple<String, String, String> {
+            val diagIndex = raw.indexOf(DIAG_MARK)
+            val progressText = if (diagIndex < 0) raw else raw.substring(0, diagIndex)
+            val rest = if (diagIndex < 0) "" else raw.substring(diagIndex + DIAG_MARK.length)
+            val styleIndex = rest.indexOf(STYLE_MARK)
+            val diag = if (styleIndex < 0) rest else rest.substring(0, styleIndex)
+            val style = if (styleIndex < 0) "" else rest.substring(styleIndex + STYLE_MARK.length)
+            return Triple(progressText.trimEnd('\n'), diag.trim(), style.trim())
+        }
     }
 
     companion object {
@@ -4557,21 +5413,36 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         /** 阅读模式：退出脚本（等价 window.__keyphone_rm__.exit()） */
         private const val READING_JS_EXIT = "window.__keyphone_rm__ && window.__keyphone_rm__.exit();"
 
-        /** 阅读模式：主动催拼接 + 顺手回传拼页进展（见 [pullReadingProgress]） */
-        private const val READING_JS_APPEND_PROGRESS =
-            "(function(){var r=window.__keyphone_rm__;if(r&&r.append)r.append();" +
-                "return r&&r.progress?r.progress():'';})()"
+        /** 阅读模式：阅读页是否已经跑起来（见 [verifyReaderBoot]） */
+        private const val READER_JS_IS_ACTIVE =
+            "(function(){try{var r=window.__keyphone_rm__;return !!(r&&r.isActive&&r.isActive());}" +
+                "catch(e){return false;}})()"
 
-        /** 阅读模式：只回传拼页进展（不改动页面） */
-        private const val READING_JS_PROGRESS =
-            "(function(){var r=window.__keyphone_rm__;" +
-                "return r&&r.progress?r.progress():'';})()"
+        /**
+         * 干净阅读页外壳的 viewport（须与 `KeyphoneReadingMode.js` 的 `READER_VIEWPORT` 一致）。
+         * 外壳里先摆上，避免脚本执行前页面按 980px 排版再缩放，出现一次闪烁。
+         */
+        private const val READER_VIEWPORT =
+            "width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"
+
+        /** 阅读页就绪检查的首次延时：外壳是本地页面，正常几百毫秒内脚本已经跑完 */
+        private const val READER_BOOT_CHECK_MS = 350L
+
+        /** 阅读页就绪检查最多重试次数，之后判定外壳启动失败并导航回章节页 */
+        private const val READER_BOOT_RETRIES = 4
+
+        /** 阅读页就绪后的静默窗口：窗口内不做「阅读页丢失」判定（避开局载入/渲染抖动） */
+        private const val READER_SETTLE_GUARD_MS = 3000L
 
         /** 阅读模式：按键 7 轮换背景主题（脚本返回新序号，字号脚本按 Δ 现拼） */
         private const val READING_JS_THEME = "window.__keyphone_rm__ && window.__keyphone_rm__.theme();"
 
-        /** 阅读模式：距页尾小于「视口高度 × 该系数」时主动催拼接（与 JS 侧预读窗口对齐） */
-        private const val READING_PRE_READ_RATIO = 1.4f
+        /** 阅读模式：在页尾追加下一章文字（JS 侧有 loading / ended / turning 守卫） */
+        private const val READING_JS_APPEND =
+            "window.__keyphone_rm__ && window.__keyphone_rm__.append && window.__keyphone_rm__.append();"
+
+        /** 页尾预读窗口（视口高度 × 该系数，须与 JS 侧 PRE_READ_SCREENS 一致） */
+        private const val READING_PRE_READ_RATIO = 1.5f
 
         /** 阅读模式：退出后补写历史的最小间隔（避开导航刚开始那一瞬的 URL / 进度错位） */
         private const val READING_TRAIL_MIN_GAP_MS = 1000L
@@ -4582,6 +5453,34 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         /** 阅读模式：方向键单次翻页步长（占 WebView 可见高度比例） */
         private const val READING_SCROLL_STEP_RATIO = 0.85f
 
+        /** 「页面正在打开」超时兜底（见 [armPendingOpenWatchdog]）：正常 1.5s 内就能确认 */
+        private const val PENDING_OPEN_TIMEOUT_MS = 6000L
+
+        /** 阅读模式现场采样间隔（仅 debug，见 [installReadingWatchdog]） */
+        private const val READING_WATCH_INTERVAL_MS = 2000L
+
+        /** 导航超过此时长仍未结束即视为「卡在加载中」，抓一次线程栈 */
+        private const val READING_STALL_MS = 8000L
+
+        /** 抓线程栈时每个线程最多保留多少帧 */
+        private const val READING_STACK_FRAMES = 20
+
+        /** 帧回调超过此时长未返回即判定「页面不再出帧」（见 [probeReaderFrame]） */
+        private const val READER_FRAME_STALL_MS = 3000L
+
+        /** 帧回调停滞超过此时长即触发自动恢复（见 [recoverBrokenReader]）：
+         *  远大于 [READER_FRAME_STALL_MS] 的告警阈值，避免把弱机偶发的慢帧当成“合成卡死” */
+        private const val READER_FRAME_RECOVER_MS = 15000L
+
+        /** 自动恢复的最短间隔（见 [recoverBrokenReader]）：防止故障现场反复触发开一堆标签 */
+        private const val READER_RECOVER_COOLDOWN_MS = 30000L
+
+        /** 「正在打开」遮罩挂超过此时长即判定异常并抓现场（见 [detectBrokenReaderState]） */
+        private const val BROKEN_OVERLAY_MS = 10000L
+
+        /** 阅读模式帧心跳间隔（见 [installReadingFrameWatchdog]） */
+        private const val READER_WATCHDOG_INTERVAL_MS = 3000L
+
         /** 网页输入劫持探测参数：确认键抬起后 120ms 首探，失败最多重试 3 次（间隔 300ms） */
         private const val WEB_INPUT_PROBE_FIRST_MS = 120L
         private const val WEB_INPUT_PROBE_RETRY_MS = 300L
@@ -4590,3 +5489,4 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         private val PAYLOAD_SEARCH = Any()
     }
 }
+

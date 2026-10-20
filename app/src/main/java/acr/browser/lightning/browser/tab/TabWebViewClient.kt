@@ -18,6 +18,7 @@ import acr.browser.lightning.ssl.SslState
 import acr.browser.lightning.ssl.SslWarningPreferences
 import acr.browser.lightning.utils.ThreadSafeFileProvider
 import acr.browser.lightning.utils.isSpecialUrl
+import io.github.cctyl.nokia.common.log.KeydroidxLog
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.net.Uri
@@ -29,6 +30,7 @@ import android.view.LayoutInflater
 import android.webkit.HttpAuthHandler
 import android.webkit.SslErrorHandler
 import android.webkit.URLUtil
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -207,6 +209,13 @@ class TabWebViewClient @AssistedInject constructor(
     /** 已在 shouldInterceptRequest 阶段掐死的 URL（时间戳）：onPageStarted 不再重复学习。 */
     private val blockedRequestUrls = HashMap<String, Long>()
 
+    /** 最近一次 onPageStarted 的时刻（0 = 当前没有在途导航），用于「一直加载不出来」定位。 */
+    private var navigationStartedAt: Long = 0L
+
+    /** 最近一次 onPageFinished 的时刻 / URL：新导航与它的间隔能看出是不是导航链卡住了。 */
+    private var lastFinishedAt: Long = 0L
+    private var lastFinishedUrl: String = ""
+
     /** 标记一次用户手势导航（仅 [USER_NAV_TTL_MS] 内有效）。 */
     private fun markUserInitiated(url: String) {
         synchronized(this) {
@@ -332,7 +341,14 @@ class TabWebViewClient @AssistedInject constructor(
 
     override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
-        logger.log(TAG, "onPageStarted: url=$url current=$currentUrl")
+        navigationStartedAt = SystemClock.elapsedRealtime()
+        // 上游注入的 Logger 在 release 构建下是 NoOpLogger（完全不输出），导航现场因此只剩
+        // logcat——而本机型 logcat 只有 256 KiB，十几分钟就被系统日志冲掉。故这里同时走
+        // 生态标准 KeydroidxLog（落盘见 BrowserApp.onCreate 的 init）。
+        val started = "onPageStarted: url=$url current=$currentUrl lastFinished=$lastFinishedUrl" +
+            " sinceFinished=${if (lastFinishedAt == 0L) "-" else "${navigationStartedAt - lastFinishedAt}ms"}"
+        logger.log(TAG, started)
+        KeydroidxLog.d(TAG, started)
 
         // 按键机站内跳转拦截兜底：302 重定向 / 同域中转不经过 shouldOverrideUrlLoading，
         // 页面已提交时在此做最终把关。两类命中：
@@ -387,7 +403,16 @@ class TabWebViewClient @AssistedInject constructor(
 
     override fun onPageFinished(view: WebView, url: String) {
         super.onPageFinished(view, url)
-        logger.log(TAG, "onPageFinished: url=$url")
+        val now = SystemClock.elapsedRealtime()
+        val startedAt = navigationStartedAt
+        navigationStartedAt = 0L
+        lastFinishedAt = now
+        lastFinishedUrl = url
+        KeydroidxLog.d(
+            TAG,
+            "onPageFinished: url=$url elapsed=${if (startedAt == 0L) "-" else "${now - startedAt}ms"}" +
+                " progress=${view.progress}"
+        )
         tabCoroutineScope.launch {
             urlSharedFlow.emit(url)
             goBackSharedFlow.emit(view.canGoBack())
@@ -404,6 +429,44 @@ class TabWebViewClient @AssistedInject constructor(
         })
     }
 
+
+    /**
+     * 主帧加载错误：上游没有覆写 `onReceivedError`，于是「页面一直加载不出来」时日志里
+     * 只剩一个 onPageStarted 后面永远没有 onPageFinished —— 是网络错、DNS 错还是被拦截，
+     * 完全看不出来。阅读模式退出时会 `loadUrl(最后一章)`，这条链路一旦失败就是用户看到的
+     * 「退出阅读模式后一直加载不出来」，因此这里把错误码 / 描述 / 失败 URL 全部落盘。
+     */
+    override fun onReceivedError(
+        view: WebView,
+        request: WebResourceRequest,
+        error: WebResourceError
+    ) {
+        // WebResourceError.errorCode / description 是 API 23 才有的；minSdk 24 下直接调用即可
+        val description = "${error.errorCode} ${error.description}"
+        // 加载失败属于「影响功能」的异常，用 warn：release 下不落盘但不会污染错误上报配额
+        KeydroidxLog.w(
+            TAG,
+            "onReceivedError: main=${request.isForMainFrame} url=${request.url}" +
+                " error=$description current=$currentUrl"
+        )
+        super.onReceivedError(view, request, error)
+    }
+
+    override fun onReceivedHttpError(
+        view: WebView,
+        request: WebResourceRequest,
+        errorResponse: WebResourceResponse
+    ) {
+        // 子资源 404 太吵，只关心主帧的状态码
+        if (request.isForMainFrame) {
+            KeydroidxLog.w(
+                TAG,
+                "onReceivedHttpError: url=${request.url} status=${errorResponse.statusCode}" +
+                    " reason=${errorResponse.reasonPhrase} current=$currentUrl"
+            )
+        }
+        super.onReceivedHttpError(view, request, errorResponse)
+    }
 
     override fun onScaleChanged(view: WebView, oldScale: Float, newScale: Float) {
         if (view.isShown && tabSettings.textReflowEnabled) {

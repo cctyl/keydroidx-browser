@@ -27,6 +27,7 @@ import android.os.Bundle
 import android.os.Message
 import android.os.SystemClock
 import android.util.Log
+import io.github.cctyl.nokia.common.log.KeydroidxLog
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
@@ -61,6 +62,12 @@ import kotlin.time.Duration.Companion.milliseconds
 
 /** 进度上报量化步进（百分比），见 init 块 progressSharedFlow 收集处的节流注释。 */
 private const val PROGRESS_UI_STEP = 5
+
+/**
+ * 渲染进程死亡后重载的「是否真的出帧」验证延时（见 verifyReloadedPageRenders）。
+ * 取 6 秒：本机型首屏实测 1.5s+，重载后还要重建渲染进程，留足余量避免误报。
+ */
+private const val RELOAD_VERIFY_DELAY_MS = 6000L
 
 /**
  * Creates the adaptation between a [WebView] and the [TabModel] interface used by the browser.
@@ -194,15 +201,81 @@ class TabAdapter @AssistedInject constructor(
             } else {
                 true
             }
-            Log.w(
+            val deadUrl = urlStateFlow.value
+            KeydroidxLog.w(
                 "TabAdapter",
-                "渲染进程死亡 tab=$id didCrash=$didCrash url=${urlStateFlow.value}"
+                "渲染进程死亡 tab=$id didCrash=$didCrash url=$deadUrl"
             )
-            _acquiredWebView = null
+            // 不再直接 `_acquiredWebView = null`：那样尸体仍留在池的 deque 里，后续某次 acquire
+            // 把它 removeLast().release() 时会触发它注册的 awaitRelease→freeze，把刚重建的替换
+            // WebView 一起 destroy（日志实证 "重载后仍无 WebView"）。改为只置 rendererDead 标记，
+            // 让 webView() 在重建时先把尸体从池里摘掉再 acquire 全新的（见 webView()）。
+            rendererDead = true
             // 先摘除再 destroy：attached 状态 destroy 会撕裂 AwContents（destroy while attached 警告）
             runCatching { (view.parent as? ViewGroup)?.removeView(view) }
             runCatching { view.destroy() }
+            // 关键：渲染进程死亡后必须**重新加载**，否则该标签再也没有 WebView：
+            // 内容区空白、progressStateFlow 停在旧值，宿主 updatePageLoading 在
+            // webView == null 时无条件显示「正在打开…」遮罩 —— 用户看到的就是
+            // 「字全部消失 + 一直卡在正在打开」。这正是 2026-10-19 21:13 那次
+            // （渲染进程被系统按 excessive cpu 杀掉）之后的形态。
+            if (deadUrl.isNotBlank()) {
+                tabCoroutineScope.launch {
+                    try {
+                        // webView() 检测到 rendererDead 会先把尸体从池中移除、再 acquire 全新 WebView
+                        // 并 addView 进 TabPager；loadUrl 会在新 WebView 上导航到 deadUrl。
+                        // 不直接 selectTab：loadUrl 内部在 priority==HIGH 时会 selectTab 把新 WebView
+                        // 挂到 browserFrame，保证 currentWebView() 能取到。
+                        loadUrl(deadUrl)
+                        KeydroidxLog.w("TabAdapter", "渲染进程死亡后已重新加载 tab=$id url=$deadUrl")
+                        verifyReloadedPageRenders(deadUrl)
+                    } catch (t: Throwable) {
+                        KeydroidxLog.e("TabAdapter", "渲染进程死亡后重新加载失败 tab=$id url=$deadUrl", t)
+                    }
+                }
+            }
             true // 返回 false 系统会连 App 进程一起杀；返回 true 由宿主接管（下次 webView() 重建）
+        }
+    }
+
+    /**
+     * 重载后确认页面**真的渲染出来了**（不是只有进度 100）。
+     *
+     * 实测：渲染进程被杀后重新 `loadUrl`，`onPageFinished progress=100` 正常上报，
+     * 但画面可能是空的（WebView 重建后首帧合成失败 / 站点脚本因缺状态而渲染失败）。
+     * 这种情况下用户看到的就是「一直空白」，日志却全是正常值。
+     * 这里在重载后请求一次 `postVisualStateCallback`：回调不回来说明没出帧，落 ERROR；
+     * 回调回来了再补一条成功日志，两种结果都能在文件里查到。
+     */
+    private fun verifyReloadedPageRenders(url: String) {
+        tabCoroutineScope.launch {
+            kotlinx.coroutines.delay(RELOAD_VERIFY_DELAY_MS)
+            val view = webViewIfInitialized() ?: run {
+                KeydroidxLog.e("TabAdapter", "重载后仍无 WebView tab=$id url=$url")
+                return@launch
+            }
+            var frameSeen = false
+            try {
+                view.postVisualStateCallback(RELOAD_VERIFY_DELAY_MS, object : WebView.VisualStateCallback() {
+                    override fun onComplete(requestId: Long) {
+                        frameSeen = true
+                    }
+                })
+            } catch (t: Throwable) {
+                KeydroidxLog.e("TabAdapter", "重载后帧回调请求失败 tab=$id url=$url", t)
+                return@launch
+            }
+            kotlinx.coroutines.delay(RELOAD_VERIFY_DELAY_MS)
+            if (frameSeen) {
+                KeydroidxLog.w("TabAdapter", "重载后已出帧 tab=$id url=$url")
+            } else {
+                KeydroidxLog.e(
+                    "TabAdapter",
+                    "重载后未出帧（画面可能是空白） tab=$id url=$url" +
+                        " progress=${view.progress} size=${view.width}x${view.height}" +
+                        " attached=${view.parent != null}"
+                )
+            }
         }
     }
 
@@ -214,34 +287,69 @@ class TabAdapter @AssistedInject constructor(
 
     private val webViewMutex = Mutex()
 
+    /**
+     * 渲染进程死亡标记（由 [renderProcessGoneHandler] 置位、由 [webView] 重建后清除）。
+     *
+     * 仅靠 `_acquiredWebView = null` 不可靠：`onRenderProcessGone` 与恢复用的
+     * `loadUrl` 都跑在主线程，但二者之间还有若干状态收集协程会调 `webView()`，
+     * 实测会出现 `loadUrl` 仍命中已 `destroy()` 的旧 WebView（chromium 报
+     * "Application attempted to call on a destroyed WebView"，`TabAdapter.kt:222`），
+     * 导致重载是空操作、`_acquiredWebView` 最终仍指向尸体 ——
+     * 用户视角就是「字全部消失 + 一直卡在正在打开」。
+     *
+     * 置位后：[webViewIfInitialized] 一律返回 null（避免 [freeze]/[background] 等继续碰尸体），
+     * [webView] 会先把尸体从池里摘掉（见下文理由）再 acquire 全新的 WebView。
+     */
+    @Volatile
+    private var rendererDead: Boolean = false
+
     private suspend fun webView(): WebView {
         return withContext(coroutineDispatchers.main) {
             webViewMutex.withLock {
-                _acquiredWebView?.actual ?: webViewPool.acquire(
-                    highPriority = priority == Priority.HIGH
-                ).also {
-                    _acquiredWebView = it
-                    it.actual.setup()
-                    tabPager.addTab(id, it.actual)
-                    tabCoroutineScope.launch {
-                        it.awaitRelease {
-                            val bundle = save()
-                            freeze()
-                            latentInitializer = FreezableInitializer(
-                                bundle = bundle,
-                                delegate = BundleInitializer(bundle),
-                                initialTitle = title.orEmpty(),
-                                id = id
-                            )
-                            _acquiredWebView = null
-                        }
+                val held = _acquiredWebView
+                if (held != null && !rendererDead) {
+                    held.actual
+                } else {
+                    // 走到这里两种情况：从未 acquire 过，或 held 指向一具渲染进程已死的尸体。
+                    // 后者必须先把尸体从池的 deque 里移除——否则它仍躺在池里，后续任意一次
+                    // `acquire` 把它 `removeLast().release()` 时会触发它早在 acquire 时注册的
+                    // `awaitRelease` 回调，而那时 `_acquiredWebView` 已指向新重建的替换 WebView，
+                    // 回调里的 `freeze()` 会把替换 WebView 一起 destroy，正是日志里
+                    // "重载后仍无 WebView" 的成因。`webViewPool.release` 只把它从 deque 摘下、
+                    // 不触发 `awaitRelease`（见 LimitedObjectPool.release），故这具尸体的
+                    // `awaitRelease` 协程会一直挂起（一次性泄漏，可接受）。
+                    if (held != null) {
+                        runCatching { webViewPool.release(held) }
                     }
-                }.actual
+                    _acquiredWebView = null
+                    rendererDead = false
+                    webViewPool.acquire(
+                        highPriority = priority == Priority.HIGH
+                    ).also {
+                        _acquiredWebView = it
+                        it.actual.setup()
+                        tabPager.addTab(id, it.actual)
+                        tabCoroutineScope.launch {
+                            it.awaitRelease {
+                                val bundle = save()
+                                freeze()
+                                latentInitializer = FreezableInitializer(
+                                    bundle = bundle,
+                                    delegate = BundleInitializer(bundle),
+                                    initialTitle = title.orEmpty(),
+                                    id = id
+                                )
+                                _acquiredWebView = null
+                            }
+                        }
+                    }.actual
+                }
             }
         }
     }
 
-    private fun webViewIfInitialized(): WebView? = _acquiredWebView?.actual
+    private fun webViewIfInitialized(): WebView? =
+        _acquiredWebView?.actual?.takeIf { !rendererDead }
 
     private val titleStateFlow = MutableStateFlow(
         latentInitializer?.initialTitle
