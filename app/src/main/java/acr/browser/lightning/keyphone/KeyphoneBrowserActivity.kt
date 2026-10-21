@@ -216,6 +216,17 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private var quickMenuFocusIndex = 0
     private var lastConsumedDownKeyCode: Int = KeyEvent.KEYCODE_UNKNOWN
 
+    /**
+     * 动作键（0~9 / * / #）防重入状态。
+     *
+     * 设备连击、手指回弹或固件抖动会在一次物理按下后，再补一个 repeatCount=0 的 DOWN。
+     * 此时快捷菜单往往已经打开，第二个 DOWN 会被当成「执行菜单项」——`#` 菜单里
+     * `#` 对应「切换全屏」、`*` 对应「无图切换」；`*` 菜单里 `*` 对应「关闭窗口」——
+     * 用户看到的就是「按一下 # 却退出了全屏」。
+     */
+    private var actionKeyGuardCode: Int = KeyEvent.KEYCODE_UNKNOWN
+    private var actionKeyGuardUntil: Long = 0L
+
     /** 全屏与滚动切换状态 */
     private var isFullScreenMode = false
     private var isScrolledToBottom = false
@@ -3905,6 +3916,26 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     // region 按键分发
 
+    /**
+     * 动作键防重入：同一 keyCode 在 [ACTION_KEY_DEBOUNCE_MS] 内重复 DOWN 时返回 true，
+     * 调用方应直接吞掉该事件（DOWN 与随后的 UP 都不再做任何动作）。
+     *
+     * 覆盖两种来源：
+     * 1. 设备连击 —— 一次物理按下产生两个独立的 repeatCount=0 的 DOWN；
+     * 2. 长按后松手再补发 —— 部分固件在长按结束时补一个「新按下」。
+     * 正常长按的重复事件 repeatCount>0，本来就被 repeatCount==0 过滤，不会走到这里。
+     */
+    private fun shouldSwallowDuplicatedActionKey(keyCode: Int): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        val duplicated = keyCode == actionKeyGuardCode && now < actionKeyGuardUntil
+        actionKeyGuardCode = keyCode
+        actionKeyGuardUntil = now + ACTION_KEY_DEBOUNCE_MS
+        if (duplicated) {
+            KeydroidxLog.d(TAG, "按键 key=$keyCode 在 ${ACTION_KEY_DEBOUNCE_MS}ms 内重复触发，已忽略（疑似设备连击）")
+        }
+        return duplicated
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         // 每次 DOWN 打一条流水：下一次 DOWN 的日志晚了多久，就说明上一次按键处理卡了多久
         if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
@@ -3963,6 +3994,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             if (keyLabel != null) {
                 if (isFirstDown) {
                     lastConsumedDownKeyCode = event.keyCode
+                    // 菜单刚弹出时，同一键的连击重影必须吞掉，否则会立刻被执行成菜单项
+                    // （# 菜单的 # = 切换全屏；* 菜单的 * = 关闭窗口），表现为「按一下 # 却退出全屏」
+                    if (shouldSwallowDuplicatedActionKey(event.keyCode)) {
+                        return true
+                    }
                     val items = getActiveMenuItems()
                     val matchedItem = items.firstOrNull { it.keyLabel == keyLabel }
                     if (matchedItem != null) {
@@ -4281,7 +4317,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (isKey0) {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 lastConsumedDownKeyCode = event.keyCode
-                if (event.repeatCount == 0) {
+                if (event.repeatCount == 0 && !shouldSwallowDuplicatedActionKey(event.keyCode)) {
                     cycleNextTab()
                 }
             }
@@ -4293,7 +4329,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (isKeyStar) {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 lastConsumedDownKeyCode = event.keyCode
-                if (event.repeatCount == 0) {
+                if (event.repeatCount == 0 && !shouldSwallowDuplicatedActionKey(event.keyCode)) {
                     showPageMenu()
                 }
             }
@@ -4305,7 +4341,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (isKeyPound) {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 lastConsumedDownKeyCode = event.keyCode
-                if (event.repeatCount == 0) {
+                if (event.repeatCount == 0 && !shouldSwallowDuplicatedActionKey(event.keyCode)) {
                     showGlobalMenu()
                 }
             }
@@ -5349,6 +5385,13 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     companion object {
         private const val TAG = "KeyphoneBrowser"
+
+        /**
+         * 动作键去重窗口：同一 keyCode 在此时间内再次 DOWN，视为上一次按下的重影，直接吞掉。
+         * 取值需大于设备连击间隔（实测抖动一般 <150ms），又要小于用户有意的二次按键间隔。
+         */
+        private const val ACTION_KEY_DEBOUNCE_MS = 400L
+
         const val EXTRA_SHOW_TABS = "keyphone_show_tabs"
         private const val TABS_WAIT_MS = 3000L
         private const val GRID_COLUMNS = 3

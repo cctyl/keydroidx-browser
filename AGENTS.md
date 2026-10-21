@@ -120,11 +120,77 @@ activity-alias (Orange 默认 / Blue 备用)
 
 ---
 
-## 4. 按键交互与编码红线（改 keyphone 必看）
+## 4. 按键映射与交互红线（改 keyphone 必看）
+
+### 4.1 主界面按键（默认态）
+
+| 按键 | 网页态（有页面） | 主页态（书签宫格） |
+|---|---|---|
+| 方向键 | 移动虚拟光标（`KeyphoneMouseController.onDirectionDown/Up`，短按微移、长按连发加速、贴边滚动） | `KeydroidxListFocusHelper` 移动搜索框 / 书签焦点 |
+| 确认键（中键 / Enter / Numpad5 / Button_A） | 点击光标所在位置（DOWN/UP 转原生触摸给 WebView，由 WebView 判定单击/长按） | 短按打开书签或搜索；**长按书签进入编辑模式** |
+| `1`~`9` | 光标跳到对应九宫格热区（**只移动不点击**，落点由确认键触发；站点可用专属键位覆盖） | 无 |
+| `0` | 循环切换下一个标签页 `cycleNextTab()` | 同左 |
+| `*` | 弹出**页面菜单** | 同左 |
+| `#` | 弹出**全局菜单** | 同左 |
+| 左软键 LSK | 打开选项页 `KeyphoneOptionsActivity` | 同左 |
+| 右软键 RSK | 返回上一页 `handleBack()` | 退出应用 `confirmExit()` |
+| 返回键 | 返回上一页，无历史时退出 | 退出确认 |
+
+书签编辑模式：确认键 = 删除当前书签；中软键显示「删除」，右软键「返回」。
+
+### 4.2 两个快捷菜单
+
+**`*` → 页面菜单**（`buildPageMenuItems()`，面向当前页面 / 窗口）
+
+| 键 | 菜单文案 | 实现 |
+|---|---|---|
+| 1 | 刷新/停止 | `refreshCurrentPage()` |
+| 2 | 加入书签 | `addCurrentPageToHome()` |
+| 3 | 复制链接 | `copyCurrentPageLink()` |
+| 4 | 分享页面 | `shareCurrentPage()` |
+| 5 | 页内查找 | `findInCurrentPage()` |
+| 6 | 阅读模式（进 / 退） | `toggleReadingMode()` |
+| 7 | 清空标签页 | `confirmClearAllTabs()` |
+| 0 | 新建窗口 | `createNewWindow()` |
+| `*` | **关闭窗口** | `closeCurrentTabOrExit()` |
+
+**`#` → 全局菜单**（`buildGlobalMenuItems()`，面向全局工具）
+
+| 键 | 菜单文案 | 实现 |
+|---|---|---|
+| 1 | 输入网址 | `openSearchEditor()` |
+| 2 | 快捷搜索 | `openSearchEditor()` |
+| 3 | 历史记录 | `showHistoryPage()` |
+| 4 | 跳转拦截 | `showJumpGuardMenu()` |
+| 5 | 页首/页尾 | `toggleScrollTopBottom()` |
+| 6 | 自由复制 | `startFreeCopyMode()` |
+| 7 | 专属按键适配 | `showSiteKeyUrlMenu()` |
+| `*` | **无图切换** | `toggleBlockImages()` |
+| `#` | **切换全屏** | `toggleFullScreen()` |
+
+**菜单内通用操作**：上 / 下方向键移焦点；`1`~`9`、`*`、`#` 直达执行对应项；左软键或确认键执行当前焦点项；右软键或右方向键关闭菜单。
+
+**两个必须知道的易错点**：
+
+1. **`*` 菜单里没有 `#` 项**。在 `*` 菜单按 `#` 是**切换到全局菜单**（不是执行功能）；反向在 `#` 菜单按 `1` 可切回页面菜单。这是 `dispatchKeyEvent` 里的兜底分支，改菜单时别破坏。
+2. **菜单打开后同一个键会变成菜单项**（`#` = 切换全屏、`*` = 无图切换 / 关闭窗口）。所以设备连击会造成「按一次 `#` 直接退出全屏」。已用 `shouldSwallowDuplicatedActionKey()` + `ACTION_KEY_DEBOUNCE_MS = 400ms` 做防重入，新增执行类单键动作时必须一并接入。
+
+### 4.3 其它模式按键
+
+| 模式 | 按键行为 |
+|---|---|
+| **阅读模式** | `↑` / `2` 上翻一屏；`↓` / `8` 下翻一屏（长按连翻）；`1` 减小字号；`3` 增大字号；`7` 轮换背景（米白 → 护眼黄 → 护眼绿 → 夜间灰 → 夜间纯黑）；左右方向键、确认键、其余数字直接消费（光标层隐藏，热区无意义）；`*`、`#`、软键、返回仍放行 |
+| **页内查找** | `↑` / `←` / 左软键 = 上一个；`↓` / `→` / 确认键 = 下一个；右软键 = 退出查找 |
+| **自由复制** | 方向键移动复制光标；确认键 = 开始选择 / 执行复制 |
+| **地址栏聚焦** | 数字 / 字母正常输入；确认键 = 提交；右软键 = 取消焦点；左软键 = 选项页 |
+| **站点键位标定** | `1`~`9` 选要标定的键；方向键微调光标；确认键保存落点；左软键重置该站点点位 |
+
+### 4.4 编码红线
 
 - `catch` 分支**必须落日志**（`KeydroidxLog.e`），严禁空 catch。
 - 菜单 / 弹窗按键必须用 `KeydroidxKeyAction` 枚举匹配，**禁止硬编码 keyCode**。
-- 消费了 DOWN 就必须消费同键 UP/REPEAT；执行类动作要过滤 key repeat。
+- 消费了 DOWN 就必须消费同键 UP/REPEAT；执行类动作要过滤 key repeat（`repeatCount == 0`）。
+- 执行类单键动作（`0` / `*` / `#`）必须过 `shouldSwallowDuplicatedActionKey()`，防硬件连击。
 - 字号只能用 `keydroidx_font_*` 语义 Token，禁止裸 sp。
 - 含 TextView 的动态列表行用 `WRAP_CONTENT` + `setMinimumHeight()`，**不要固定行高**（大字号会裁字）。
 - 确认 / 取消弹窗统一 `KeydroidxConfirmDialog`；列表焦点导航统一 `KeydroidxListFocusHelper`。
