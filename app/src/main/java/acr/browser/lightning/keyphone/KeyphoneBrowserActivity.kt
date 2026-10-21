@@ -33,6 +33,7 @@ import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.text.Editable
 import android.text.TextUtils
@@ -349,6 +350,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (intent?.getBooleanExtra(EXTRA_SHOW_TABS, false) == true) {
             showTabsPage()
         }
+        // 「回首页」入口（见 BrowserHomeActivity）：等标签恢复落定后再切主页，
+        // 否则读到的还是空 tabs，会多建一个主页窗口
+        if (intent?.getBooleanExtra(EXTRA_SHOW_HOME, false) == true) {
+            goHomeWhenTabsReady()
+        }
     }
 
     override fun onInitViews() {
@@ -498,6 +504,16 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         // 否则广告站的后台标签能随时把确认框盖到用户正在看的页面上
         KeyphoneJsDialogs.attach(jsDialogHost) { view -> view === currentWebView() }
         presenter.onViewShown()
+        // 回前台：先复位阅读看门狗的前台标记与帧心跳，再让探针重新开始计时。
+        // 后台期间 Surface 已销毁、合成器停产，帧回调必然不回来；若把后台挂着的那次
+        // pending 带回前台，第一个采样就会拿「后台时长」当作合成卡死，进而触发
+        // [recoverBrokenReader]（用户视角：挂机键回桌面再进来，阅读模式被踢掉）。
+        isInForeground = true
+        readerFramePending = false
+        readerFrameRequestedAt = 0L
+        readerFrameLastLogAt = 0L
+        // 后台期间错过的阅读自动重进（见 [maybeReenterReading]）：回前台补一次判定
+        maybeReenterReading(presenter.state.value)
         // 回前台立刻校时（后台期间可能已跨分钟），再对齐下一次整分刷新
         refreshBottomClock()
         scheduleBottomClock()
@@ -509,6 +525,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     override fun onPause() {
+        // 后台不做任何阅读采样 / 帧探测：后台没有「用户看得见的黑屏」，探测只会误判
+        isInForeground = false
         bottomClockHandler.removeCallbacks(bottomClockTick)
         pageBusyHandler.removeCallbacks(pageBusyTick)
         pagePingPending = false
@@ -534,13 +552,43 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        intentExtractor.extractUrlFromIntent(intent)?.let { action ->
+        // singleTask 复用同一实例：新 intent 必须写回，否则 getIntent() 仍停在首次启动那个；
+        // 同时保证后续按键（如右软键退出、分享、书签）读到的是最新意图
+        setIntent(intent)
+        KeydroidxLog.d(
+            TAG,
+            "onNewIntent: action=${intent.action} data=${intent.data} " +
+                "showHome=${intent.getBooleanExtra(EXTRA_SHOW_HOME, false)} " +
+                "showTabs=${intent.getBooleanExtra(EXTRA_SHOW_TABS, false)}"
+        )
+        val action = intentExtractor.extractUrlFromIntent(intent)
+        if (action != null) {
             isHomeSelected = false
             presenter.onEvent(BrowserUiEvent.NewAction(action))
             updateTabMode()
+        } else if (intent.getBooleanExtra(EXTRA_SHOW_HOME, false)) {
+            // 复用实例时必须显式回主页（新实例靠初始状态就是主页，这里不会）
+            goHomeWhenTabsReady()
         }
         if (intent.getBooleanExtra(EXTRA_SHOW_TABS, false)) {
             showTabsPage()
+        }
+    }
+
+    /**
+     * 切回按键机主页（搜索框 + 书签宫格），等标签列表就绪后再动手。
+     *
+     * `presenter` 的事件是异步派发的，刚 `onNewIntent` / `onCreate` 时读到的 tabs 可能是空的，
+     * 直接调 [switchToHome] 会白建一个主页窗口；与 [showTabsPage] 同一策略。
+     */
+    private fun goHomeWhenTabsReady() {
+        lifecycleScope.launch {
+            withTimeoutOrNull(TABS_WAIT_MS) {
+                presenter.state.first { it.tabs.isNotEmpty() }
+            }
+            switchToHome()
+            updateTabMode()
+            KeydroidxLog.d(TAG, "回到按键机主页（复用实例）")
         }
     }
 
@@ -969,6 +1017,30 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         var lastUrl: String = entryUrl
         var lastTitle: String = ""
         var chapterCount: Int = 1
+
+        /** 已落盘的最后章节（去重写盘：翻页/拼章会频繁更新 lastUrl） */
+        var persistedUrl: String = ""
+    }
+
+    /**
+     * 阅读会话落盘：Activity 被系统回收 / 进程被杀后，重进能把用户带回**最后读到的章节**
+     * （浏览内核只记得入口章，否则就是「章节错了」）。见 [KeyphoneReadingSessionStore]。
+     */
+    private fun persistReadingSession(session: ReadingSession) {
+        val target = session.lastUrl.ifBlank { session.entryUrl }
+        if (target == session.persistedUrl) return
+        session.persistedUrl = target
+        KeyphoneReadingSessionStore.save(
+            this,
+            session.entryUrl,
+            target,
+            session.chapterCount
+        )
+    }
+
+    /** 清掉落盘的阅读会话（真实退出 / 页面被导航替换时调用） */
+    private fun clearPersistedReadingSession() {
+        KeyphoneReadingSessionStore.clear(this)
     }
 
     /** 阅读页启动校验定时器（见 [verifyReaderBoot]） */
@@ -1017,6 +1089,37 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     /** 最近一条阅读模式提示（见 [showReadingToast]） */
     private var readingToast: Toast? = null
+
+    /**
+     * Activity 是否在前台（[onResume] 置 true，[onPause] 置 false）。
+     *
+     * 阅读看门狗（[sampleReadingState] / [probeReaderFrame]）只看前台：后台不出帧是正常现象，
+     * 不能算「合成卡住」，否则挂机键回桌面再进来会被误判成故障并触发错误恢复
+     * （详见 [recoverBrokenReader]）。
+     *
+     * 注意：真机上挂机键（ENDCALL）会直接**熄屏**而 Activity 仍然是 resumed（实测
+     * `dumpsys power` = Asleep 但 ResumedActivity 仍是本 Activity，onPause 不触发），
+     * 所以光靠 onResume/onPause 不够，还要配合 [isScreenOn]。
+     */
+    private var isInForeground = false
+
+    /** PowerManager（只用 [PowerManager.isInteractive] 判断屏幕是否点亮，见 [isScreenOn]） */
+    private val powerManager: PowerManager? by lazy {
+        try {
+            getSystemService(Context.POWER_SERVICE) as? PowerManager
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "获取 PowerManager 失败", t)
+            null
+        }
+    }
+
+    /** 屏幕是否点亮（取不到时保守当作点亮，避免看门狗被静默关掉） */
+    private fun isScreenOn(): Boolean = try {
+        powerManager?.isInteractive ?: true
+    } catch (t: Throwable) {
+        KeydroidxLog.e(TAG, "读取屏幕状态失败", t)
+        true
+    }
 
     /**
      * 阅读模式提示。Toast 是排队显示的：连按 1 / 3 / 7 时屏幕上会依次补播历史提示，
@@ -1169,6 +1272,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             it.chapterCount = 1
         }
         readingModeTabs[tabId] = session
+        persistReadingSession(session)
         updateBackPressedEnabled()
         // 阅读模式下隐藏鼠标光标层（方向键已改为整屏翻页）
         updateMouseCursorVisibility()
@@ -1184,6 +1288,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "打开阅读页失败 baseUrl=${entry.url}", t)
             readingModeTabs.remove(tabId)
+            clearPersistedReadingSession()
             updateBackPressedEnabled()
             updateTabMode()
             showReadingToast(getString(R.string.keyphone_reading_failed))
@@ -1249,6 +1354,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 }
                 KeydroidxLog.e(TAG, "阅读页启动失败，回到章节页: ${entry.describe()}")
                 readingModeTabs.remove(tabId)
+                clearPersistedReadingSession()
                 updateBackPressedEnabled()
                 updateTabMode()
                 showReadingToast(getString(R.string.keyphone_reading_failed))
@@ -1324,7 +1430,11 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
      */
     private fun maybeReenterReading(state: BrowserViewState) {
         val target = pendingReadingReenterUrl ?: return
-        if (state.displayUrl != target) {
+        // 注意：不能用 state.displayUrl 比对——它是**地址栏文案**（加载中显示 URL、加载完显示标题，
+        // 见 SearchBoxModel.getDisplayContent），不是 URL。之前用它做相等判断，导致自动重进
+        // 几乎从不生效（阅读页丢失后只能停在真实章节页上）。这里改用标签的真实 URL。
+        val selectedUrl = state.tabs.firstOrNull { it.isSelected }?.url.orEmpty()
+        if (selectedUrl != target) {
             return
         }
         // 主页状态 / 已在阅读态：保留待重进标记，等用户回到该标签页再重进，
@@ -1332,9 +1442,63 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (isReadingMode() || isHomeSelected) {
             return
         }
+        // 后台 / 熄屏（挂机键）：保留待重进标记，交给回前台（[onResume]）或熄屏后的采样
+        // 补判定，不在不可见时往 WebView 里载入 data 外壳
+        if (!isInForeground || !isScreenOn()) {
+            KeydroidxLog.d(TAG, "阅读恢复：当前不可见，保留待重进标记 target=$target")
+            return
+        }
         pendingReadingReenterUrl = null
         KeydroidxLog.d(TAG, "阅读恢复：自动重进阅读模式 target=$target")
         enterReadingMode()
+    }
+
+    /**
+     * Activity 被系统回收后，把阅读会话从落盘快照里恢复回来（见 [KeyphoneReadingSessionStore]）。
+     *
+     * 背景：挂机键回桌面/系统回收会导致 Activity 重建，`readingModeTabs` 是内存状态，重建即丢；
+     * 而浏览内核记录的标签 URL 只会是玩壳的 baseUrl（**入口章**），于是重进后就是
+     * 「阅读模式没了，而且章节错了」——已读到第 59 章，回到第 1 章。
+     *
+     * 命中条件：当前选中标签的 URL 与快照的入口章 / 最后章一致（且页面已加载完）。
+     * 命中后：落盘快照只恢复一次（立即清掉，避免与用户主动退出打架）→ 导航到
+     * 最后读到的章节 → 由 [maybeReenterReading] 在落地后自动重进阅读模式。
+     */
+    private fun maybeRestoreReadingSession(state: BrowserViewState) {
+        if (isReadingMode() || isHomeSelected) return
+        if (readingModeTabs.isNotEmpty()) return
+        val tab = state.tabs.firstOrNull { it.isSelected } ?: return
+        if (isTabHome(tab)) return
+        val url = tab.url.trim()
+        if (url.isEmpty()) return
+        val snapshot = KeyphoneReadingSessionStore.load(this, url) ?: return
+        val target = snapshot.lastUrl.ifBlank { snapshot.entryUrl }
+        // 先清快照：恢复动作只有一次，不能因为重复取样反复导航
+        clearPersistedReadingSession()
+        pendingReadingReenterUrl = target
+        KeydroidxLog.i(
+            TAG,
+            "【阅读现场】重建后恢复阅读会话: entry=${snapshot.entryUrl} target=$target" +
+                " 已读=${snapshot.chapterCount} 章 当前=$url"
+        )
+        if (url == target) {
+            // 已经停在这一章：直接重进
+            maybeReenterReading(state)
+            return
+        }
+        val webView = currentWebView()
+        if (webView == null) {
+            // 没 WebView 无法导航：放弃本次恢复（避免之后莫名其妙重进）
+            pendingReadingReenterUrl = null
+            KeydroidxLog.w(TAG, "【阅读现场】恢复阅读会话失败：WebView 不可用 target=$target")
+            return
+        }
+        try {
+            webView.loadUrl(target)
+        } catch (t: Throwable) {
+            pendingReadingReenterUrl = null
+            KeydroidxLog.e(TAG, "【阅读现场】恢复阅读会话导航失败 target=$target", t)
+        }
     }
 
     /**
@@ -1465,6 +1629,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             if (readingModeTabs.remove(tabId) == null) {
                 return@pullReadingProgress
             }
+            // 用户主动退出：落盘会话也必须清，否则下次重建 Activity 会被当成「未读完」自动重进
+            clearPersistedReadingSession()
             updateBackPressedEnabled()
             updateTabMode()
             KeydroidxLog.d(
@@ -1498,6 +1664,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         if (!dispatched) {
             // 拉取都没能发出去（WebView 异常）：不能停在 data 页上，直接导航回会话里记着的章节
             readingModeTabs.remove(tabId)
+            clearPersistedReadingSession()
             updateBackPressedEnabled()
             updateTabMode()
             if (fallbackTarget.isNotBlank()) {
@@ -1526,6 +1693,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 TAG,
                 "阅读态被导航清掉（页面开始加载）: tabId=$tabId ${describeReadingTab()}"
             )
+            // 页面已被真实导航替换，落盘会话一并作废（否则重建后会自动重进）
+            clearPersistedReadingSession()
             updateBackPressedEnabled()
         }
     }
@@ -1583,6 +1752,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 if (pages.size > session.chapterCount) {
                     session.chapterCount = pages.size
                 }
+                persistReadingSession(session)
                 onSynced?.invoke(session)
             }
             true
@@ -3363,6 +3533,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                     reassertTrailHistory()
                     // 阅读页丢失恢复后的自动重进（见 [recoverReaderPage]）
                     maybeReenterReading(state)
+                    // Activity 重建后的阅读会话恢复（见 [maybeRestoreReadingSession]）
+                    maybeRestoreReadingSession(state)
                 }
                 if (state.tabs.isEmpty()) {
                     isHomeSelected = true
@@ -3476,6 +3648,20 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     /** 一次阅读模式现场采样（见 [installReadingWatchdog]） */
     private fun sampleReadingState() {
+        // 只看前台且屏幕点亮：后台 / 熄屏时 Surface 已销毁、合成器停产，帧回调必然不回来，
+        // 继续采样只会把「不出帧」误判成「合成卡死」并触发 [recoverBrokenReader]
+        // （挂机键回桌面 bug：ENDCALL 只熄屏，Activity 仍 resumed，见 [isInForeground]）。
+        // 同时把帧心跳复位：熄屏期间挂着的那次回调不能把「熄屏时长」算成停滞。
+        if (!isInForeground || !isScreenOn()) {
+            readerFramePending = false
+            readerFrameRequestedAt = 0L
+            return
+        }
+        // 熄屏 / 后台期间错过的阅读自动重进（见 [maybeReenterReading]）：
+        // 重新可见后补一次判定（熄屏时 onResume 不会重发，只能靠这里兜）
+        if (pendingReadingReenterUrl != null) {
+            maybeReenterReading(presenter.state.value)
+        }
         val tabId = selectedTabId()
         val inReading = tabId != null && readingModeTabs.containsKey(tabId)
         val wv = currentWebView()
@@ -3621,11 +3807,16 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
      * - 帧回调长期不回（合成卡住，文字消失成背景色）—— 这是用户描述的头号症状，
      *   主线程活、按键响、DOM 在，就是不出帧，只能强制重载逼渲染管线重来。
      *
-     * 恢复动作：清掉阅读态（死态下 `exitReadingMode` 走不通，它要 evaluate JS），
-     * 然后——WebView 还活着就原地刷新当前标签（[RefreshOrStopClick]，会让卡住的合成
-     * 管线重新提交导航）；WebView 已死就新开一个标签载入最后读到的那一章
-     * （[Action.LoadUrl]，会从池里重建 WebView）。冷却 [READER_RECOVER_COOLDOWN_MS]，
-     * 防止反复触发开一堆标签。
+     * 恢复动作：先清掉阅读态（死态下 `exitReadingMode` 走不通，它要 evaluate JS），再决定
+     * 导航去向：
+     * - 有会话（读的是 data 外壳）→ 走 [recoverReaderPage] 同一条路径：导航回会话里最后读到
+     *   的**真实章节页**，并用 [pendingReadingReenterUrl] 让加载完成后自动重进阅读模式。
+     *   绝不能对 data 外壳 `reload`（[RefreshOrStopClick]）——重放 data 页只会重放空壳：
+     *   背景色还在、拼进来的章节全丢（回到入口章），而且 Kotlin 侧已无阅读态，表现为
+     *   「看着像阅读模式其实是普通浏览（光标出现、方向键移光标）」。
+     * - 无会话且是普通网页 → 原地刷新，逼卡住的合成管线重新提交一帧；
+     * - WebView 已死 → 新开一个标签载入最后读到的那一章（[Action.LoadUrl] 从池里重建）。
+     * 冷却 [READER_RECOVER_COOLDOWN_MS]，防止反复触发开一堆标签。
      */
     private fun recoverBrokenReader(reason: String) {
         val now = SystemClock.elapsedRealtime()
@@ -3639,7 +3830,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         lastReaderRecoverAt = now
         val tabId = selectedTabId()
         val session = tabId?.let { readingModeTabs[it] }
-        val lastUrl = session?.lastUrl?.takeIf { it.isNotBlank() }
+        val lastUrl = session?.lastUrl?.takeIf { it.isNotBlank() } ?: session?.entryUrl
         // 重置帧心跳，避免恢复后旧回调没回仍报“停滞”
         readerFramePending = false
         readerFrameRequestedAt = 0L
@@ -3651,21 +3842,51 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         // 清阅读态：exitReadingMode 依赖 WebView，死态下会提前 return；这里直接清，
         // 让 back 键 / 标签模式恢复正常，并防止 sampleReadingState 继续按“阅读态”采样
         if (tabId != null) readingModeTabs.remove(tabId)
+        readerSettledAt = 0L
         updateBackPressedEnabled()
         updateTabMode()
         val wv = currentWebView()
-        if (wv != null) {
-            // WebView 还活着（多是合成卡住）：原地刷新当前标签，逼渲染管线重新提交一帧
-            clearReadingModeOnNavigation()
-            presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
-        } else if (lastUrl != null) {
-            // WebView 已死且重建失败：新开一个标签载入最后读到的那一章
-            // （Action.LoadUrl 会 createNewTabAndSelect，从池里取全新 WebView）
-            presenter.onEvent(BrowserUiEvent.NewAction(BrowserContract.Action.LoadUrl(lastUrl)))
-        } else {
-            // 既无 WebView 也拿不到 lastUrl：刷新当前标签，交给渲染进程死亡回调链路自行重建
-            presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
+        if (lastUrl != null) {
+            // 有章节落点：不碰 data 外壳，直接导航回最后读到的真实章节，落地后自动重进
+            pendingReadingReenterUrl = lastUrl
+            KeydroidxLog.d(TAG, "【阅读现场】恢复导航到最后章节 $lastUrl（不重放 data 外壳）")
+            if (wv != null) {
+                try {
+                    wv.loadUrl(lastUrl)
+                } catch (t: Throwable) {
+                    KeydroidxLog.e(TAG, "【阅读现场】恢复导航失败 target=$lastUrl", t)
+                }
+            } else {
+                // WebView 已死：新开标签载入最后读到的那一章，重进交给下次 progress==100
+                presenter.onEvent(
+                    BrowserUiEvent.NewAction(BrowserContract.Action.LoadUrl(lastUrl))
+                )
+            }
+            return
         }
+        if (wv == null) {
+            // 既无 WebView 也无章节落点：刷新当前标签，交给渲染进程死亡回调链路自行重建
+            presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
+            return
+        }
+        val wvUrl = try {
+            wv.url.orEmpty()
+        } catch (t: Throwable) {
+            KeydroidxLog.w(TAG, "【阅读现场】恢复时读取 WebView url 失败", t)
+            ""
+        }
+        if (!wvUrl.startsWith("http")) {
+            // 无会话又停在非真实页（data 外壳 / about:blank）：刷新只会重放空壳，
+            // 既找不回章节又留下「假阅读模式」，宁可不动作
+            KeydroidxLog.w(
+                TAG,
+                "【阅读现场】无阅读会话且当前非真实页面 url=$wvUrl，跳过刷新（避免重放 data 外壳）"
+            )
+            return
+        }
+        // WebView 还活着且是普通网页（多是合成卡住）：原地刷新，逼渲染管线重新提交一帧
+        clearReadingModeOnNavigation()
+        presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
     }
 
     /** 已就当前故障窗口报过一次异常现场（恢复后复位） */
@@ -5392,6 +5613,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         private const val ACTION_KEY_DEBOUNCE_MS = 400L
 
         const val EXTRA_SHOW_TABS = "keyphone_show_tabs"
+
+        /** 「回首页」标志（见 [BrowserHomeActivity]）：复用已有实例时显式切到九宫格主页 */
+        const val EXTRA_SHOW_HOME = "keyphone_show_home"
         private const val TABS_WAIT_MS = 3000L
         private const val GRID_COLUMNS = 3
         private const val MAX_HISTORY_ROWS = 10

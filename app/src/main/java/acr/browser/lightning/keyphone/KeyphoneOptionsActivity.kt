@@ -168,16 +168,18 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
     )
 
     /**
-     * 新建标签页 = 回到按键机首页（`BrowserHomeActivity`：搜索框 + 书签宫格 + 历史）。
+     * 新建标签页 = 回到按键机首页（搜索框 + 书签宫格 + 历史）。
      *
-     * 首页是 `singleTask`，从任意深度（本页 / 浏览页）拉起它会把它之上的 Activity 一并清掉，
-     * 所以一句 `startActivity` 就能稳定落到首页，不必各自算 finish / 回退层数。
+     * 浏览页现在是 `singleTask`，拉起来只会**复用**已有实例，不会自动回到主页视图；
+     * 所以必须带 [KeyphoneBrowserActivity.EXTRA_SHOW_HOME]（由 `BrowserHomeActivity` 原样透传），
+     * 否则用户点「新建标签页」会停在原来那个网页上。
      */
     private fun goHome() {
         try {
             startActivity(
                 Intent(this, BrowserHomeActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    .putExtra(KeyphoneBrowserActivity.EXTRA_SHOW_HOME, true)
             )
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "返回首页失败", t)

@@ -81,9 +81,11 @@
             android:windowSoftInputMode="stateHidden" />
         <activity
             android:name="acr.browser.lightning.keyphone.KeyphoneBrowserActivity"
+            android:alwaysRetainTaskState="true"
+            android:clearTaskOnLaunch="false"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard"
             android:exported="true"
-            android:launchMode="singleTop"
+            android:launchMode="singleTask"
             android:theme="@style/Theme.DarkTheme"
             android:windowSoftInputMode="stateHidden|adjustResize" />
         <activity
