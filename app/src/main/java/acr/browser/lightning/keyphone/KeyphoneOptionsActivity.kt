@@ -2,7 +2,12 @@ package acr.browser.lightning.keyphone
 
 import acr.browser.lightning.R
 import acr.browser.lightning.constant.SCHEME_BOOKMARKS
-import acr.browser.lightning.settings.activity.SettingsActivity
+import acr.browser.lightning.di.injector
+import acr.browser.lightning.settings.SettingsScreenStateProvider
+import acr.browser.lightning.settings.framework.ClickableOnClick
+import acr.browser.lightning.settings.framework.ClickableState
+import acr.browser.lightning.settings.framework.ToggleState
+import acr.browser.lightning.settings.navigation.SettingsNavigation
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -10,6 +15,7 @@ import android.view.View
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.annotation.StringRes
 import io.github.cctyl.nokia.common.log.KeydroidxLog
 import io.github.cctyl.nokia.common.model.KeydroidxKeyAction
@@ -18,6 +24,8 @@ import io.github.cctyl.nokia.common.ui.dialog.KeydroidxConfirmDialog
 import io.github.cctyl.nokia.common.ui.page.KeydroidxListFocusHelper
 import io.github.cctyl.nokia.keycore.ui.KeydroidxBaseActivity
 import java.io.File
+import javax.inject.Inject
+import kotlinx.coroutines.runBlocking
 
 /**
  * 按键机全屏选项页（首页按 LSK 进入）。
@@ -38,17 +46,51 @@ import java.io.File
  */
 class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
 
+    @Inject
+    internal lateinit var settingsScreenStateProvider: SettingsScreenStateProvider
+
     private var focusHelper: KeydroidxListFocusHelper? = null
 
     /** true = 由浏览页以「页面模式」调起，条目动作回传给浏览页执行。 */
     private var pageMode = false
 
+    private enum class ScreenLevel {
+        OPTIONS_ROOT,
+        SETTINGS_CATEGORY
+    }
+
+    private var currentLevel = ScreenLevel.OPTIONS_ROOT
+    private var currentCategory: SettingsNavigation? = null
+    private var savedFocusIndexOptionsRoot = 0
+
+    private val backPressedCallback = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            handleBack()
+        }
+    }
+
     override fun getContentLayoutRes(): Int = R.layout.keyphone_list
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        injector.settingsComponentBuilder()
+            .incognitoMode(false)
+            .activity(this)
+            .build()
+            .inject(this)
+        super.onCreate(savedInstanceState)
+        onBackPressedDispatcher.addCallback(this, backPressedCallback)
+    }
 
     override fun onInitViews() {
         pageMode = intent?.getBooleanExtra(EXTRA_PAGE_MODE, false) == true
-        setPageTitle(getString(R.string.keyphone_options_title))
-        setTitleIcon(KeydroidxIcons.MORE_VERT)
+        renderCurrentScreen()
+    }
+
+    private fun renderCurrentScreen(targetFocusIndex: Int? = null) {
+        val scroll = findViewById<ScrollView>(R.id.keyphone_scroll) ?: return
+        val container = findViewById<LinearLayout>(R.id.keyphone_rows) ?: return
+        container.removeAllViews()
+
         setStatusBarVisible(false)
         setSoftKeys(
             getString(R.string.keyphone_soft_confirm),
@@ -56,32 +98,97 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
             getString(R.string.keyphone_soft_back)
         )
 
-        val scroll = findViewById<ScrollView>(R.id.keyphone_scroll)
-        val container = findViewById<LinearLayout>(R.id.keyphone_rows)
-
         val focusables = ArrayList<View>()
-        buildOptions().forEach { entry ->
-            when (entry) {
-                // 分组标题与分隔线均为非焦点项，只进容器、不进焦点列表
-                is OptionEntry.Section ->
-                    container.addView(KeyphoneViews.sectionLabel(this, getString(entry.titleRes)))
 
-                OptionEntry.Divider -> container.addView(KeyphoneViews.divider(this))
+        when (currentLevel) {
+            ScreenLevel.OPTIONS_ROOT -> {
+                setPageTitle(getString(R.string.keyphone_options_title))
+                setTitleIcon(KeydroidxIcons.MORE_VERT)
 
-                is OptionEntry.Option -> {
-                    val row = KeyphoneViews.iconRow(
-                        this,
-                        entry.iconCode,
-                        null,
-                        getString(entry.titleRes),
-                        null
-                    )
-                    row.setOnClickListener {
-                        focusHelper?.setFocusIndex(focusables.indexOf(row))
-                        entry.action()
+                buildOptions().forEach { entry ->
+                    when (entry) {
+                        is OptionEntry.Section ->
+                            container.addView(KeyphoneViews.sectionLabel(this, getString(entry.titleRes)))
+
+                        OptionEntry.Divider -> container.addView(KeyphoneViews.divider(this))
+
+                        is OptionEntry.Option -> {
+                            val row = KeyphoneViews.iconRow(
+                                this,
+                                entry.iconCode,
+                                null,
+                                getString(entry.titleRes),
+                                null
+                            )
+                            row.setOnClickListener {
+                                focusHelper?.setFocusIndex(focusables.indexOf(row))
+                                entry.action()
+                            }
+                            container.addView(row)
+                            focusables.add(row)
+                        }
                     }
-                    container.addView(row)
-                    focusables.add(row)
+                }
+            }
+
+            ScreenLevel.SETTINGS_CATEGORY -> {
+                val category = currentCategory ?: SettingsNavigation.ROOT
+                val categoryState = settingsScreenStateProvider.provideState(category)
+                setPageTitle(categoryState.title)
+                setTitleIcon(KeydroidxIcons.ICON_SETTINGS)
+
+                val tabStyleTitle = getString(R.string.tab_style_title)
+                categoryState.content.filter { option ->
+                    when (option) {
+                        is ClickableState -> option.title != tabStyleTitle
+                        is ToggleState -> option.title != tabStyleTitle
+                    }
+                }.forEach { option ->
+                    when (option) {
+                        is ToggleState -> {
+                            val isChecked = runBlocking { option.isChecked() }
+                            val stateTag = if (isChecked) "[已开启]" else "[已关闭]"
+                            val summary = runBlocking { option.summary?.invoke() }
+                            val fullSummary = if (summary != null) "$stateTag  $summary" else stateTag
+                            val icon = if (isChecked) KeydroidxIcons.ICON_CHECK else KeydroidxIcons.ICON_CLOSE
+                            val row = KeyphoneViews.iconRow(
+                                this,
+                                icon,
+                                null,
+                                option.title,
+                                fullSummary
+                            )
+                            row.setOnClickListener {
+                                val focusIdx = focusables.indexOf(row)
+                                focusHelper?.setFocusIndex(focusIdx)
+                                val snackbar = runBlocking { option.onToggle(!isChecked) }
+                                snackbar?.let {
+                                    Toast.makeText(this, it.message, Toast.LENGTH_SHORT).show()
+                                }
+                                renderCurrentScreen(targetFocusIndex = focusIdx)
+                            }
+                            container.addView(row)
+                            focusables.add(row)
+                        }
+
+                        is ClickableState -> {
+                            val summary = runBlocking { option.summary?.invoke() }
+                            val row = KeyphoneViews.iconRow(
+                                this,
+                                KeydroidxIcons.ICON_CHEVRON_RIGHT,
+                                null,
+                                option.title,
+                                summary
+                            )
+                            row.setOnClickListener {
+                                val focusIdx = focusables.indexOf(row)
+                                focusHelper?.setFocusIndex(focusIdx)
+                                handleClickable(option.onClick, focusIdx)
+                            }
+                            container.addView(row)
+                            focusables.add(row)
+                        }
+                    }
                 }
             }
         }
@@ -89,9 +196,131 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         val helper = KeydroidxListFocusHelper(scroll)
         helper.setItems(focusables)
         if (focusables.isNotEmpty()) {
-            helper.setFocusIndex(0)
+            val desiredIndex = targetFocusIndex?.coerceIn(0, focusables.size - 1) ?: 0
+            helper.setFocusIndex(desiredIndex)
         }
         focusHelper = helper
+    }
+
+    private fun openSettingsCategory(nav: SettingsNavigation) {
+        if (currentLevel == ScreenLevel.OPTIONS_ROOT) {
+            savedFocusIndexOptionsRoot = focusHelper?.focusIndex ?: 0
+        }
+        currentLevel = ScreenLevel.SETTINGS_CATEGORY
+        currentCategory = nav
+        backPressedCallback.isEnabled = true
+        renderCurrentScreen(targetFocusIndex = 0)
+    }
+
+    private fun openOptionsRoot() {
+        currentLevel = ScreenLevel.OPTIONS_ROOT
+        currentCategory = null
+        backPressedCallback.isEnabled = false
+        renderCurrentScreen(targetFocusIndex = savedFocusIndexOptionsRoot)
+    }
+
+    private fun handleClickable(onClick: ClickableOnClick, currentFocusIndex: Int? = null) {
+        when (onClick) {
+            is ClickableOnClick.Navigate -> {
+                openSettingsCategory(onClick.settingsNavigation)
+            }
+
+            is ClickableOnClick.Action -> {
+                runBlocking { onClick.action() }
+                renderCurrentScreen(targetFocusIndex = currentFocusIndex)
+            }
+
+            is ClickableOnClick.Snackbar -> {
+                val snackbar = runBlocking { onClick.produceState() }
+                Toast.makeText(this, snackbar.message, Toast.LENGTH_SHORT).show()
+                renderCurrentScreen(targetFocusIndex = currentFocusIndex)
+            }
+
+            is ClickableOnClick.WebLink -> {
+                try {
+                    val intent = Intent(this, KeyphoneBrowserActivity::class.java).apply {
+                        data = Uri.parse(onClick.url)
+                    }
+                    startActivity(intent)
+                } catch (t: Throwable) {
+                    KeydroidxLog.e(TAG, "打开链接失败: ${onClick.url}", t)
+                }
+            }
+
+            is ClickableOnClick.Confirmation -> {
+                val dialogState = runBlocking { onClick.produceState() }
+                KeydroidxConfirmDialog(this, dialogState.title, dialogState.message)
+                    .setPositiveButton(dialogState.positiveAction) {
+                        val nextAction = runBlocking { onClick.onConfirmed(true) }
+                        handleClickable(nextAction, currentFocusIndex)
+                        renderCurrentScreen(targetFocusIndex = currentFocusIndex)
+                    }
+                    .setNegativeButton(dialogState.negativeAction) {
+                        val nextAction = runBlocking { onClick.onConfirmed(false) }
+                        handleClickable(nextAction, currentFocusIndex)
+                    }
+                    .show()
+            }
+
+            is ClickableOnClick.ItemSelector -> {
+                val chooserState = runBlocking { onClick.produceState() }
+                val options = chooserState.values.mapIndexed { index, entry ->
+                    val isCurrent = index == chooserState.selected
+                    val label = (index + 1).let { if (it in 1..9) it.toString() else "*" }
+                    val text = if (isCurrent) "${entry.text}  [当前]" else entry.text
+                    KeyphoneViews.QuickMenuItem(
+                        keyLabel = label,
+                        text = text
+                    ) {
+                        val nextAction = runBlocking { onClick.onSelected(index) }
+                        handleClickable(nextAction, currentFocusIndex)
+                        renderCurrentScreen(targetFocusIndex = currentFocusIndex)
+                    }
+                }
+                KeyphoneOptionSheetDialog(
+                    context = this,
+                    titleText = chooserState.title,
+                    bodyLines = emptyList(),
+                    options = options,
+                    defaultFocusIndex = chooserState.selected.coerceIn(0, (options.size - 1).coerceAtLeast(0)),
+                    onSelected = {},
+                    onCancelled = {}
+                ).show()
+            }
+
+            is ClickableOnClick.TextSize -> {
+                val currentSize = runBlocking { onClick.produceTextSize() }
+                val labels = listOf(
+                    getString(R.string.size_smallest),
+                    getString(R.string.size_small),
+                    getString(R.string.size_normal),
+                    getString(R.string.size_large),
+                    getString(R.string.size_largest),
+                )
+                val options = labels.mapIndexed { index, label ->
+                    val isCurrent = index == currentSize
+                    KeyphoneViews.QuickMenuItem(
+                        keyLabel = (index + 1).toString(),
+                        text = if (isCurrent) "$label  [当前]" else label
+                    ) {
+                        val nextAction = runBlocking { onClick.onSelected(index) }
+                        handleClickable(nextAction, currentFocusIndex)
+                        renderCurrentScreen(targetFocusIndex = currentFocusIndex)
+                    }
+                }
+                KeyphoneOptionSheetDialog(
+                    context = this,
+                    titleText = getString(R.string.title_text_size),
+                    bodyLines = emptyList(),
+                    options = options,
+                    defaultFocusIndex = currentSize.coerceIn(0, (options.size - 1).coerceAtLeast(0)),
+                    onSelected = {},
+                    onCancelled = {}
+                ).show()
+            }
+
+            else -> Unit
+        }
     }
 
     /** 选项全集（顺序即展示顺序）。 */
@@ -122,8 +351,26 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         OptionEntry.Option(KeydroidxIcons.ICON_LOCK, R.string.keyphone_opt_guard) {
             launchGuardRules()
         },
-        OptionEntry.Option(KeydroidxIcons.ICON_SETTINGS, R.string.keyphone_opt_settings) {
-            relay(ACTION_SETTINGS)
+        OptionEntry.Option(KeydroidxIcons.ICON_SHIELD, R.string.settings_adblock) {
+            openSettingsCategory(SettingsNavigation.ADBLOCK)
+        },
+        OptionEntry.Option(KeydroidxIcons.ICON_SETTINGS, R.string.settings_general) {
+            openSettingsCategory(SettingsNavigation.GENERAL)
+        },
+        OptionEntry.Option(KeydroidxIcons.ICON_FAVORITE, R.string.bookmark_settings) {
+            openSettingsCategory(SettingsNavigation.BOOKMARK)
+        },
+        OptionEntry.Option(KeydroidxIcons.ICON_DISPLAY, R.string.settings_display) {
+            openSettingsCategory(SettingsNavigation.DISPLAY)
+        },
+        OptionEntry.Option(KeydroidxIcons.ICON_LOCK, R.string.settings_privacy) {
+            openSettingsCategory(SettingsNavigation.PRIVACY)
+        },
+        OptionEntry.Option(KeydroidxIcons.ICON_ADVANCED, R.string.settings_advanced) {
+            openSettingsCategory(SettingsNavigation.ADVANCED)
+        },
+        OptionEntry.Option(KeydroidxIcons.ICON_INFO, R.string.settings_about) {
+            openSettingsCategory(SettingsNavigation.ABOUT)
         },
         OptionEntry.Option(KeydroidxIcons.ICON_HELP, R.string.keyphone_opt_help) { launchHelp() },
         OptionEntry.Option(KeydroidxIcons.ICON_POWER, R.string.keyphone_opt_exit) {
@@ -153,7 +400,27 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         OptionEntry.Divider,
         OptionEntry.Section(R.string.keyphone_section_system),
         OptionEntry.Option(KeydroidxIcons.ICON_LOCK, R.string.keyphone_opt_guard) { launchGuardRules() },
-        OptionEntry.Option(KeydroidxIcons.ICON_SETTINGS, R.string.keyphone_opt_settings) { launchSettings() },
+        OptionEntry.Option(KeydroidxIcons.ICON_SHIELD, R.string.settings_adblock) {
+            openSettingsCategory(SettingsNavigation.ADBLOCK)
+        },
+        OptionEntry.Option(KeydroidxIcons.ICON_SETTINGS, R.string.settings_general) {
+            openSettingsCategory(SettingsNavigation.GENERAL)
+        },
+        OptionEntry.Option(KeydroidxIcons.ICON_FAVORITE, R.string.bookmark_settings) {
+            openSettingsCategory(SettingsNavigation.BOOKMARK)
+        },
+        OptionEntry.Option(KeydroidxIcons.ICON_DISPLAY, R.string.settings_display) {
+            openSettingsCategory(SettingsNavigation.DISPLAY)
+        },
+        OptionEntry.Option(KeydroidxIcons.ICON_LOCK, R.string.settings_privacy) {
+            openSettingsCategory(SettingsNavigation.PRIVACY)
+        },
+        OptionEntry.Option(KeydroidxIcons.ICON_ADVANCED, R.string.settings_advanced) {
+            openSettingsCategory(SettingsNavigation.ADVANCED)
+        },
+        OptionEntry.Option(KeydroidxIcons.ICON_INFO, R.string.settings_about) {
+            openSettingsCategory(SettingsNavigation.ABOUT)
+        },
         OptionEntry.Option(KeydroidxIcons.ICON_HELP, R.string.keyphone_opt_help) { launchHelp() },
         OptionEntry.Option(KeydroidxIcons.ICON_POWER, R.string.keyphone_opt_exit) { confirmExit() }
     )
@@ -202,14 +469,6 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
             )
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "打开标签页列表失败", t)
-        }
-    }
-
-    private fun launchSettings() {
-        try {
-            startActivity(Intent(this, SettingsActivity::class.java))
-        } catch (t: Throwable) {
-            KeydroidxLog.e(TAG, "打开设置失败", t)
         }
     }
 
@@ -271,6 +530,17 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         finishAffinity()
     }
 
+    private fun handleBack(): Boolean {
+        return when (currentLevel) {
+            ScreenLevel.SETTINGS_CATEGORY -> {
+                openOptionsRoot()
+                true
+            }
+
+            ScreenLevel.OPTIONS_ROOT -> false
+        }
+    }
+
     override fun onAction(action: Int): Boolean {
         val helper = focusHelper ?: return super.onAction(action)
         return when (action) {
@@ -278,6 +548,14 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
             KeydroidxKeyAction.SELECT -> {
                 helper.focusedView?.performClick()
                 true
+            }
+
+            KeydroidxKeyAction.SOFT_RIGHT -> {
+                if (handleBack()) {
+                    true
+                } else {
+                    super.onAction(action)
+                }
             }
 
             else -> super.onAction(action)

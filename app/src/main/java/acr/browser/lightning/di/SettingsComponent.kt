@@ -1,5 +1,6 @@
 package acr.browser.lightning.di
 
+import acr.browser.lightning.keyphone.KeyphoneOptionsActivity
 import acr.browser.lightning.settings.activity.SettingsActivity
 import android.app.Activity
 import dagger.BindsInstance
@@ -22,5 +23,5 @@ interface SettingsComponent {
     }
 
     fun inject(activity: SettingsActivity)
-
+    fun inject(activity: KeyphoneOptionsActivity)
 }
