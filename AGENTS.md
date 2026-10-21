@@ -13,7 +13,7 @@
 
 | 漏口 | 触发方式 | 现状 |
 |---|---|---|
-| **隐身模式** | `KeyphoneOptionsActivity.kt:216` → `IncognitoBrowserActivity.launch()`，而该类继承 `BrowserActivity`（Compose 宿主） | 打开后是触屏 Compose 浏览器，方向键基本不可用（待适配） |
+| **隐身模式** | 原 `KeyphoneOptionsActivity.kt` 存在入口拉起 `IncognitoBrowserActivity`（继承 `BrowserActivity` Compose 宿主） | **已移除**：选项菜单中已移除该入口，避免误入未适配的 Compose 触屏界面 |
 | **外部链接** | 其他 App 发 `VIEW` / `WEB_SEARCH` | **已适配**：Intent Filter 移至 `KeyphoneBrowserActivity`；`DefaultBrowserActivity` 亦改为转发代理，全部无缝进入按键机界面 |
 
 > 动这两个入口之前先想清楚：它们是「补适配」的候选，而不是可以忽略的死代码。

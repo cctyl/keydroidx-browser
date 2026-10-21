@@ -1,6 +1,5 @@
 package acr.browser.lightning.keyphone
 
-import acr.browser.lightning.IncognitoBrowserActivity
 import acr.browser.lightning.R
 import acr.browser.lightning.constant.SCHEME_BOOKMARKS
 import acr.browser.lightning.settings.activity.SettingsActivity
@@ -102,12 +101,6 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
     /** 页面模式全集：全部条目回传浏览页执行（浏览页才持有 BrowserPresenter）。 */
     private fun buildPageModeOptions(): List<OptionEntry> = listOf(
         OptionEntry.Section(R.string.keyphone_section_tabs),
-        OptionEntry.Option(KeydroidxIcons.ICON_ADD, R.string.keyphone_opt_new_tab) {
-            relay(ACTION_NEW_TAB)
-        },
-        OptionEntry.Option(KeydroidxIcons.ICON_LOCK, R.string.keyphone_opt_incognito) {
-            relay(ACTION_NEW_INCOGNITO_TAB)
-        },
         OptionEntry.Option(KeydroidxIcons.VIEW_LIST, R.string.keyphone_opt_tabs) {
             relay(ACTION_SHOW_TABS)
         },
@@ -147,8 +140,6 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
     /** 首页模式全集。 */
     private fun buildHomeOptions(): List<OptionEntry> = listOf(
         OptionEntry.Section(R.string.keyphone_section_tabs),
-        OptionEntry.Option(KeydroidxIcons.ICON_ADD, R.string.keyphone_opt_new_tab) { goHome() },
-        OptionEntry.Option(KeydroidxIcons.ICON_LOCK, R.string.keyphone_opt_incognito) { launchIncognito() },
         OptionEntry.Option(KeydroidxIcons.VIEW_LIST, R.string.keyphone_opt_tabs) { launchTabsList() },
         OptionEntry.Option(KeydroidxIcons.ICON_DELETE, R.string.keyphone_opt_clear_tabs) { confirmClearTabsFromHome() },
 
@@ -166,25 +157,6 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         OptionEntry.Option(KeydroidxIcons.ICON_HELP, R.string.keyphone_opt_help) { launchHelp() },
         OptionEntry.Option(KeydroidxIcons.ICON_POWER, R.string.keyphone_opt_exit) { confirmExit() }
     )
-
-    /**
-     * 新建标签页 = 回到按键机首页（搜索框 + 书签宫格 + 历史）。
-     *
-     * 浏览页现在是 `singleTask`，拉起来只会**复用**已有实例，不会自动回到主页视图；
-     * 所以必须带 [KeyphoneBrowserActivity.EXTRA_SHOW_HOME]（由 `BrowserHomeActivity` 原样透传），
-     * 否则用户点「新建标签页」会停在原来那个网页上。
-     */
-    private fun goHome() {
-        try {
-            startActivity(
-                Intent(this, BrowserHomeActivity::class.java)
-                    .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                    .putExtra(KeyphoneBrowserActivity.EXTRA_SHOW_HOME, true)
-            )
-        } catch (t: Throwable) {
-            KeydroidxLog.e(TAG, "返回首页失败", t)
-        }
-    }
 
     /**
      * 历史记录页（首页模式入口）。
@@ -212,15 +184,6 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
             startActivity(intent)
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, failMessage, t)
-        }
-    }
-
-    /** 无痕标签页：与上游 `BrowserNavigator.launchIncognito()` 同一入口。 */
-    private fun launchIncognito() {
-        try {
-            IncognitoBrowserActivity.launch(this, null)
-        } catch (t: Throwable) {
-            KeydroidxLog.e(TAG, "打开无痕浏览器失败", t)
         }
     }
 
