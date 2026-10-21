@@ -640,4 +640,125 @@ object KeyphoneViews {
         cell.setOnClickListener { onTabClicked(item) }
         return cell
     }
+
+    /**
+     * 正在下载的条目包装类（支持就地更新进度，避免列表全量重建导致焦点跳动）。
+     */
+    class DownloadProgressRow(
+        val row: LinearLayout,
+        private val subtitleView: TextView,
+        private val progressBar: android.widget.ProgressBar
+    ) {
+        fun update(statusText: String, progress: Int, isIndeterminate: Boolean) {
+            subtitleView.text = statusText
+            progressBar.isIndeterminate = isIndeterminate
+            if (!isIndeterminate) {
+                progressBar.progress = progress.coerceIn(0, 100)
+            }
+        }
+    }
+
+    /**
+     * 构造正在下载条目（带同步图标、标题、状态/大小副标题以及 3dp 极细复古进度条）。
+     */
+    fun downloadProgressRow(
+        context: Context,
+        title: CharSequence,
+        statusText: String,
+        progress: Int,
+        isIndeterminate: Boolean
+    ): DownloadProgressRow {
+        val theme = KeydroidxTheme.getCurrentTheme(context)
+        val row = LinearLayout(context)
+        applyRowBase(context, row, 54f)
+
+        // 1. 左侧图标（同步/下载中）
+        val iconView = buildIconView(context, KeydroidxIcons.SYNC)
+        row.addView(
+            iconView,
+            LinearLayout.LayoutParams(dp(context, 22f), ViewGroup.LayoutParams.WRAP_CONTENT)
+        )
+
+        // 2. 中间文本与进度条列
+        val column = LinearLayout(context)
+        column.orientation = LinearLayout.VERTICAL
+        column.gravity = Gravity.CENTER_VERTICAL
+
+        val titleView = TextView(context)
+        titleView.text = title
+        titleView.setTextColor(theme.textColor)
+        applyFontSize(titleView, R.dimen.keydroidx_font_body)
+        titleView.includeFontPadding = false
+        titleView.isSingleLine = true
+        titleView.ellipsize = TextUtils.TruncateAt.END
+        column.addView(
+            titleView,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        val subView = TextView(context)
+        subView.text = statusText
+        subView.setTextColor(theme.subTextColor)
+        applyFontSize(subView, R.dimen.keydroidx_font_caption)
+        subView.includeFontPadding = false
+        subView.isSingleLine = true
+        subView.ellipsize = TextUtils.TruncateAt.END
+        subView.setPadding(0, dp(context, 2f), 0, 0)
+        column.addView(
+            subView,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        // 3. 复古极细水平进度条 (3dp)
+        val progressBar = android.widget.ProgressBar(
+            context,
+            null,
+            android.R.attr.progressBarStyleHorizontal
+        )
+        progressBar.max = 100
+        progressBar.isIndeterminate = isIndeterminate
+        if (!isIndeterminate) {
+            progressBar.progress = progress.coerceIn(0, 100)
+        }
+
+        // 自定义进度条背景与高亮色 Drawable
+        val bgTrack = GradientDrawable().apply {
+            cornerRadius = dp(context, 1.5f).toFloat()
+            setColor(0x26FFFFFF)
+        }
+        val fgProgress = GradientDrawable().apply {
+            cornerRadius = dp(context, 1.5f).toFloat()
+            setColor(0xFFFDE047.toInt()) // 亮黄醒目色
+        }
+        val clipProgress = android.graphics.drawable.ClipDrawable(
+            fgProgress,
+            Gravity.START,
+            android.graphics.drawable.ClipDrawable.HORIZONTAL
+        )
+        val layers = android.graphics.drawable.LayerDrawable(arrayOf(bgTrack, clipProgress)).apply {
+            setId(0, android.R.id.background)
+            setId(1, android.R.id.progress)
+        }
+        progressBar.progressDrawable = layers
+
+        val pbLp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(context, 3f)
+        ).apply {
+            topMargin = dp(context, 4f)
+        }
+        column.addView(progressBar, pbLp)
+
+        val colLp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        colLp.marginStart = dp(context, 8f)
+        row.addView(column, colLp)
+
+        return DownloadProgressRow(row, subView, progressBar)
+    }
 }

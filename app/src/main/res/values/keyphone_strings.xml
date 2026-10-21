@@ -213,7 +213,13 @@
     <string name="keyphone_downloads_options_title">选项</string>
     <string name="keyphone_downloads_opt_open">打开文件</string>
     <string name="keyphone_downloads_opt_delete">删除</string>
+    <string name="keyphone_downloads_opt_cancel">取消下载</string>
     <string name="keyphone_downloads_opt_clear">清空全部记录</string>
+    <string name="keyphone_downloads_cancelled">已取消下载</string>
+    <string name="keyphone_downloads_status_pending">等待下载…</string>
+    <string name="keyphone_downloads_status_paused">已暂停</string>
+    <string name="keyphone_downloads_status_downloading">下载中 %1$d%% · %2$s / %3$s</string>
+    <string name="keyphone_downloads_status_downloading_unknown">下载中 · %1$s</string>
 
     <!-- 浏览页选项：标签页列表入口（直接放选项里，不再藏进设置页） -->
     <string name="keyphone_opt_tabs">标签页列表</string>

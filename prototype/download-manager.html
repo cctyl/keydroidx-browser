@@ -194,8 +194,37 @@ body {
   text-overflow: ellipsis;
 }
 .download-row.focused .row-sub { color: #E3F2FD; }
-.lost-tag { color: var(--text-warn); font-weight: 600; margin-left: 3px; }
-.download-row.focused .lost-tag { color: #FFA4A4; }
+
+/* 微型复古进度条 (按键机专用 3px 极细条) */
+.progress-track {
+  width: 100%;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 1.5px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+.download-row.focused .progress-track {
+  background: rgba(0, 0, 0, 0.25);
+}
+.progress-fill {
+  height: 100%;
+  background: var(--gold);
+  border-radius: 1.5px;
+  transition: width 0.25s ease;
+}
+.download-row.focused .progress-fill {
+  background: #FFF275;
+}
+
+/* 旋转同步动画 (下载中动态标识) */
+@keyframes spin-anim {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.icon-sync {
+  animation: spin-anim 2s linear infinite;
+}
 
 .empty-view {
   height: 100%;
@@ -646,10 +675,36 @@ body {
 // ==========================================
 
 const INITIAL_DOWNLOADS = [
-  { id: 1, name: "《网游之倒行逆施》（校对版全本）作者：张扬的五月.txt", size: "19.6 MB", exists: true },
-  { id: 2, name: "起点读书.apk", size: "119 MB", exists: true },
-  { id: 3, name: "Alook_8.3.apk", size: "60.6 MB", exists: false }, // 实际物理文件不存在（静默处理）
-  { id: 4, name: "奔向旷野 To Vastness-失忆海.mp3", size: "2.6 MB", exists: true }
+  {
+    id: 1,
+    name: "test_download_10MB.bin",
+    status: "downloading",
+    progress: 35,
+    downloadedBytes: 3.5,
+    totalBytes: 10.0,
+    size: "10.0 MB"
+  },
+  {
+    id: 2,
+    name: "《网游之倒行逆施》（校对版全本）作者：张扬的五月.txt",
+    status: "completed",
+    progress: 100,
+    size: "19.6 MB"
+  },
+  {
+    id: 3,
+    name: "起点读书.apk",
+    status: "completed",
+    progress: 100,
+    size: "119 MB"
+  },
+  {
+    id: 4,
+    name: "奔向旷野 To Vastness-失忆海.mp3",
+    status: "completed",
+    progress: 100,
+    size: "2.6 MB"
+  }
 ];
 
 let downloads = JSON.parse(JSON.stringify(INITIAL_DOWNLOADS));
@@ -690,35 +745,42 @@ function renderList() {
     return;
   }
 
-  // 有数据时软键标准呈现
+  const currentItem = downloads[focusedIndex];
   softLeftText.textContent = "选项";
-  softCenterText.textContent = "打开";
+  softCenterText.textContent = (currentItem && currentItem.status === "downloading") ? "取消" : "打开";
   softRightText.textContent = "返回";
-
-  if (focusedIndex >= downloads.length) {
-    focusedIndex = downloads.length - 1;
-  }
-  if (focusedIndex < 0) focusedIndex = 0;
 
   downloads.forEach((item, idx) => {
     const row = document.createElement("div");
     row.className = `download-row ${idx === focusedIndex ? "focused" : ""}`;
 
-    const iconSvg = `<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>`;
-    const subText = item.size || "";
+    const isDownloading = item.status === "downloading";
+
+    const iconSvg = isDownloading
+      ? `<svg class="icon-sync" viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>`
+      : `<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>`;
+
+    const subText = isDownloading
+      ? `下载中 ${item.progress}% · ${item.downloadedBytes.toFixed(1)} MB / ${item.totalBytes.toFixed(1)} MB`
+      : item.size;
+
+    const progressHtml = isDownloading
+      ? `<div class="progress-track"><div class="progress-fill" style="width:${item.progress}%"></div></div>`
+      : "";
 
     row.innerHTML = `
       <div class="row-icon">${iconSvg}</div>
       <div class="row-texts">
         <div class="row-title">${escapeHtml(item.name)}</div>
         <div class="row-sub">${subText}</div>
+        ${progressHtml}
       </div>
     `;
 
     row.onclick = () => {
       focusedIndex = idx;
       renderList();
-      handleOpenCurrent();
+      handlePrimaryAction();
     };
 
     listContent.appendChild(row);
@@ -742,12 +804,15 @@ function showToast(text) {
   }, 1800);
 }
 
-// 1. 打开当前聚焦文件
-function handleOpenCurrent() {
+// 1. 中间软键主操作 (打开 或 取消下载)
+function handlePrimaryAction() {
   if (downloads.length === 0) return;
   const item = downloads[focusedIndex];
-  if (!item.exists) {
-    showToast("文件不存在或已被删除");
+  if (item.status === "downloading") {
+    // 正在下载时，主键提示取消
+    downloads.splice(focusedIndex, 1);
+    renderList();
+    showToast("已取消下载");
   } else {
     showToast(`调用系统打开: ${item.name.substring(0, 10)}...`);
   }
@@ -760,26 +825,49 @@ function openOptionsMenu() {
 
   currentDialog = "OPTIONS";
   dialogFocusIndex = 0;
-  dialogOptions = [
-    {
-      id: "OPEN",
-      label: "1. 打开文件",
-      icon: `<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>`,
-      action: () => { closeDialog(); handleOpenCurrent(); }
-    },
-    {
-      id: "DELETE",
-      label: "2. 删除",
-      icon: `<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`,
-      action: () => { openDeleteFlow(item); }
-    },
-    {
-      id: "CLEAR",
-      label: "3. 清空全部记录",
-      icon: `<svg viewBox="0 0 24 24"><path d="M15 16h4v2h-4zm0-8h7v2h-7zm0 4h6v2h-6zM3 18c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V8H3v10zM14 5h-3l-1-1H6L5 5H2v2h12z"/></svg>`,
-      action: () => { openClearConfirm(); }
-    }
-  ];
+
+  if (item.status === "downloading") {
+    dialogOptions = [
+      {
+        id: "CANCEL",
+        label: "1. 取消下载",
+        icon: `<svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>`,
+        action: () => {
+          downloads.splice(focusedIndex, 1);
+          closeDialog();
+          renderList();
+          showToast("已取消下载");
+        }
+      },
+      {
+        id: "CLEAR",
+        label: "2. 清空全部记录",
+        icon: `<svg viewBox="0 0 24 24"><path d="M15 16h4v2h-4zm0-8h7v2h-7zm0 4h6v2h-6zM3 18c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V8H3v10zM14 5h-3l-1-1H6L5 5H2v2h12z"/></svg>`,
+        action: () => { openClearConfirm(); }
+      }
+    ];
+  } else {
+    dialogOptions = [
+      {
+        id: "OPEN",
+        label: "1. 打开文件",
+        icon: `<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>`,
+        action: () => { closeDialog(); handlePrimaryAction(); }
+      },
+      {
+        id: "DELETE",
+        label: "2. 删除",
+        icon: `<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`,
+        action: () => { openDeleteFlow(item); }
+      },
+      {
+        id: "CLEAR",
+        label: "3. 清空全部记录",
+        icon: `<svg viewBox="0 0 24 24"><path d="M15 16h4v2h-4zm0-8h7v2h-7zm0 4h6v2h-6zM3 18c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V8H3v10zM14 5h-3l-1-1H6L5 5H2v2h12z"/></svg>`,
+        action: () => { openClearConfirm(); }
+      }
+    ];
+  }
 
   renderDialogContent("选项", "选择", "返回");
   dialogOverlay.classList.add("active");
@@ -931,8 +1019,8 @@ function handleAction(action) {
     }
     renderList();
   } else if (action === "SELECT") {
-    // 确认键直接执行默认动作打开
-    handleOpenCurrent();
+    // 确认键直接执行默认动作 (打开 或 取消)
+    handlePrimaryAction();
   } else if (action === "SOFT_LEFT") {
     // 左软键呼出选项菜单
     openOptionsMenu();
@@ -1034,8 +1122,27 @@ function highlightKey(code) {
   }
 }
 
-// 初始化渲染
+// 初始化渲染与模拟下载进度轮询
 renderList();
+
+setInterval(() => {
+  let changed = false;
+  downloads.forEach((item) => {
+    if (item.status === "downloading") {
+      item.progress += 2;
+      item.downloadedBytes = (item.totalBytes * (item.progress / 100));
+      if (item.progress >= 100) {
+        item.status = "completed";
+        item.progress = 100;
+        showToast(`下载完成: ${item.name}`);
+      }
+      changed = true;
+    }
+  });
+  if (changed && currentDialog === null) {
+    renderList();
+  }
+}, 800);
 </script>
 
 </body>
