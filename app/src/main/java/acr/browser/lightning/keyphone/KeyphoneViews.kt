@@ -727,14 +727,15 @@ object KeyphoneViews {
             progressBar.progress = progress.coerceIn(0, 100)
         }
 
-        // 自定义进度条背景与高亮色 Drawable
+        // 自定义进度条背景与高亮色 Drawable (6dp 显眼高对比度按键机复古槽)
         val bgTrack = GradientDrawable().apply {
-            cornerRadius = dp(context, 1.5f).toFloat()
-            setColor(0x26FFFFFF)
+            cornerRadius = dp(context, 3f).toFloat()
+            setColor(0x40000000.toInt()) // 半透明深黑底槽
+            setStroke(dp(context, 1f), 0x4DFFFFFF) // 细白框
         }
         val fgProgress = GradientDrawable().apply {
-            cornerRadius = dp(context, 1.5f).toFloat()
-            setColor(0xFFFDE047.toInt()) // 亮黄醒目色
+            cornerRadius = dp(context, 3f).toFloat()
+            setColor(0xFFFDE047.toInt()) // 亮黄醒目填充色
         }
         val clipProgress = android.graphics.drawable.ClipDrawable(
             fgProgress,
@@ -749,9 +750,10 @@ object KeyphoneViews {
 
         val pbLp = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(context, 3f)
+            dp(context, 6f)
         ).apply {
-            topMargin = dp(context, 4f)
+            topMargin = dp(context, 5f)
+            bottomMargin = dp(context, 4f)
         }
         column.addView(progressBar, pbLp)
 
