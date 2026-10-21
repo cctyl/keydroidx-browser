@@ -19,24 +19,28 @@ import androidx.lifecycle.lifecycleScope
 import io.github.cctyl.nokia.common.log.KeydroidxLog
 import io.github.cctyl.nokia.common.model.KeydroidxKeyAction
 import io.github.cctyl.nokia.common.ui.KeydroidxIcons
+import io.github.cctyl.nokia.common.ui.KeydroidxUi
 import io.github.cctyl.nokia.common.ui.dialog.KeydroidxConfirmDialog
+import io.github.cctyl.nokia.common.ui.dialog.KeydroidxOptionsDialog
 import io.github.cctyl.nokia.common.ui.page.KeydroidxListFocusHelper
+import io.github.cctyl.nokia.common.util.KeydroidxDimens
 import io.github.cctyl.nokia.keycore.ui.KeydroidxBaseActivity
 import java.io.File
 import javax.inject.Inject
 import kotlinx.coroutines.launch
 
 /**
- * 按键机「下载记录」页（独立 Activity，与 [KeyphoneHistoryActivity] 同款骨架）。
+ * 按键机「下载记录」页（独立 Activity，严格遵从 FEATURE_PHONE_UI_SPEC 与 keydroidx-core 官方组件）。
  *
- * 继承 [KeydroidxBaseActivity] 自动获得顶部标题栏与统一的暗色质感。
- * 数据：[DownloadsRepository] 走 AppComponent member injection（[AppComponent.inject]）。
+ * 继承 [KeydroidxBaseActivity] 自动获得统一深色顶栏与按键解析能力。
+ * 数据：[DownloadsRepository] 走 AppComponent 依赖注入。
+ * 弹窗组件：全量采用官方 [KeydroidxOptionsDialog] 与 [KeydroidxConfirmDialog]。
  *
- * 按键与交互：
- * - UP / DOWN：移动光标（循环导航）；
- * - 确认键（SELECT）：打开下载的文件（调用系统查看器/关联应用）；若文件不存在则提示；
- * - 方向左键（LEFT）：删除当前条目及本地文件（确认弹窗）；
- * - LSK（左软键）：清空全部下载记录（确认弹窗）；
+ * 按键与交互规范：
+ * - UP / DOWN：移动光标（列表循环导航）；
+ * - 确认键（SELECT / 5 / Enter）或中软键：打开当前聚焦条目的文件（调用系统查看器/安装器）；
+ * - LSK（左软键）：呼出官方标准「选项」菜单（打开文件 / 删除 / 清空全部记录）；
+ * - 方向左键（LEFT）或选项菜单中选删除：弹出官方「删除下载」选项弹窗（仅删除记录 / 同时删除文件）；
  * - RSK（右软键）/ BACK：返回上一页。
  */
 class KeyphoneDownloadsActivity : KeydroidxBaseActivity() {
@@ -63,14 +67,18 @@ class KeyphoneDownloadsActivity : KeydroidxBaseActivity() {
         setPageTitle(getString(R.string.keyphone_downloads_title))
         setTitleIcon(KeydroidxIcons.ICON_DOWNLOAD)
         setStatusBarVisible(false)
-        setSoftKeys(
-            getString(R.string.keyphone_soft_clear),
-            null,
-            getString(R.string.keyphone_soft_back)
-        )
+        updateSoftKeys(hasItems = false)
         scroll = findViewById(R.id.keyphone_scroll)
         rowsContainer = findViewById(R.id.keyphone_rows)
         rebuild()
+    }
+
+    private fun updateSoftKeys(hasItems: Boolean) {
+        setSoftKeys(
+            if (hasItems) getString(R.string.keyphone_soft_options) else null,
+            if (hasItems) getString(R.string.keyphone_soft_open) else null,
+            getString(R.string.keyphone_soft_back)
+        )
     }
 
     /** 从数据库重载下载记录（删除/清空后重新绘制并保持焦点）。 */
@@ -99,31 +107,25 @@ class KeyphoneDownloadsActivity : KeydroidxBaseActivity() {
             container.addView(
                 KeyphoneViews.sectionLabel(this, getString(R.string.keyphone_downloads_empty))
             )
+            updateSoftKeys(hasItems = false)
             focusHelper = null
             return
         }
 
+        updateSoftKeys(hasItems = true)
+
         list.forEach { entry ->
             val filePath = entry.location.removePrefix(FILE)
             val file = File(filePath)
-            val exists = file.exists()
-
-            val summary = when {
-                exists && entry.contentSize.isNotBlank() -> entry.contentSize
-                exists -> ""
-                entry.contentSize.isNotBlank() ->
-                    "${entry.contentSize}  [${getString(R.string.keyphone_downloads_file_lost)}]"
-                else -> "[${getString(R.string.keyphone_downloads_file_lost)}]"
-            }
-
+            val summary = entry.contentSize.ifBlank { null }
             val title = entry.title.ifBlank { file.name.ifBlank { entry.url } }
-            val icon = if (exists) KeydroidxIcons.ICON_DOWNLOAD else KeydroidxIcons.ICON_CLOSE
+
             val row = KeyphoneViews.iconRow(
                 this,
-                icon,
+                KeydroidxIcons.ICON_DOWNLOAD,
                 null,
                 title,
-                summary.ifBlank { null }
+                summary
             )
             row.tag = entry
             row.setOnClickListener {
@@ -142,7 +144,9 @@ class KeyphoneDownloadsActivity : KeydroidxBaseActivity() {
         focusHelper = helper
     }
 
-    /** 打开下载的文件：通过系统 Intent 调用关联应用打开。 */
+    /**
+     * 打开下载的文件：通过系统 Intent 调用关联应用/安装器打开。
+     */
     private fun openDownload(entry: DownloadEntry) {
         val filePath = entry.location.removePrefix(FILE)
         val file = File(filePath)
@@ -157,8 +161,13 @@ class KeyphoneDownloadsActivity : KeydroidxBaseActivity() {
 
         val ext = MimeTypeMap.getFileExtensionFromUrl(file.name).ifBlank {
             file.extension
+        }.lowercase()
+
+        val mimeType = if (ext == "apk") {
+            "application/vnd.android.package-archive"
+        } else {
+            MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
         }
-        val mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.lowercase()) ?: "*/*"
 
         try {
             val contentUri = FileProvider.getUriForFile(
@@ -188,37 +197,109 @@ class KeyphoneDownloadsActivity : KeydroidxBaseActivity() {
         }
     }
 
-    private fun confirmDeleteFocused() {
-        val entry = entries.getOrNull(lastFocusIndex) ?: return
-        KeydroidxConfirmDialog(
-            this,
-            getString(R.string.keyphone_delete_download_title),
-            getString(R.string.keyphone_delete_download_message)
-        )
-            .setPositiveButton(getString(R.string.keyphone_soft_delete)) {
-                lifecycleScope.launch {
-                    try {
-                        downloadsRepository.deleteDownload(entry.location)
-                        val filePath = entry.location.removePrefix(FILE)
-                        val file = File(filePath)
-                        if (file.exists()) {
-                            file.delete()
-                        }
-                        Toast.makeText(
-                            this@KeyphoneDownloadsActivity,
-                            R.string.keyphone_downloads_deleted,
-                            Toast.LENGTH_SHORT
-                        ).show()
-                        rebuild()
-                    } catch (t: Throwable) {
-                        KeydroidxLog.e(TAG, "删除下载记录失败: ${entry.location}", t)
-                    }
+    /**
+     * 左软键（LSK）呼出官方标准「选项」菜单（KeydroidxOptionsDialog）。
+     */
+    private fun showOptionsMenu() {
+        if (entries.isEmpty()) return
+
+        val focusedEntry = entries.getOrNull(lastFocusIndex) ?: entries[0]
+        val currentTheme = KeydroidxUi.getTheme(this)
+        val iconSize = KeydroidxDimens.dp(resources, 18f)
+        val iconColor = currentTheme.textColor
+
+        KeydroidxOptionsDialog(this, getString(R.string.keyphone_downloads_options_title))
+            .addItem(
+                ID_OPT_OPEN,
+                getString(R.string.keyphone_downloads_opt_open),
+                KeydroidxIcons.createDrawable(this, KeydroidxIcons.ICON_DOWNLOAD, iconSize, iconColor)
+            )
+            .addItem(
+                ID_OPT_DELETE,
+                getString(R.string.keyphone_downloads_opt_delete),
+                KeydroidxIcons.createDrawable(this, KeydroidxIcons.ICON_DELETE, iconSize, iconColor)
+            )
+            .addItem(
+                ID_OPT_CLEAR,
+                getString(R.string.keyphone_downloads_opt_clear),
+                KeydroidxIcons.createDrawable(this, KeydroidxIcons.ICON_CLEAR_ALL, iconSize, iconColor)
+            )
+            .setOnOptionSelectedListener { _, item ->
+                when (item.id) {
+                    ID_OPT_OPEN -> openDownload(focusedEntry)
+                    ID_OPT_DELETE -> showDeleteChoiceDialog(focusedEntry)
+                    ID_OPT_CLEAR -> confirmClearDownloads()
                 }
             }
-            .setNegativeButton(getString(R.string.keyphone_soft_cancel), null)
             .show()
     }
 
+    /**
+     * 删除选择弹窗（使用官方标准 KeydroidxOptionsDialog）：
+     * 明确让用户选择是「仅删除记录」还是「同时删除文件」。
+     * 若用户选择同时删除文件而物理文件已不存在，静默忽略并删除记录。
+     */
+    private fun showDeleteChoiceDialog(entry: DownloadEntry) {
+        val currentTheme = KeydroidxUi.getTheme(this)
+        val iconSize = KeydroidxDimens.dp(resources, 18f)
+        val iconColor = currentTheme.textColor
+
+        KeydroidxOptionsDialog(this, getString(R.string.keyphone_delete_download_choice_title))
+            .addItem(
+                ID_DEL_ONLY_RECORD,
+                getString(R.string.keyphone_delete_download_only_record),
+                KeydroidxIcons.createDrawable(this, KeydroidxIcons.ICON_CLOSE, iconSize, iconColor)
+            )
+            .addItem(
+                ID_DEL_WITH_FILE,
+                getString(R.string.keyphone_delete_download_with_file),
+                KeydroidxIcons.createDrawable(this, KeydroidxIcons.ICON_DELETE, iconSize, iconColor)
+            )
+            .setOnOptionSelectedListener { _, item ->
+                when (item.id) {
+                    ID_DEL_ONLY_RECORD -> executeDelete(entry, deleteFile = false)
+                    ID_DEL_WITH_FILE -> executeDelete(entry, deleteFile = true)
+                }
+            }
+            .show()
+    }
+
+    /**
+     * 执行删除逻辑。
+     * @param deleteFile 是否尝试删除本地物理文件；如果文件不存在则静默忽略，只删记录。
+     */
+    private fun executeDelete(entry: DownloadEntry, deleteFile: Boolean) {
+        lifecycleScope.launch {
+            try {
+                downloadsRepository.deleteDownload(entry.location)
+                if (deleteFile) {
+                    val filePath = entry.location.removePrefix(FILE)
+                    val file = File(filePath)
+                    if (file.exists()) {
+                        file.delete()
+                    }
+                    Toast.makeText(
+                        this@KeyphoneDownloadsActivity,
+                        R.string.keyphone_downloads_deleted_both,
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    Toast.makeText(
+                        this@KeyphoneDownloadsActivity,
+                        R.string.keyphone_downloads_deleted,
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                rebuild()
+            } catch (t: Throwable) {
+                KeydroidxLog.e(TAG, "删除下载记录异常: ${entry.location}", t)
+            }
+        }
+    }
+
+    /**
+     * 清空全部下载记录（官方标准 KeydroidxConfirmDialog）。
+     */
     private fun confirmClearDownloads() {
         if (entries.isEmpty()) return
         KeydroidxConfirmDialog(
@@ -249,19 +330,25 @@ class KeyphoneDownloadsActivity : KeydroidxBaseActivity() {
     override fun onAction(action: Int): Boolean {
         val helper = focusHelper ?: return super.onAction(action)
         return when (action) {
-            KeydroidxKeyAction.UP, KeydroidxKeyAction.DOWN -> helper.onDirection(action)
+            KeydroidxKeyAction.UP, KeydroidxKeyAction.DOWN -> {
+                val handled = helper.onDirection(action)
+                lastFocusIndex = helper.focusIndex
+                handled
+            }
+
             KeydroidxKeyAction.SELECT -> {
                 helper.focusedView?.performClick()
                 true
             }
 
             KeydroidxKeyAction.LEFT -> {
-                confirmDeleteFocused()
+                val entry = entries.getOrNull(lastFocusIndex) ?: return true
+                showDeleteChoiceDialog(entry)
                 true
             }
 
             KeydroidxKeyAction.SOFT_LEFT -> {
-                confirmClearDownloads()
+                showOptionsMenu()
                 true
             }
 
@@ -271,5 +358,12 @@ class KeyphoneDownloadsActivity : KeydroidxBaseActivity() {
 
     companion object {
         private const val TAG = "KeyphoneDownloads"
+
+        private const val ID_OPT_OPEN = 1
+        private const val ID_OPT_DELETE = 2
+        private const val ID_OPT_CLEAR = 3
+
+        private const val ID_DEL_ONLY_RECORD = 10
+        private const val ID_DEL_WITH_FILE = 20
     }
 }

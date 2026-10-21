@@ -1,0 +1,1042 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KeydroidX 下载管理器原型 · 诺基亚按键机规范审核</title>
+<style>
+/* ============================================================
+   KeydroidX 下载管理器按键交互原型
+   遵循规范：
+   - FEATURE_PHONE_UI_SPEC.md (240×320, S40 / KaiOS 交互体系)
+   - keydroidx-core: KeydroidxOptionsDialog, KeydroidxConfirmDialog, KeydroidxBaseActivity
+   - NOKIA_DEVELOPMENT_RULES.md
+   ============================================================ */
+:root {
+  --primary-gradient: linear-gradient(180deg, #1A3A6B 0%, #0D1B3E 100%);
+  --bg-dark: #0D1B3E;
+  --bg-page: #0B162C;
+  --focus-bg: #2196F3;
+  --focus-bg-subtle: rgba(33, 150, 243, 0.35);
+  --text-main: #FFFFFF;
+  --text-dim: #90CAF9;
+  --text-warn: #FF6B6B;
+  --softkey-center: #FDE047;
+  --desk-bg: #14171B;
+  --desk-card: #1E232A;
+  --desk-border: #2E3540;
+  --gold: #E5B567;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background:
+    radial-gradient(1200px 500px at 70% -10%, rgba(26,58,107,.4), transparent 60%),
+    radial-gradient(800px 400px at 10% 110%, rgba(229,181,103,.08), transparent 60%),
+    var(--desk-bg);
+  color: #E8EEF5;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Noto Sans SC", sans-serif;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 顶部导览条 */
+.topbar {
+  padding: 14px 28px;
+  background: rgba(20, 23, 27, 0.88);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--desk-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.brand h1 { font-size: 17px; font-weight: 700; }
+.brand h1 span { color: var(--gold); }
+.brand p { font-size: 11px; color: #8A94A0; margin-top: 3px; }
+.badges { display: flex; gap: 8px; }
+.badge {
+  font-size: 11px; padding: 4px 10px; border-radius: 6px;
+  background: rgba(255,255,255,0.05); border: 1px solid var(--desk-border); color: #B0BCCC;
+}
+.badge b { color: #fff; }
+
+/* 主工作区 */
+.workspace {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 40px;
+  padding: 30px;
+  flex-wrap: wrap;
+}
+
+/* 手机机身模拟器 */
+.phone-casing {
+  background: linear-gradient(165deg, #2E3642 0%, #171B22 65%, #12151A 100%);
+  border: 1px solid #3E4856;
+  border-radius: 28px;
+  padding: 16px 14px 20px;
+  box-shadow: 0 28px 60px -15px rgba(0,0,0,0.85), inset 0 1px 0 rgba(255,255,255,0.12);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  user-select: none;
+}
+
+/* 听筒 */
+.phone-earpiece {
+  width: 44px; height: 4px; background: #222830;
+  border-radius: 2px; border: 1px solid #3A4452; margin-bottom: 12px;
+}
+
+/* 240x320 物理屏幕视口 */
+.screen-viewport {
+  width: 240px;
+  height: 320px;
+  background: var(--bg-page);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.6);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+/* 1. 顶栏：系统状态栏 + Activity 标题栏 */
+.screen-header {
+  flex: 0 0 auto;
+  background: var(--primary-gradient);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.status-bar {
+  height: 14px;
+  padding: 1px 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 9px;
+  color: #CBD5E1;
+}
+.status-icons { display: flex; align-items: center; gap: 4px; }
+.sig-bars { display: inline-flex; align-items: flex-end; gap: 1px; height: 8px; }
+.sig-bars i { width: 1.5px; background: #CBD5E1; border-radius: 0.5px; }
+.sig-bars i:nth-child(1){height:2.5px}.sig-bars i:nth-child(2){height:4px}
+.sig-bars i:nth-child(3){height:6px}.sig-bars i:nth-child(4){height:8px}
+.battery-icon {
+  width: 11px; height: 6px; border: 1px solid #CBD5E1; border-radius: 1px; position: relative;
+}
+.battery-icon::after {
+  content: ""; position: absolute; right: -2px; top: 1.5px; width: 1px; height: 2px; background: #CBD5E1;
+}
+.battery-fill { position: absolute; inset: 0.5px; width: 6px; background: #4ADE80; }
+
+.title-bar {
+  height: 24px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #FFFFFF;
+}
+.title-bar svg { width: 14px; height: 14px; fill: #FFFFFF; flex-shrink: 0; }
+
+/* 2. 内容列表区 */
+.screen-content {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--bg-page);
+  position: relative;
+}
+.screen-content::-webkit-scrollbar { display: none; }
+
+.download-row {
+  height: 48px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  cursor: pointer;
+}
+.download-row.focused {
+  background: var(--focus-bg);
+}
+.row-icon {
+  width: 22px; height: 22px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+}
+.row-icon svg { width: 16px; height: 16px; fill: var(--text-dim); }
+.download-row.focused .row-icon svg { fill: #FFFFFF; }
+.row-icon.lost svg { fill: var(--text-warn); }
+
+.row-texts { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
+.row-title {
+  font-size: 11.5px;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.25;
+}
+.row-sub {
+  font-size: 9.5px;
+  color: var(--text-dim);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.download-row.focused .row-sub { color: #E3F2FD; }
+.lost-tag { color: var(--text-warn); font-weight: 600; margin-left: 3px; }
+.download-row.focused .lost-tag { color: #FFA4A4; }
+
+.empty-view {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #8A98A8;
+  font-size: 12px;
+  gap: 8px;
+  padding: 20px;
+  text-align: center;
+}
+
+/* 3. 宿主底栏软键条（标准三段式） */
+.softkey-bar {
+  height: 26px;
+  flex: 0 0 26px;
+  background: var(--primary-gradient);
+  border-top: 1px solid rgba(255,255,255,0.08);
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  font-size: 11px;
+}
+.soft-left { flex: 1; text-align: left; color: #FFFFFF; font-weight: 500; }
+.soft-center { flex: 1; text-align: center; color: var(--softkey-center); font-weight: 700; }
+.soft-right { flex: 1; text-align: right; color: #FFFFFF; font-weight: 500; }
+
+/* 4. 标准诺基亚复古弹窗遮罩与弹窗（对标 KeydroidxOptionsDialog / KeydroidxConfirmDialog） */
+.dialog-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  z-index: 100;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+.dialog-overlay.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 弹窗主体（按键机标准 bottom-sheet 纯代码 UI 对齐 dialog_keydroidx_options.xml） */
+.keydroidx-dialog {
+  width: 100%;
+  background: #101F3D;
+  border-top: 1px solid #3D5A80;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 -4px 16px rgba(0,0,0,0.6);
+  transform: translateY(100%);
+  transition: transform 0.15s cubic-bezier(0, 0, 0.2, 1);
+}
+.dialog-overlay.active .keydroidx-dialog {
+  transform: translateY(0);
+}
+
+/* 弹窗顶栏 */
+.dialog-titlebar {
+  height: 24px;
+  background: var(--primary-gradient);
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #FFFFFF;
+}
+
+/* 弹窗内容 */
+.dialog-body {
+  padding: 3px 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.dialog-item {
+  height: 32px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: #FFFFFF;
+  cursor: pointer;
+}
+.dialog-item.focused {
+  background: var(--focus-bg);
+  border-radius: 4px;
+  margin: 0 4px;
+  padding: 0 8px;
+}
+.dialog-item svg { width: 14px; height: 14px; fill: #FFFFFF; flex-shrink: 0; }
+
+/* 确认弹窗的消息正文 */
+.dialog-message-body {
+  padding: 16px 14px;
+  font-size: 11.5px;
+  color: #FFFFFF;
+  line-height: 1.45;
+  text-align: center;
+}
+
+/* 弹窗底部软键条 (严格接管软键) */
+.dialog-bottombar {
+  height: 24px;
+  background: var(--primary-gradient);
+  border-top: 1px solid rgba(255,255,255,0.1);
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 11px;
+}
+.dialog-soft-left { flex: 1; text-align: left; color: #FFFFFF; font-weight: 600; }
+.dialog-soft-right { flex: 1; text-align: right; color: #FFFFFF; font-weight: 600; }
+
+/* Toast 轻量提示 */
+.toast-msg {
+  position: absolute;
+  bottom: 34px;
+  left: 50%;
+  transform: translateX(-50%) translateY(10px);
+  background: rgba(18, 28, 45, 0.95);
+  border: 1px solid #3D5A80;
+  color: #FFFFFF;
+  padding: 5px 12px;
+  font-size: 10px;
+  border-radius: 12px;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.2s ease;
+  z-index: 200;
+}
+.toast-msg.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* 物理键盘模拟区 */
+.phone-keypad {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  width: 240px;
+}
+
+.keypad-nav-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+.btn-soft {
+  width: 54px;
+  height: 28px;
+  background: #252D37;
+  border: 1px solid #384352;
+  border-radius: 8px;
+  color: #D1D9E4;
+  font-size: 11px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.4);
+  transition: transform 0.05s, background 0.1s;
+}
+.btn-soft:active, .btn-soft.active {
+  transform: translateY(1px);
+  background: #1E242C;
+}
+
+/* 五向导航键 (D-PAD) */
+.dpad-cluster {
+  width: 90px;
+  height: 72px;
+  position: relative;
+}
+.dpad-dir {
+  position: absolute;
+  background: #262E39;
+  border: 1px solid #384352;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #A0B0C4;
+}
+.dpad-dir:active, .dpad-dir.active { background: #1B222B; }
+.dpad-up { top: 0; left: 24px; width: 42px; height: 22px; border-radius: 6px 6px 0 0; }
+.dpad-down { bottom: 0; left: 24px; width: 42px; height: 22px; border-radius: 0 0 6px 6px; }
+.dpad-left { top: 16px; left: 0; width: 24px; height: 40px; border-radius: 6px 0 0 6px; }
+.dpad-right { top: 16px; right: 0; width: 24px; height: 40px; border-radius: 0 6px 6px 0; }
+.dpad-center {
+  position: absolute;
+  top: 20px; left: 27px; width: 36px; height: 32px;
+  background: linear-gradient(145deg, #323C4A, #202630);
+  border: 1.5px solid #4D5C70;
+  border-radius: 6px;
+  color: #FFFFFF;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+}
+.dpad-center:active, .dpad-center.active {
+  background: #171C23;
+  transform: translateY(1px);
+}
+
+/* 数字键网格 */
+.keypad-num-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  width: 100%;
+}
+.key-num {
+  height: 24px;
+  background: #1F252E;
+  border: 1px solid #2D3642;
+  border-radius: 6px;
+  color: #A4B2C2;
+  font-size: 10px;
+  font-weight: 600;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.key-num:active, .key-num.active { background: #171C23; }
+.key-num span { font-size: 7px; color: #5B6A7D; font-weight: 400; margin-top: -2px; }
+
+/* 右侧说明与审计面板 */
+.audit-panel {
+  width: 480px;
+  background: var(--desk-card);
+  border: 1px solid var(--desk-border);
+  border-radius: 16px;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.audit-panel h2 { font-size: 16px; color: #FFFFFF; border-bottom: 1px solid var(--desk-border); padding-bottom: 10px; }
+.audit-panel h2 span { color: var(--gold); }
+.audit-section { display: flex; flex-direction: column; gap: 8px; }
+.audit-section h3 { font-size: 12.5px; color: var(--gold); display: flex; align-items: center; gap: 6px; }
+.audit-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.audit-list li {
+  font-size: 11.5px; line-height: 1.5; color: #B4C0CF; padding-left: 14px; position: relative;
+}
+.audit-list li::before {
+  content: "•"; position: absolute; left: 2px; color: #64B5F6; font-size: 14px; line-height: 1;
+}
+.audit-list li b { color: #FFFFFF; }
+.key-tag {
+  display: inline-block;
+  background: #2E3846;
+  border: 1px solid #485669;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  color: #E2E8F0;
+  font-family: monospace;
+}
+.btn-reset {
+  margin-top: 8px;
+  align-self: flex-start;
+  padding: 6px 14px;
+  background: #252D37;
+  border: 1px solid #4D5C70;
+  color: #E2E8F0;
+  font-size: 11px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.btn-reset:hover { background: #323C4A; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">
+    <h1>KeydroidX <span>下载管理器</span> 规范原型 v2.0</h1>
+    <p>遵循 FEATURE_PHONE_UI_SPEC.md 规范与 keydroidx-core 官方标准组件</p>
+  </div>
+  <div class="badges">
+    <div class="badge">参考屏幕：<b>240×320</b></div>
+    <div class="badge">弹窗标准：<b>KeydroidxOptionsDialog / Confirm</b></div>
+    <div class="badge">操作模式：<b>纯按键 / 单手人体工学</b></div>
+  </div>
+</div>
+
+<div class="workspace">
+  <!-- 手机外壳 -->
+  <div class="phone-casing">
+    <div class="phone-earpiece"></div>
+
+    <!-- 240x320 物理屏幕 -->
+    <div class="screen-viewport" id="screen">
+      <!-- 1. 顶栏 (状态栏 + 标题栏) -->
+      <div class="screen-header">
+        <div class="status-bar">
+          <div class="status-icons">
+            <span class="sig-bars"><i></i><i></i><i></i><i></i></span>
+            <span>4G</span>
+          </div>
+          <span>17:08</span>
+          <div class="battery-icon"><div class="battery-fill"></div></div>
+        </div>
+        <div class="title-bar">
+          <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
+          <span id="pageTitle">下载</span>
+        </div>
+      </div>
+
+      <!-- 2. 内容列表区 -->
+      <div class="screen-content" id="listContent">
+        <!-- 动态生成下载记录行 -->
+      </div>
+
+      <!-- 3. 底栏软键条 (标准三段式) -->
+      <div class="softkey-bar">
+        <div class="soft-left" id="softLeftText">选项</div>
+        <div class="soft-center" id="softCenterText">打开</div>
+        <div class="soft-right" id="softRightText">返回</div>
+      </div>
+
+      <!-- 4. 贴底复古弹窗 (对标 KeydroidxOptionsDialog / KeydroidxConfirmDialog) -->
+      <div class="dialog-overlay" id="dialogOverlay">
+        <div class="keydroidx-dialog">
+          <div class="dialog-titlebar" id="dialogTitle">选项</div>
+          <div class="dialog-body" id="dialogBody">
+            <!-- 弹窗列表项或确认正文 -->
+          </div>
+          <div class="dialog-bottombar">
+            <div class="dialog-soft-left" id="dialogSoftLeft">选择</div>
+            <div class="dialog-soft-right" id="dialogSoftRight">返回</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Toast 提示框 -->
+      <div class="toast-msg" id="toastMsg">已删除记录</div>
+    </div>
+
+    <!-- 物理按键模拟区 -->
+    <div class="phone-keypad">
+      <div class="keypad-nav-row">
+        <button class="btn-soft" id="btnLsk" title="左软键 (Q / F1)">选项</button>
+        <div class="dpad-cluster">
+          <button class="dpad-dir dpad-up" id="btnUp" title="上 (↑)">▲</button>
+          <button class="dpad-dir dpad-down" id="btnDown" title="下 (↓)">▼</button>
+          <button class="dpad-dir dpad-left" id="btnLeft" title="左 (←)">◀</button>
+          <button class="dpad-dir dpad-right" id="btnRight" title="右 (→)">▶</button>
+          <button class="dpad-center" id="btnCenter" title="确定/打开 (Enter/OK)">OK</button>
+        </div>
+        <button class="btn-soft" id="btnRsk" title="右软键 (E / F2 / Esc)">返回</button>
+      </div>
+
+      <div class="keypad-num-grid">
+        <div class="key-num" id="key1">1<span>. /</span></div>
+        <div class="key-num" id="key2">2<span>ABC</span></div>
+        <div class="key-num" id="key3">3<span>DEF</span></div>
+        <div class="key-num" id="key4">4<span>GHI</span></div>
+        <div class="key-num" id="key5">5<span>JKL</span></div>
+        <div class="key-num" id="key6">6<span>MNO</span></div>
+        <div class="key-num" id="key7">7<span>PQRS</span></div>
+        <div class="key-num" id="key8">8<span>TUV</span></div>
+        <div class="key-num" id="key9">9<span>WXYZ</span></div>
+        <div class="key-num" id="keyStar">*<span></span></div>
+        <div class="key-num" id="key0">0<span>+</span></div>
+        <div class="key-num" id="keyHash">#<span></span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 规范与设计要点审查面板 -->
+  <div class="audit-panel">
+    <h2>交互规范审查与设计要领 <span>(Design Spec)</span></h2>
+
+    <div class="audit-section">
+      <h3>1. 键盘与软键体系 (FEATURE_PHONE_UI_SPEC §4)</h3>
+      <ul class="audit-list">
+        <li><b>主列表态软键明确</b>：左软键统一为 <span class="key-tag">选项</span>，中软键标黄突出默认操作 <span class="key-tag">打开</span>，右软键为 <span class="key-tag">返回</span>。</li>
+        <li><b>空列表态智能退化</b>：当无记录时，左右软键自动退化为仅保留 <span class="key-tag">返回</span>，杜绝按空菜单造成认知困惑。</li>
+        <li><b>确认键 (OK/5)</b>：直接打开当前聚焦的文件；如果文件失效则提示「文件不存在或已被删除」。</li>
+      </ul>
+    </div>
+
+    <div class="audit-section">
+      <h3>2. 选项菜单 (对标 KeydroidxOptionsDialog)</h3>
+      <ul class="audit-list">
+        <li>按左软键 <span class="key-tag">选项</span> 调起官方标准底部抽屉菜单，自带独立顶栏与软键条。</li>
+        <li><b>菜单项规划</b>：
+          1. <b>打开</b> (直接打开文件) /
+          2. <b>删除</b> (进入删除分支) /
+          3. <b>清空全部记录</b> (批量管理)。</li>
+        <li>选项弹窗的软键严格规范：左软键 <span class="key-tag">选择</span>，右软键 <span class="key-tag">返回</span>。</li>
+      </ul>
+    </div>
+
+    <div class="audit-section">
+      <h3>3. 删除决策弹窗 (遵从用户指示与规范 §41/§42)</h3>
+      <ul class="audit-list">
+        <li><b>用户指示响应</b>：列表无须提示文件失效，用户无须感知物理文件是否存在。</li>
+        <li>删除时统一弹出选择菜单：
+          <br>• 选项 1：<code>1. 仅删除记录</code>（保留本地文件，只清理数据库）
+          <br>• 选项 2：<code>2. 同时删除文件</code>（清理数据库，若本地文件存在则一并删除，若文件已不存在则静默忽略）</li>
+        <li>操作纯粹利落，无需多层弹窗干扰。</li>
+      </ul>
+    </div>
+
+    <div class="audit-section">
+      <h3>4. 电脑键盘操作支持 (可在当前网页直接实机体验)</h3>
+      <ul class="audit-list">
+        <li>方向键 <span class="key-tag">↑</span> / <span class="key-tag">↓</span>：移动列表或弹窗焦点</li>
+        <li>确认键 <span class="key-tag">Enter</span> / <span class="key-tag">Space</span>：执行选中项</li>
+        <li>左软键 <span class="key-tag">Q</span> / <span class="key-tag">F1</span>：打开选项菜单 / 确认选择</li>
+        <li>右软键 <span class="key-tag">E</span> / <span class="key-tag">Esc</span> / <span class="key-tag">Backspace</span>：返回 / 关闭弹窗</li>
+        <li>快捷删除 <span class="key-tag">←</span> / <span class="key-tag">Delete</span>：在列表中直接对聚焦条目触发删除选择</li>
+        <li>数字键 <span class="key-tag">1</span> ~ <span class="key-tag">3</span>：弹窗中快速数字直选</li>
+      </ul>
+    </div>
+
+    <button class="btn-reset" onclick="resetPrototypeData()">重置原型测试数据</button>
+  </div>
+</div>
+
+<script>
+// ==========================================
+// 原型核心逻辑：严格模拟按键机状态机与生命周期
+// ==========================================
+
+const INITIAL_DOWNLOADS = [
+  { id: 1, name: "《网游之倒行逆施》（校对版全本）作者：张扬的五月.txt", size: "19.6 MB", exists: true },
+  { id: 2, name: "起点读书.apk", size: "119 MB", exists: true },
+  { id: 3, name: "Alook_8.3.apk", size: "60.6 MB", exists: false }, // 实际物理文件不存在（静默处理）
+  { id: 4, name: "奔向旷野 To Vastness-失忆海.mp3", size: "2.6 MB", exists: true }
+];
+
+let downloads = JSON.parse(JSON.stringify(INITIAL_DOWNLOADS));
+let focusedIndex = 0;
+
+// 当前对话框状态：null | 'OPTIONS' | 'DELETE_CHOICE' | 'CONFIRM_CLEAR' | 'CONFIRM_DELETE_LOST'
+let currentDialog = null;
+let dialogFocusIndex = 0;
+let dialogOptions = [];
+let dialogPendingAction = null;
+
+// DOM 元素引用
+const listContent = document.getElementById("listContent");
+const softLeftText = document.getElementById("softLeftText");
+const softCenterText = document.getElementById("softCenterText");
+const softRightText = document.getElementById("softRightText");
+
+const dialogOverlay = document.getElementById("dialogOverlay");
+const dialogTitle = document.getElementById("dialogTitle");
+const dialogBody = document.getElementById("dialogBody");
+const dialogSoftLeft = document.getElementById("dialogSoftLeft");
+const dialogSoftRight = document.getElementById("dialogSoftRight");
+const toastMsg = document.getElementById("toastMsg");
+
+// 渲染下载列表
+function renderList() {
+  listContent.innerHTML = "";
+  if (downloads.length === 0) {
+    listContent.innerHTML = `
+      <div class="empty-view">
+        <svg style="width:32px;height:32px;fill:#4B5E77;" viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+        <div>暂无下载内容</div>
+      </div>
+    `;
+    softLeftText.textContent = "";
+    softCenterText.textContent = "";
+    softRightText.textContent = "返回";
+    return;
+  }
+
+  // 有数据时软键标准呈现
+  softLeftText.textContent = "选项";
+  softCenterText.textContent = "打开";
+  softRightText.textContent = "返回";
+
+  if (focusedIndex >= downloads.length) {
+    focusedIndex = downloads.length - 1;
+  }
+  if (focusedIndex < 0) focusedIndex = 0;
+
+  downloads.forEach((item, idx) => {
+    const row = document.createElement("div");
+    row.className = `download-row ${idx === focusedIndex ? "focused" : ""}`;
+
+    const iconSvg = `<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>`;
+    const subText = item.size || "";
+
+    row.innerHTML = `
+      <div class="row-icon">${iconSvg}</div>
+      <div class="row-texts">
+        <div class="row-title">${escapeHtml(item.name)}</div>
+        <div class="row-sub">${subText}</div>
+      </div>
+    `;
+
+    row.onclick = () => {
+      focusedIndex = idx;
+      renderList();
+      handleOpenCurrent();
+    };
+
+    listContent.appendChild(row);
+  });
+
+  // 保证焦点条目滚动可见
+  const focusedEl = listContent.querySelector(".download-row.focused");
+  if (focusedEl) {
+    focusedEl.scrollIntoView({ block: "nearest" });
+  }
+}
+
+// 显示 Toast
+let toastTimer = null;
+function showToast(text) {
+  toastMsg.textContent = text;
+  toastMsg.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toastMsg.classList.remove("show");
+  }, 1800);
+}
+
+// 1. 打开当前聚焦文件
+function handleOpenCurrent() {
+  if (downloads.length === 0) return;
+  const item = downloads[focusedIndex];
+  if (!item.exists) {
+    showToast("文件不存在或已被删除");
+  } else {
+    showToast(`调用系统打开: ${item.name.substring(0, 10)}...`);
+  }
+}
+
+// 2. 打开「选项」菜单 (对标 KeydroidxOptionsDialog)
+function openOptionsMenu() {
+  if (downloads.length === 0) return;
+  const item = downloads[focusedIndex];
+
+  currentDialog = "OPTIONS";
+  dialogFocusIndex = 0;
+  dialogOptions = [
+    {
+      id: "OPEN",
+      label: "1. 打开文件",
+      icon: `<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>`,
+      action: () => { closeDialog(); handleOpenCurrent(); }
+    },
+    {
+      id: "DELETE",
+      label: "2. 删除",
+      icon: `<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`,
+      action: () => { openDeleteFlow(item); }
+    },
+    {
+      id: "CLEAR",
+      label: "3. 清空全部记录",
+      icon: `<svg viewBox="0 0 24 24"><path d="M15 16h4v2h-4zm0-8h7v2h-7zm0 4h6v2h-6zM3 18c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V8H3v10zM14 5h-3l-1-1H6L5 5H2v2h12z"/></svg>`,
+      action: () => { openClearConfirm(); }
+    }
+  ];
+
+  renderDialogContent("选项", "选择", "返回");
+  dialogOverlay.classList.add("active");
+}
+
+// 3. 删除流程分发（统一弹窗选择：仅删除记录 / 同时删除文件）
+function openDeleteFlow(item) {
+  currentDialog = "DELETE_CHOICE";
+  dialogFocusIndex = 0;
+  dialogOptions = [
+    {
+      id: "DEL_RECORD_ONLY",
+      label: "1. 仅删除记录",
+      icon: `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>`,
+      action: () => {
+        downloads.splice(focusedIndex, 1);
+        closeDialog();
+        renderList();
+        showToast("已删除下载记录");
+      }
+    },
+    {
+      id: "DEL_WITH_FILE",
+      label: "2. 同时删除文件",
+      icon: `<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`,
+      action: () => {
+        // 如果文件存在则删文件，如果不存在则忽略，只删记录
+        downloads.splice(focusedIndex, 1);
+        closeDialog();
+        renderList();
+        showToast("已删除记录和文件");
+      }
+    }
+  ];
+
+  renderDialogContent("删除下载", "选择", "取消");
+}
+
+// 4. 清空全部记录确认 (对标 KeydroidxConfirmDialog)
+function openClearConfirm() {
+  currentDialog = "CONFIRM_CLEAR";
+  dialogFocusIndex = 0;
+  renderConfirmContent(
+    "清空记录",
+    "确定要清空全部下载记录吗？\n(本地物理文件将被保留)",
+    "清空",
+    "取消",
+    () => {
+      downloads = [];
+      closeDialog();
+      renderList();
+      showToast("已清空全部下载记录");
+    }
+  );
+}
+
+// 渲染选项列表型弹窗 (KeydroidxOptionsDialog)
+function renderDialogContent(title, leftSoft, rightSoft) {
+  dialogTitle.textContent = title;
+  dialogSoftLeft.textContent = leftSoft;
+  dialogSoftRight.textContent = rightSoft;
+  dialogBody.innerHTML = "";
+
+  dialogOptions.forEach((opt, idx) => {
+    const itemEl = document.createElement("div");
+    itemEl.className = `dialog-item ${idx === dialogFocusIndex ? "focused" : ""}`;
+    itemEl.innerHTML = `${opt.icon} <span>${opt.label}</span>`;
+    itemEl.onclick = () => {
+      dialogFocusIndex = idx;
+      opt.action();
+    };
+    dialogBody.appendChild(itemEl);
+  });
+}
+
+// 渲染确认型弹窗 (KeydroidxConfirmDialog)
+function renderConfirmContent(title, msg, leftSoft, rightSoft, onConfirm) {
+  dialogTitle.textContent = title;
+  dialogSoftLeft.textContent = leftSoft;
+  dialogSoftRight.textContent = rightSoft;
+  dialogPendingAction = onConfirm;
+  dialogBody.innerHTML = `<div class="dialog-message-body">${escapeHtml(msg).replace(/\n/g, "<br>")}</div>`;
+  dialogOverlay.classList.add("active");
+}
+
+// 关闭弹窗
+function closeDialog() {
+  currentDialog = null;
+  dialogOverlay.classList.remove("active");
+  dialogPendingAction = null;
+}
+
+// 按键调度系统 (严格映射实体按键与物理键盘)
+function handleAction(action) {
+  // 1. 如果处于弹窗态
+  if (currentDialog !== null) {
+    if (action === "UP") {
+      if (dialogOptions.length > 0 && dialogFocusIndex > 0) {
+        dialogFocusIndex--;
+        updateDialogSelection();
+      }
+    } else if (action === "DOWN") {
+      if (dialogOptions.length > 0 && dialogFocusIndex < dialogOptions.length - 1) {
+        dialogFocusIndex++;
+        updateDialogSelection();
+      }
+    } else if (action === "SELECT" || action === "SOFT_LEFT") {
+      // 确认操作
+      if (currentDialog === "CONFIRM_CLEAR" || currentDialog === "CONFIRM_DELETE_LOST") {
+        if (dialogPendingAction) dialogPendingAction();
+      } else if (dialogOptions.length > 0) {
+        dialogOptions[dialogFocusIndex].action();
+      }
+    } else if (action === "SOFT_RIGHT" || action === "BACK") {
+      closeDialog();
+    } else if (action >= "1" && action <= "9") {
+      const num = parseInt(action, 10);
+      if (num >= 1 && num <= dialogOptions.length) {
+        dialogFocusIndex = num - 1;
+        updateDialogSelection();
+        setTimeout(() => {
+          dialogOptions[dialogFocusIndex].action();
+        }, 120);
+      }
+    }
+    return;
+  }
+
+  // 2. 处于主列表态
+  if (downloads.length === 0) {
+    if (action === "SOFT_RIGHT" || action === "BACK") {
+      showToast("返回上一级页面");
+    }
+    return;
+  }
+
+  if (action === "UP") {
+    if (focusedIndex > 0) {
+      focusedIndex--;
+    } else {
+      focusedIndex = downloads.length - 1; // 循环导航
+    }
+    renderList();
+  } else if (action === "DOWN") {
+    if (focusedIndex < downloads.length - 1) {
+      focusedIndex++;
+    } else {
+      focusedIndex = 0; // 循环导航
+    }
+    renderList();
+  } else if (action === "SELECT") {
+    // 确认键直接执行默认动作打开
+    handleOpenCurrent();
+  } else if (action === "SOFT_LEFT") {
+    // 左软键呼出选项菜单
+    openOptionsMenu();
+  } else if (action === "LEFT") {
+    // 快捷向左删除当前条目
+    openDeleteFlow(downloads[focusedIndex]);
+  } else if (action === "SOFT_RIGHT" || action === "BACK") {
+    showToast("返回上一级页面");
+  }
+}
+
+function updateDialogSelection() {
+  const items = dialogBody.querySelectorAll(".dialog-item");
+  items.forEach((el, idx) => {
+    el.classList.toggle("focused", idx === dialogFocusIndex);
+  });
+}
+
+function resetPrototypeData() {
+  downloads = JSON.parse(JSON.stringify(INITIAL_DOWNLOADS));
+  focusedIndex = 0;
+  closeDialog();
+  renderList();
+  showToast("测试数据已重置");
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// 监听键盘按键
+window.addEventListener("keydown", (e) => {
+  // 阻止浏览器的默认滚动等行为
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) {
+    e.preventDefault();
+  }
+
+  highlightKey(e.code);
+
+  switch (e.code) {
+    case "ArrowUp": handleAction("UP"); break;
+    case "ArrowDown": handleAction("DOWN"); break;
+    case "ArrowLeft": handleAction("LEFT"); break;
+    case "ArrowRight": handleAction("RIGHT"); break;
+    case "Enter":
+    case "Numpad5":
+    case "Space":
+      handleAction("SELECT");
+      break;
+    case "KeyQ":
+    case "F1":
+      e.preventDefault();
+      handleAction("SOFT_LEFT");
+      break;
+    case "KeyE":
+    case "F2":
+    case "Escape":
+    case "Backspace":
+      e.preventDefault();
+      handleAction("SOFT_RIGHT");
+      break;
+    case "Delete":
+      handleAction("LEFT");
+      break;
+    case "Digit1": case "Numpad1": handleAction("1"); break;
+    case "Digit2": case "Numpad2": handleAction("2"); break;
+    case "Digit3": case "Numpad3": handleAction("3"); break;
+  }
+});
+
+// 点击手机模拟器按键
+document.getElementById("btnUp").onclick = () => handleAction("UP");
+document.getElementById("btnDown").onclick = () => handleAction("DOWN");
+document.getElementById("btnLeft").onclick = () => handleAction("LEFT");
+document.getElementById("btnRight").onclick = () => handleAction("RIGHT");
+document.getElementById("btnCenter").onclick = () => handleAction("SELECT");
+document.getElementById("btnLsk").onclick = () => handleAction("SOFT_LEFT");
+document.getElementById("btnRsk").onclick = () => handleAction("SOFT_RIGHT");
+
+document.getElementById("key1").onclick = () => handleAction("1");
+document.getElementById("key2").onclick = () => handleAction("2");
+document.getElementById("key3").onclick = () => handleAction("3");
+
+// 按键物理动画反馈
+function highlightKey(code) {
+  let el = null;
+  if (code === "ArrowUp") el = document.getElementById("btnUp");
+  if (code === "ArrowDown") el = document.getElementById("btnDown");
+  if (code === "ArrowLeft") el = document.getElementById("btnLeft");
+  if (code === "ArrowRight") el = document.getElementById("btnRight");
+  if (code === "Enter" || code === "Space") el = document.getElementById("btnCenter");
+  if (code === "KeyQ" || code === "F1") el = document.getElementById("btnLsk");
+  if (code === "KeyE" || code === "F2" || code === "Escape") el = document.getElementById("btnRsk");
+  if (el) {
+    el.classList.add("active");
+    setTimeout(() => el.classList.remove("active"), 120);
+  }
+}
+
+// 初始化渲染
+renderList();
+</script>
+
+</body>
+</html>
