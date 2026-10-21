@@ -97,6 +97,15 @@ class KeyphoneMouseController(
     /** 1~9 热区跳转动画，null 表示未在跳转 */
     private var jumpAnimator: ValueAnimator? = null
 
+    /** 光标定位滚动动画（按住 5 + 方向键）：基于当前光标位置的定向滚动 */
+    private var cursorScrollAnimator: ValueAnimator? = null
+    private var cursorScrollDir = KeyphoneShellOverlay.DIR_NONE
+    private var cursorScrollJsInFlight = false
+    private var cursorScrollPendingDelta = 0
+    private var cursorScrollLastRequestAt = 0L
+    private var cursorScrollResolvePending = true
+    private val cursorScrollLimitDirs = HashSet<Int>()
+
     /** 松手标记：置位后平滑减速缓冲一个微步即停 */
     private var edgeReleased = false
 
@@ -134,12 +143,47 @@ class KeyphoneMouseController(
         }
     }
 
-    /** 外部停止（Activity 切后台 / 退出网页态）：停连发并立即终止贴边滚动 */
+    /** 外部停止（Activity 切后台 / 退出网页态）：停连发并立即终止贴边滚动与光标定位滚动 */
     fun stopRepeat() {
         stopMoveRepeat()
         jumpAnimator?.cancel()
         jumpAnimator = null
         cancelEdgeAnimator()
+        stopCursorScroll()
+    }
+
+    /**
+     * 按住 5 + 方向键按下：启动基于当前光标位置的定向网页滚动（光标保持在原地不移动）。
+     */
+    fun onCursorScrollDown(dir: Int) {
+        if (cursorScrollDir == dir && cursorScrollAnimator != null) return
+        stopCursorScroll()
+        cursorScrollDir = dir
+        cursorScrollResolvePending = true
+        cursorScrollJsInFlight = false
+        cursorScrollPendingDelta = 0
+        cursorScrollLastRequestAt = 0L
+        cursorScrollLimitDirs.remove(dir)
+        ensurePositionValid()
+        startCursorTargetedScroll(dir)
+    }
+
+    /**
+     * 光标定位滚动方向键抬起：停止当前定向滚动。
+     */
+    fun onCursorScrollUp(dir: Int) {
+        if (cursorScrollDir == dir) {
+            stopCursorScroll()
+        }
+    }
+
+    /** 停止光标定位定向滚动 */
+    fun stopCursorScroll() {
+        cursorScrollAnimator?.cancel()
+        cursorScrollAnimator = null
+        cursorScrollDir = KeyphoneShellOverlay.DIR_NONE
+        cursorScrollPendingDelta = 0
+        cursorScrollJsInFlight = false
     }
 
     /**
@@ -340,6 +384,129 @@ class KeyphoneMouseController(
     private fun cancelEdgeAnimator() {
         edgeAnimator?.cancel()
         edgeAnimator = null
+    }
+
+    /**
+     * 启动基于光标位置的定向滚动：
+     * - 调用 [KeyphoneScroll] 脚本以光标 (cursorX, cursorY) 为锚点寻找滚动容器；
+     * - 针对浮层/抽屉内部的滚动容器定向滚动，未命中容器时回退滚动文档根；
+     * - 60ms 节流 + 单请求在途保护，防止阻塞弱机渲染与主线程。
+     */
+    private fun startCursorTargetedScroll(dir: Int) {
+        val webView = webViewProvider() ?: return
+        if (pageBusy()) {
+            KeydroidxLog.d(TAG, "页面繁忙，暂不启动光标定向滚动 dir=$dir")
+            return
+        }
+        KeydroidxLog.d(
+            TAG,
+            "光标定向滚动开始 dir=$dir cursor=($cursorX,$cursorY) host=${host.width}x${host.height}"
+        )
+        try {
+            ensureScrollModule(webView)
+        } catch (t: Throwable) {
+            KeydroidxLog.w(TAG, "注入光标滚动脚本失败", t)
+        }
+        val vertical = dir == KeyphoneShellOverlay.DIR_UP || dir == KeyphoneShellOverlay.DIR_DOWN
+        val sign = if (dir == KeyphoneShellOverlay.DIR_UP || dir == KeyphoneShellOverlay.DIR_LEFT) -1 else 1
+        val dim = if (vertical) host.height else host.width
+        val interval = if (vertical) PAGE_SCROLL_INTERVAL_MS else PAGE_SCROLL_INTERVAL_H_MS
+        val ratio = if (vertical) PAGE_SCROLL_STEP_RATIO_V else PAGE_SCROLL_STEP_RATIO_H
+        val pxPerMs = dim * ratio / interval
+        var lastFrame = 0L
+        var remainder = 0f
+        val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = interval
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.RESTART
+            interpolator = LinearInterpolator()
+            addUpdateListener { _ ->
+                val now = AnimationUtils.currentAnimationTimeMillis()
+                if (lastFrame == 0L) {
+                    lastFrame = now
+                    return@addUpdateListener
+                }
+                val dt = (now - lastFrame).coerceIn(0L, 100L)
+                lastFrame = now
+                remainder += pxPerMs * dt
+                val d = remainder.toInt()
+                if (d <= 0) return@addUpdateListener
+                remainder -= d
+
+                cursorScrollPendingDelta += d
+                val nowMs = SystemClock.elapsedRealtime()
+                if (!cursorScrollJsInFlight &&
+                    nowMs - cursorScrollLastRequestAt >= SCROLL_REQUEST_INTERVAL_MS &&
+                    cursorScrollPendingDelta > 0
+                ) {
+                    val flush = cursorScrollPendingDelta
+                    cursorScrollPendingDelta = 0
+                    cursorScrollLastRequestAt = nowMs
+                    requestCursorScroll(webView, vertical, sign, flush)
+                }
+            }
+        }
+        cursorScrollAnimator = anim
+        anim.start()
+    }
+
+    private fun requestCursorScroll(webView: WebView, vertical: Boolean, sign: Int, delta: Int) {
+        if (pageBusy()) {
+            cursorScrollPendingDelta = 0
+            return
+        }
+        val dir = cursorScrollDir
+        if (dir in cursorScrollLimitDirs) {
+            handler.post { stopCursorScroll() }
+            return
+        }
+        val dx = if (vertical) 0 else sign * delta
+        val dy = if (vertical) sign * delta else 0
+        val resolve = if (cursorScrollResolvePending) 1 else 0
+        cursorScrollResolvePending = false
+        cursorScrollJsInFlight = true
+        val script = "window.__keyphone_scroll__&&window.__keyphone_scroll__.by(" +
+            "$cursorX,$cursorY,$dx,$dy,${host.width},${host.height},$resolve)"
+        try {
+            webView.evaluateJavascript(script) { raw ->
+                cursorScrollJsInFlight = false
+                val status = raw?.trim('"')
+                when (status) {
+                    "scroll", "consume" -> Unit
+                    "end" -> {
+                        cursorScrollLimitDirs.add(dir)
+                        handler.post { stopCursorScroll() }
+                    }
+                    else -> {
+                        // "doc"（无特定元素容器）或脚本未就绪时，回退到原生窗口滚动
+                        if (!pageBusy()) {
+                            try {
+                                val canScroll = if (vertical) {
+                                    webView.canScrollVertically(sign)
+                                } else {
+                                    webView.canScrollHorizontally(sign)
+                                }
+                                if (!canScroll) {
+                                    cursorScrollLimitDirs.add(dir)
+                                    handler.post { stopCursorScroll() }
+                                } else {
+                                    if (vertical) {
+                                        webView.scrollBy(0, dy)
+                                    } else {
+                                        webView.scrollBy(dx, 0)
+                                    }
+                                }
+                            } catch (t: Throwable) {
+                                KeydroidxLog.w(TAG, "回退窗口滚动失败 vertical=$vertical sign=$sign", t)
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            cursorScrollJsInFlight = false
+            KeydroidxLog.w(TAG, "光标定位滚动 evaluateJavascript 异常", t)
+        }
     }
 
     /** 页面是否无响应（宿主看门狗判定）；为真时所有跨进程调用都要跳过 */

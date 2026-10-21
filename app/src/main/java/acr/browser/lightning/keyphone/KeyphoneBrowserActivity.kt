@@ -188,6 +188,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     /** 确认键已向 WebView 派发 DOWN 尚未派发 UP（防止触摸序列悬挂） */
     private var mouseTouchDown = false
 
+    /** 按住 5 键作为修饰键与方向键配合光标定位滚动 */
+    private var cursorScrollModifierHeld = false
+    private var cursorScrollModifierUsed = false
+    private var cursorScrollModifierDownAt = 0L
+    private var cursorScrollDirectionKeyCode = KeyEvent.KEYCODE_UNKNOWN
+
     /** 网页输入劫持：探测定时器与状态 */
     private val inputProbeHandler = Handler(Looper.getMainLooper())
     private var webInputProbeAttempt = 0
@@ -539,6 +545,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             dispatchCursorTouch(MotionEvent.ACTION_UP)
         }
         mouseController?.stopRepeat()
+        resetCursorScrollModifierState()
         cancelWebInputProbe()
         presenter.onViewHidden()
     }
@@ -4535,6 +4542,61 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 KeyEvent.KEYCODE_DPAD_RIGHT -> KeyphoneShellOverlay.DIR_RIGHT
                 else -> KeyphoneShellOverlay.DIR_NONE
             }
+
+            // 1. 数字 5 键作为修饰键：按住 5 期间方向键改为基于光标当前位置的定向滚动
+            if (event.keyCode == KeyEvent.KEYCODE_5) {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    if (event.repeatCount == 0) {
+                        cursorScrollModifierHeld = true
+                        cursorScrollModifierUsed = false
+                        cursorScrollModifierDownAt = SystemClock.uptimeMillis()
+                        KeydroidxLog.d(TAG, "5 键按下，进入光标定向滚动待命")
+                    }
+                    return true
+                } else if (event.action == KeyEvent.ACTION_UP) {
+                    val wasHeld = cursorScrollModifierHeld
+                    val wasUsed = cursorScrollModifierUsed
+                    val downAt = cursorScrollModifierDownAt
+                    cursorScrollModifierHeld = false
+                    cursorScrollModifierUsed = false
+                    cursorScrollModifierDownAt = 0L
+                    mouseController?.stopCursorScroll()
+                    if (wasHeld && !wasUsed) {
+                        val duration = SystemClock.uptimeMillis() - downAt
+                        if (duration < ViewConfiguration.getLongPressTimeout()) {
+                            // 短按 5 键且未触发过组合滚动：保留原有 5 号热区跳转
+                            jumpCursorToZone(5)
+                        }
+                    }
+                    return true
+                }
+            }
+
+            // 2. 修饰键按住期间的方向键：驱动光标定向滚动（光标保持在原地不移动）
+            if (cursorScrollModifierHeld && dir != KeyphoneShellOverlay.DIR_NONE) {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    cursorScrollModifierUsed = true
+                    cursorScrollDirectionKeyCode = event.keyCode
+                    mouseController?.onCursorScrollDown(dir)
+                } else if (event.action == KeyEvent.ACTION_UP) {
+                    if (cursorScrollDirectionKeyCode == event.keyCode) {
+                        cursorScrollDirectionKeyCode = KeyEvent.KEYCODE_UNKNOWN
+                    }
+                    mouseController?.onCursorScrollUp(dir)
+                }
+                return true
+            }
+
+            // 3. 5 键已松开但方向键刚才由定向滚动消费了 DOWN，其随后的 UP 安全闭环消费
+            if (cursorScrollDirectionKeyCode == event.keyCode && event.action == KeyEvent.ACTION_UP) {
+                cursorScrollDirectionKeyCode = KeyEvent.KEYCODE_UNKNOWN
+                if (dir != KeyphoneShellOverlay.DIR_NONE) {
+                    mouseController?.onCursorScrollUp(dir)
+                }
+                return true
+            }
+
+            // 4. 普通方向键：移动虚拟光标（微移/加速/贴边）
             if (dir != KeyphoneShellOverlay.DIR_NONE) {
                 if (event.action == KeyEvent.ACTION_DOWN) {
                     mouseController?.onDirectionDown(dir)
@@ -4935,9 +4997,19 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 dispatchCursorTouch(MotionEvent.ACTION_UP)
             }
             mouseController?.stopRepeat()
+            resetCursorScrollModifierState()
             cancelWebInputProbe()
             cursor.visibility = View.GONE
         }
+    }
+
+    /** 复位按住 5 键组合滚动状态机 */
+    private fun resetCursorScrollModifierState() {
+        cursorScrollModifierHeld = false
+        cursorScrollModifierUsed = false
+        cursorScrollModifierDownAt = 0L
+        cursorScrollDirectionKeyCode = KeyEvent.KEYCODE_UNKNOWN
+        mouseController?.stopCursorScroll()
     }
 
     /**
