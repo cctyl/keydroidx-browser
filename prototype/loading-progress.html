@@ -1,0 +1,996 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lightning Browser × KeydroidX — 顶部炫彩加载进度条原型</title>
+<style>
+/* ============================================================
+   Lightning Browser 按键机化原型 · 顶部炫彩加载进度条专项
+   
+   需求定位：
+   - 网页加载过程中，在顶栏（UC标签栏/地址栏正下方、网页主内容区最顶端）
+   - 显示一条从左至右延伸的极细炫彩动态进度条
+   - 动态效果：不仅按百分比从左向右推进，且进度条内部伴有持续流动的炫彩光波
+     （即使弱网卡在 70%~80%，流光仍在流动，让用户明确知晓仍在活跃加载未卡死）
+   - 加载到 100% 时：光芒全屏扫过并平滑淡出，随后隐藏
+   ============================================================ */
+:root {
+  --primary: #1A3A6B;
+  --dark: #0D1B3E;
+  --accent: #64B5F6;
+  --text: #E8EEF5;
+  --sub: #90CAF9;
+  --card: rgba(13, 27, 62, .92);
+  --status: #CBD5E1;
+  --sk-center: #FDE047;
+  --gold: #E5B567;
+  --desk: #121519;
+  --desk-line: #262B33;
+  --ink: #E8ECF1;
+  --ink-dim: #8A94A0;
+  
+  /* 炫彩渐变色定义 (4 种预设) */
+  --grad-aurora: linear-gradient(90deg, #00f2fe, #4facfe, #7f00ff, #ff007f, #00f2fe);
+  --grad-rainbow: linear-gradient(90deg, #ff3366, #ff7a00, #ffd200, #00e676, #00e5ff, #7f00ff, #ff3366);
+  --grad-sunset: linear-gradient(90deg, #ff0844, #ffb199, #f12711, #f5af19, #00e5ff, #ff0844);
+  --grad-goldcyan: linear-gradient(90deg, #ffb300, #76ff03, #00e5ff, #2979ff, #d500f9, #ffb300);
+
+  /* 当前激活的渐变与光晕 */
+  --cur-grad: var(--grad-aurora);
+  --cur-glow: 0 0 6px rgba(0, 242, 254, 0.75), 0 0 10px rgba(255, 0, 127, 0.45);
+  --cur-spark: #ffffff;
+  --bar-height: 2px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background:
+    radial-gradient(1200px 500px at 70% -5%, rgba(26, 58, 107, .4), transparent 60%),
+    radial-gradient(900px 450px at 15% 105%, rgba(229, 181, 103, .08), transparent 60%),
+    var(--desk);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  min-height: 100vh;
+  line-height: 1.5;
+}
+
+/* 顶部全站 Header */
+.topbar-page {
+  position: sticky; top: 0; z-index: 100;
+  display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+  padding: 12px 28px;
+  background: rgba(18, 21, 25, .88);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--desk-line);
+}
+.brand h1 { font-size: 18px; font-weight: 700; letter-spacing: .4px; display: flex; align-items: center; gap: 8px; }
+.brand h1 .tag-pill {
+  font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 4px;
+  background: linear-gradient(90deg, #FF007F, #00F2FE); color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.4);
+}
+.brand p { font-size: 11.5px; color: var(--ink-dim); margin-top: 3px; }
+
+.facts { display: flex; gap: 10px; flex-wrap: wrap; margin-left: auto; align-items: center; }
+.fchip {
+  font-size: 11px; color: var(--ink-dim); border: 1px solid var(--desk-line); border-radius: 8px;
+  padding: 5px 11px; background: rgba(255, 255, 255, .03);
+}
+.fchip b { color: var(--ink); font-weight: 600; }
+.fchip .badge {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: #00E676; margin-right: 5px; box-shadow: 0 0 6px #00E676;
+}
+
+/* 交互控制控制台 (浮动工作台) */
+.control-dock {
+  background: #181D23; border-bottom: 1px solid var(--desk-line);
+  padding: 14px 28px; display: flex; flex-direction: column; gap: 12px;
+}
+.control-row {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+}
+.ctrl-label {
+  font-size: 11.5px; font-weight: 700; color: var(--gold); letter-spacing: .5px;
+  min-width: 78px; text-transform: uppercase;
+}
+.btn-group { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.cbtn {
+  background: #242B34; border: 1px solid #36404D; color: var(--ink);
+  padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 500;
+  cursor: pointer; transition: all .15s ease; user-select: none;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.cbtn:hover { background: #2F3844; border-color: #4A5768; }
+.cbtn:active { transform: scale(.97); }
+.cbtn.primary {
+  background: linear-gradient(135deg, #1A4788, #2E6BC7);
+  border-color: #4285F4; color: #fff; box-shadow: 0 2px 8px rgba(46,107,199,.35);
+}
+.cbtn.primary:hover { background: linear-gradient(135deg, #2055A2, #397AE2); }
+.cbtn.active {
+  background: #1A3A6B; border-color: #64B5F6; color: #fff;
+  box-shadow: inset 0 0 0 1px #64B5F6;
+}
+
+/* 渐变配色选钮 */
+.theme-btn {
+  position: relative; overflow: hidden; padding-left: 26px;
+}
+.theme-btn::before {
+  content: ""; position: absolute; left: 8px; top: 50%; transform: translateY(-50%);
+  width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(255,255,255,.4);
+}
+.theme-btn[data-theme="aurora"]::before { background: var(--grad-aurora); }
+.theme-btn[data-theme="rainbow"]::before { background: var(--grad-rainbow); }
+.theme-btn[data-theme="sunset"]::before { background: var(--grad-sunset); }
+.theme-btn[data-theme="goldcyan"]::before { background: var(--grad-goldcyan); }
+
+/* 滑块控件 */
+.slider-wrap {
+  display: flex; align-items: center; gap: 10px; background: #20262E;
+  padding: 4px 12px; border-radius: 6px; border: 1px solid #343E4B;
+}
+.slider-wrap input[type=range] {
+  appearance: none; -webkit-appearance: none;
+  width: 140px; height: 5px; border-radius: 3px; background: #394452; outline: none;
+}
+.slider-wrap input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+  background: #64B5F6; cursor: pointer; box-shadow: 0 0 6px rgba(100,181,246,.8);
+}
+.val-badge {
+  font-family: Consolas, monospace; font-size: 12px; font-weight: 700;
+  color: var(--sk-center); min-width: 38px; text-align: right;
+}
+
+/* 主展示画廊 */
+.gallery {
+  display: flex; flex-wrap: wrap; gap: 36px 28px;
+  padding: 30px 28px 80px; justify-content: center;
+}
+.board {
+  display: flex; flex-direction: column; align-items: center; width: 264px;
+}
+.board.main-board {
+  width: auto; max-width: 100%;
+}
+.board.main-board .phone-container {
+  display: flex; gap: 28px; flex-wrap: wrap; justify-content: center;
+}
+
+/* 机身外壳 (Nokia 按键机质感) */
+.phone {
+  background: linear-gradient(160deg, #2C343E, #16191E 65%);
+  border: 1px solid #3E4856; border-radius: 24px; padding: 13px 11px 10px;
+  box-shadow: 0 24px 55px -16px rgba(0,0,0,.85), inset 0 1px 0 rgba(255,255,255,.09);
+  transition: transform .2s ease, box-shadow .2s ease;
+  position: relative;
+}
+.board:hover .phone {
+  transform: translateY(-3px);
+  box-shadow: 0 28px 60px -16px rgba(0,0,0,.92), inset 0 1px 0 rgba(255,255,255,.14);
+}
+.keyhints {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 6px 0; color: #5B6674; font-size: 9px; letter-spacing: 1px;
+}
+.keyhints i {
+  width: 13px; height: 13px; border: 1px solid #3E4854; border-radius: 50%; display: inline-block;
+}
+
+/* 屏幕 240×320 (QVGA) 默认 / 320×480 (HVGA) */
+.screen {
+  position: relative; width: 240px; height: 320px; overflow: hidden;
+  background: #0E1622; border-radius: 3px; display: flex; flex-direction: column;
+  text-align: left;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,.6);
+  transition: width .25s ease, height .25s ease;
+}
+.screen.hvga {
+  width: 320px; height: 480px;
+}
+
+/* 顶部状态栏 22dp */
+.topbar-s {
+  height: 20px; flex: 0 0 20px; background: linear-gradient(180deg, #18335C, #0F203D);
+  display: flex; align-items: center; padding: 0 6px; color: var(--status); font-size: 9.5px;
+  border-bottom: 1px solid rgba(0,0,0,.3);
+}
+.topbar-s .tic { font-size: 11px; margin-right: 4px; color: #64B5F6; }
+.topbar-s .tt { flex: 1; font-size: 10px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar-s .st { display: flex; align-items: center; gap: 4px; font-size: 8.5px; }
+.sig { display: inline-flex; align-items: flex-end; gap: 1px; height: 8px; }
+.sig i { width: 1.5px; background: var(--status); border-radius: .5px; display: block; }
+.sig i:nth-child(1) { height: 2.5px; } .sig i:nth-child(2) { height: 4.5px; }
+.sig i:nth-child(3) { height: 6px; } .sig i:nth-child(4) { height: 8px; }
+.batt { display: inline-flex; align-items: center; gap: 2px; }
+.batt .case { width: 11px; height: 6px; border: 1px solid var(--status); border-radius: 1px; position: relative; }
+.batt .case::after { content: ""; position: absolute; right: -2px; top: 1px; width: 1.5px; height: 2.5px; background: var(--status); }
+.batt .fill { position: absolute; left: .5px; top: .5px; bottom: .5px; width: 8px; background: #4ADE80; }
+
+/* UC 横向标签栏 */
+.tab-bar-uc {
+  height: 24px; flex: 0 0 24px; background: #121D2C;
+  display: flex; align-items: center; padding: 0 3px; gap: 3px;
+  overflow: hidden; border-bottom: 1px solid #1A283B;
+}
+.tab-pill-uc {
+  height: 18px; padding: 0 6px; border-radius: 3px; background: #1B293C;
+  display: inline-flex; align-items: center; gap: 4px; font-size: 9.5px; color: #8EA0B5;
+  white-space: nowrap; max-width: 110px;
+}
+.tab-pill-uc.active {
+  background: #253A54; color: #FFFFFF; font-weight: 600;
+  border: 1px solid rgba(100, 181, 246, .35);
+}
+.tab-pill-uc .tab-fav {
+  width: 9px; height: 9px; border-radius: 2px; background: #E5B567; display: inline-block;
+}
+.tab-pill-uc .tab-title {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tab-add-btn {
+  width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: #64B5F6;
+}
+
+/* 地址栏 */
+.addr-bar-uc {
+  height: 22px; flex: 0 0 22px; background: #182637;
+  display: flex; align-items: center; padding: 0 6px; gap: 5px;
+  border-bottom: 1px solid #203147;
+}
+.addr-lock { font-size: 9px; color: #4ADE80; }
+.addr-url {
+  font-family: Consolas, monospace; font-size: 9.5px; color: #E2E8F0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;
+}
+.addr-refresh { font-size: 10px; color: #90CAF9; cursor: pointer; }
+
+/* ============================================================
+   ★★★★★ 核心：炫彩流光进度条容器与动画 ★★★★★
+   ============================================================ */
+.progress-rail {
+  position: relative;
+  width: 100%;
+  height: var(--bar-height);
+  background: rgba(0, 0, 0, 0.4); /* 底轨极暗底色，突显炫彩 */
+  overflow: visible; /* 允许光晕溢出 */
+  z-index: 50;
+  transition: opacity .25s ease;
+}
+.progress-rail.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 进度条本尊 */
+.progress-bar-fill {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 0%; /* JS 动态控制 0% ~ 100% */
+  background: var(--cur-grad);
+  background-size: 260% 100%; /* 大于 100% 才能产生横向流动效果 */
+  animation: chromaticFlow 1.6s linear infinite;
+  box-shadow: var(--cur-glow);
+  transform-origin: left center;
+  transition: width .18s cubic-bezier(0.2, 0.8, 0.35, 1);
+  will-change: width, background-position;
+}
+
+/* 进度条前端的高亮光斑 (Spark / Glow Tip) */
+.progress-spark {
+  position: absolute;
+  right: -2px; top: 50%;
+  transform: translateY(-50%);
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--cur-spark);
+  box-shadow: 0 0 6px #fff, 0 0 10px var(--cur-spark);
+  opacity: 0.95;
+  pointer-events: none;
+  animation: sparkPulse 1.2s ease-in-out infinite alternate;
+}
+
+/* 炫彩色彩内部流动关键帧 */
+@keyframes chromaticFlow {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
+}
+
+/* 顶端光斑呼吸脉冲 */
+@keyframes sparkPulse {
+  0% { transform: translateY(-50%) scale(0.8); opacity: 0.7; }
+  100% { transform: translateY(-50%) scale(1.3); opacity: 1; }
+}
+
+/* 加载完毕时的扫光闪烁动画 */
+@keyframes finishFlash {
+  0% { filter: brightness(1); }
+  40% { filter: brightness(2.2); box-shadow: 0 0 12px #fff, 0 0 20px #00e5ff; }
+  100% { filter: brightness(1); opacity: 0; }
+}
+.progress-bar-fill.completing {
+  animation: chromaticFlow 1.6s linear infinite, finishFlash 0.45s forwards;
+}
+
+/* 网页主内容区 (模拟渲染页面) */
+.web-viewport {
+  flex: 1 1 auto; position: relative; overflow: hidden;
+  background: #FAFAFB; color: #1E293B; display: flex; flex-direction: column;
+}
+
+/* 网页骨架屏 / 加载阶段内容变化 */
+.page-loading-skeleton {
+  padding: 10px 9px; display: flex; flex-direction: column; gap: 7px;
+  position: absolute; inset: 0; background: #F8FAFC;
+  transition: opacity .3s ease;
+}
+.sk-line {
+  height: 8px; border-radius: 3px;
+  background: linear-gradient(90deg, #E2E8F0 25%, #F1F5F9 50%, #E2E8F0 75%);
+  background-size: 200% 100%;
+  animation: skeletonShimmer 1.4s ease infinite;
+}
+@keyframes skeletonShimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.sk-img { height: 75px; border-radius: 4px; }
+.sk-w40 { width: 40%; } .sk-w70 { width: 70%; } .sk-w90 { width: 90%; }
+
+/* 已加载真实的网页内容 (加载到 100% 渐显) */
+.page-loaded-content {
+  padding: 9px 8px; font-size: 10.5px; line-height: 1.55; color: #334155;
+  opacity: 0; transform: translateY(4px);
+  transition: opacity .35s ease, transform .35s ease;
+  overflow: hidden;
+}
+.page-loaded-content.show {
+  opacity: 1; transform: translateY(0);
+}
+.page-loaded-content h2 {
+  font-size: 12px; font-weight: 700; color: #0F172A; margin-bottom: 4px; line-height: 1.4;
+}
+.page-loaded-content p {
+  margin-bottom: 6px; font-size: 10px; color: #475569;
+}
+.news-badge {
+  display: inline-block; font-size: 8.5px; padding: 1px 4px; border-radius: 2px;
+  background: #E0F2FE; color: #0284C7; font-weight: 600; margin-bottom: 4px;
+}
+.card-mini {
+  background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 4px; padding: 6px; margin: 5px 0;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04);
+}
+
+/* 底部软键栏 30dp */
+.softkeys {
+  flex: 0 0 28px; min-height: 28px; background: linear-gradient(180deg, #18335C, #0F203D);
+  display: flex; align-items: center; font-size: 10px; color: var(--text);
+  border-top: 1px solid rgba(255,255,255,.08);
+}
+.softkeys .lsk, .softkeys .rsk { flex: 1; padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.softkeys .rsk { text-align: right; }
+.softkeys .csk { flex: 1; text-align: center; color: var(--sk-center); font-weight: 600; font-size: 9.5px; }
+
+/* 静态对照卡片 (小卡展示各状态) */
+.sub-showcase {
+  margin-top: 24px; width: 100%; max-width: 1140px;
+}
+.sub-showcase h3 {
+  font-size: 14px; font-weight: 700; color: var(--ink); margin-bottom: 12px;
+  display: flex; align-items: center; gap: 8px;
+}
+.sub-showcase h3::before {
+  content: ""; width: 4px; height: 14px; background: #64B5F6; border-radius: 2px;
+}
+.compare-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px;
+}
+.state-card {
+  background: #181C22; border: 1px solid var(--desk-line); border-radius: 12px;
+  padding: 14px; display: flex; flex-direction: column; gap: 10px;
+}
+.state-card .sc-title {
+  font-size: 12px; font-weight: 700; color: var(--ink); display: flex; align-items: center; justify-content: space-between;
+}
+.state-card .sc-pill {
+  font-size: 9.5px; padding: 2px 6px; border-radius: 4px; font-weight: 600; font-family: Consolas, monospace;
+}
+.sc-pill.cyan { background: rgba(0,242,254,.15); color: #00F2FE; }
+.sc-pill.gold { background: rgba(255,179,0,.15); color: #FFB300; }
+.sc-pill.purple { background: rgba(127,0,255,.15); color: #B388FF; }
+.sc-pill.green { background: rgba(74,222,128,.15); color: #4ADE80; }
+.state-card .preview-box {
+  background: #101622; border-radius: 6px; padding: 10px 8px; border: 1px solid #222C3A;
+}
+.state-card .sc-desc {
+  font-size: 11px; color: var(--ink-dim); line-height: 1.5;
+}
+
+/* 规范说明卡 */
+.spec-card {
+  margin-top: 14px; width: 100%; max-width: 1140px; background: #161A20; border: 1px solid var(--desk-line);
+  border-radius: 12px; padding: 18px 22px; font-size: 11.5px; line-height: 1.65;
+}
+.spec-card h4 {
+  font-size: 13.5px; color: var(--ink); font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;
+}
+.spec-card .kv-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px 24px; margin-top: 10px;
+}
+.spec-card .kv {
+  display: flex; gap: 10px;
+}
+.spec-card .kv b {
+  flex: 0 0 88px; color: var(--ink-dim); font-size: 11px; letter-spacing: .4px;
+}
+.spec-card .kv span {
+  color: #CBD5E1;
+}
+.spec-card .kv span code {
+  font-family: Consolas, monospace; font-size: 10.5px; color: #7FB0E8; background: rgba(127,176,232,.12);
+  padding: 1px 5px; border-radius: 3px;
+}
+.spec-card .rule-box {
+  margin-top: 14px; padding: 10px 14px; border-left: 3px solid var(--gold);
+  background: rgba(229,181,103,.08); border-radius: 0 6px 6px 0; font-size: 11px; color: #E5C384;
+}
+
+footer {
+  padding: 30px 28px 60px; text-align: center; color: #5B6573; font-size: 11px;
+}
+</style>
+</head>
+<body>
+
+<!-- ══════════════ 顶部 Header ══════════════ -->
+<header class="topbar-page">
+  <div class="brand">
+    <h1>
+      Lightning Browser × KeydroidX
+      <span class="tag-pill">炫彩进度条原型</span>
+    </h1>
+    <p>按键机（240×320 / 320×480）专用顶部极细动态炫彩流光加载进度条 · 动态交互预览</p>
+  </div>
+  <div class="facts">
+    <span class="fchip"><span class="badge"></span><b>状态</b> <span id="factStateText">加载完成 (就绪)</span></span>
+    <span class="fchip"><b>高度</b> <span id="factHeightText">2px 极细</span></span>
+    <span class="fchip"><b>当前流光</b> <span id="factThemeText">极光霓虹 (Aurora)</span></span>
+  </div>
+</header>
+
+<!-- ══════════════ 交互控制工作台 ══════════════ -->
+<div class="control-dock">
+  <!-- 控制行 1: 加载场景模拟 -->
+  <div class="control-row">
+    <span class="ctrl-label">模拟加载</span>
+    <div class="btn-group">
+      <button class="cbtn primary" id="btnSimNormal">▶ 正常网速 (1.8s)</button>
+      <button class="cbtn" id="btnSimSlow">🐢 弱网慢载 (4.5s 观察流光)</button>
+      <button class="cbtn" id="btnSimFast">⚡ 瞬间秒开 (350ms 缓存)</button>
+      <button class="cbtn" id="btnSimStall">⏸ 卡顿模拟 (停在 80% 观察流动)</button>
+      <button class="cbtn" id="btnReset">↺ 重置回 0%</button>
+    </div>
+  </div>
+
+  <!-- 控制行 2: 炫彩色彩方案 -->
+  <div class="control-row">
+    <span class="ctrl-label">炫彩方案</span>
+    <div class="btn-group">
+      <button class="cbtn theme-btn active" data-theme="aurora">极光霓虹 (推荐)</button>
+      <button class="cbtn theme-btn" data-theme="rainbow">经典七色流彩</button>
+      <button class="cbtn theme-btn" data-theme="sunset">赛博朋克霞光</button>
+      <button class="cbtn theme-btn" data-theme="goldcyan">UC 极速蓝金</button>
+    </div>
+  </div>
+
+  <!-- 控制行 3: 细化调节 -->
+  <div class="control-row">
+    <span class="ctrl-label">精细调节</span>
+    
+    <!-- 粗细选择 -->
+    <div class="btn-group">
+      <span style="font-size:11px;color:var(--ink-dim)">线条粗细:</span>
+      <button class="cbtn size-btn" data-size="1.5">1.5px (极致)</button>
+      <button class="cbtn size-btn active" data-size="2">2px (标配)</button>
+      <button class="cbtn size-btn" data-size="2.5">2.5px</button>
+      <button class="cbtn size-btn" data-size="3">3px (醒目)</button>
+    </div>
+
+    <!-- 光晕发光开关 -->
+    <div class="btn-group">
+      <button class="cbtn active" id="btnToggleGlow">✨ 外发光: 开</button>
+      <button class="cbtn active" id="btnToggleSpark">💫 顶端光斑: 开</button>
+    </div>
+
+    <!-- 屏幕分辨率切换 -->
+    <div class="btn-group">
+      <span style="font-size:11px;color:var(--ink-dim)">真机画幅:</span>
+      <button class="cbtn res-btn active" data-res="qvga">240×320 (QVGA)</button>
+      <button class="cbtn res-btn" data-res="hvga">320×480 (HVGA)</button>
+    </div>
+
+    <!-- 手动百分比滑块 -->
+    <div class="slider-wrap" style="margin-left:auto">
+      <span style="font-size:11px;color:var(--ink-dim)">手动拖拽:</span>
+      <input type="range" id="manualSlider" min="0" max="100" value="0">
+      <span class="val-badge" id="sliderVal">0%</span>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ 主画廊 ══════════════ -->
+<main class="gallery">
+
+  <!-- ══════ 核心展示区：动态交互真机 ══════ -->
+  <section class="board main-board">
+    <div class="phone-container">
+
+      <!-- 动态真机主屏 -->
+      <div class="phone">
+        <div class="screen" id="liveScreen">
+          
+          <!-- ① 顶栏：系统状态栏 (20dp) -->
+          <div class="topbar-s">
+            <span class="tic">●</span>
+            <span class="tt" id="phoneTabTitle">科技资讯 — 每日头条</span>
+            <span class="st">
+              <span class="sig"><i></i><i></i><i></i><i></i></span>
+              <span class="batt"><span class="case"><span class="fill"></span></span>100%</span>
+            </span>
+          </div>
+
+          <!-- ② UC 风格横向标签栏 (24dp) -->
+          <div class="tab-bar-uc">
+            <div class="tab-pill-uc active">
+              <span class="tab-fav"></span>
+              <span class="tab-title">科技资讯</span>
+            </div>
+            <div class="tab-pill-uc">
+              <span class="tab-fav" style="background:#64B5F6"></span>
+              <span class="tab-title">GitHub</span>
+            </div>
+            <div class="tab-pill-uc">
+              <span class="tab-fav" style="background:#4ADE80"></span>
+              <span class="tab-title">论坛热帖</span>
+            </div>
+            <span class="tab-add-btn">＋</span>
+          </div>
+
+          <!-- ③ 地址栏容器 (22dp) -->
+          <div class="addr-bar-uc">
+            <span class="addr-lock">🔒</span>
+            <span class="addr-url" id="phoneAddrUrl">https://m.tech-news.org/article/9042</span>
+            <span class="addr-refresh" id="liveRefreshIcon" title="重新加载">⟳</span>
+          </div>
+
+          <!-- ④ ★★★★★ 核心：从左至右极细炫彩动态加载进度条 ★★★★★ -->
+          <div class="progress-rail" id="liveProgressRail">
+            <div class="progress-bar-fill" id="liveProgressBar">
+              <!-- 进度条右侧前进端的光斑 -->
+              <span class="progress-spark" id="liveProgressSpark"></span>
+            </div>
+          </div>
+
+          <!-- ⑤ 网页视口区 (内容渲染 + 骨架展示) -->
+          <div class="web-viewport">
+            <!-- 骨架占位屏 (在加载中展示) -->
+            <div class="page-loading-skeleton" id="skeletonView">
+              <div class="sk-line sk-w40"></div>
+              <div class="sk-line sk-w90"></div>
+              <div class="sk-line sk-w70"></div>
+              <div class="sk-line sk-img"></div>
+              <div class="sk-line sk-w90"></div>
+              <div class="sk-line sk-w90"></div>
+              <div class="sk-line sk-w70"></div>
+            </div>
+
+            <!-- 渲染完成的真实页面内容 -->
+            <div class="page-loaded-content" id="loadedContentView">
+              <span class="news-badge">独家首发</span>
+              <h2>轻量化极速内核：按键机浏览体验实现质的飞跃</h2>
+              <div class="card-mini">
+                <p><b>摘要：</b>基于 WebView 原生通道深度裁剪，针对 240×320 屏幕定制光标热区与 UC 标签栏，内存开销降低 42%。</p>
+              </div>
+              <p>在功能机生态中，页面加载的实时视觉反馈是用户体验的生命线。极细的炫彩流光进度条既不抢占微小的屏幕纵向空间，又以动态光波缓解等待焦虑。</p>
+            </div>
+          </div>
+
+          <!-- ⑥ 底部软键栏 (28dp) -->
+          <div class="softkeys">
+            <span class="lsk">选项</span>
+            <span class="csk">停止</span>
+            <span class="rsk">返回</span>
+          </div>
+
+        </div>
+        <div class="keyhints"><span>LSK</span><i></i><span>OK</span><i></i><span>RSK</span></div>
+      </div>
+
+    </div>
+
+    <!-- ══════ 状态分步对比横向橱窗 ══════ -->
+    <div class="sub-showcase">
+      <h3>阶段状态与视觉效果拆解</h3>
+      <div class="compare-grid">
+        
+        <!-- 阶段 1: 刚刚发起 (15% 起步阶段) -->
+        <div class="state-card">
+          <div class="sc-title">
+            <span>① 请求发起阶段 (15%)</span>
+            <span class="sc-pill cyan">0% → 20%</span>
+          </div>
+          <div class="preview-box">
+            <div style="font-size:9.5px;color:#94A3B8;margin-bottom:5px">顶栏地址栏下方：</div>
+            <div class="progress-rail" style="margin-bottom:8px">
+              <div class="progress-bar-fill" style="width: 18%;">
+                <span class="progress-spark"></span>
+              </div>
+            </div>
+            <div style="font-size:8.5px;color:#64748B">网络 DNS / TCP 握手完成，进度条立即自左向右破壳弹出，给予操作即时反馈。</div>
+          </div>
+          <p class="sc-desc">收到 <code>onPageStarted</code> 或 <code>onProgressChanged &gt; 0</code> 时以微动动画展开至 15%~20%，顶端高亮光斑点亮。</p>
+        </div>
+
+        <!-- 阶段 2: 渲染中段 (55% 快速推进) -->
+        <div class="state-card">
+          <div class="sc-title">
+            <span>② DOM 渲染推进 (55%)</span>
+            <span class="sc-pill gold">20% → 70%</span>
+          </div>
+          <div class="preview-box">
+            <div style="font-size:9.5px;color:#94A3B8;margin-bottom:5px">顶栏地址栏下方：</div>
+            <div class="progress-rail" style="margin-bottom:8px">
+              <div class="progress-bar-fill" style="width: 58%;">
+                <span class="progress-spark"></span>
+              </div>
+            </div>
+            <div style="font-size:8.5px;color:#64748B">炫彩流光在条身内部持续自左向右波浪流动，即便百分比暂停，视觉仍在流动。</div>
+          </div>
+          <p class="sc-desc">从青蓝过渡到紫粉、橙金，全色域渐变横向拉伸；底轨仅 2px，绝不挤占按键机宝贵的 320px 纵向高度。</p>
+        </div>
+
+        <!-- 阶段 3: 弱网卡顿等待 (78% 持续流光) -->
+        <div class="state-card">
+          <div class="sc-title">
+            <span>③ 慢速/卡顿状态 (78%)</span>
+            <span class="sc-pill purple">持续流动防卡死感</span>
+          </div>
+          <div class="preview-box">
+            <div style="font-size:9.5px;color:#94A3B8;margin-bottom:5px">顶栏地址栏下方：</div>
+            <div class="progress-rail" style="margin-bottom:8px">
+              <div class="progress-bar-fill" style="width: 78%;">
+                <span class="progress-spark"></span>
+              </div>
+            </div>
+            <div style="font-size:8.5px;color:#64748B">内部渐变动画循环播放 (Flowing Wave)，让用户安心等待，知道并未闪退死锁。</div>
+          </div>
+          <p class="sc-desc">传统单色静态进度条一旦暂停会造成“浏览器死机”的错觉；动态炫彩波浪即使停在 78%，用户也能感知到仍在传输。</p>
+        </div>
+
+        <!-- 阶段 4: 加载完成 (100% 扫光淡出) -->
+        <div class="state-card">
+          <div class="sc-title">
+            <span>④ 加载完毕平滑消失</span>
+            <span class="sc-pill green">100% → 扫光淡出</span>
+          </div>
+          <div class="preview-box">
+            <div style="font-size:9.5px;color:#94A3B8;margin-bottom:5px">顶栏地址栏下方：</div>
+            <div class="progress-rail" style="margin-bottom:8px">
+              <div class="progress-bar-fill" style="width: 100%; opacity: 0.85; filter: brightness(1.4);"></div>
+            </div>
+            <div style="font-size:8.5px;color:#64748B">触达 100% 瞬间全线高亮微闪，并在 250ms 内优雅渐隐消失，视野完全让渡给网页。</div>
+          </div>
+          <p class="sc-desc">完成后不再残留任何多余像素线条，中间软键文案由「停止」恢复为页面交互状态。</p>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ══════ 工程落地与规范说明 ══════ -->
+    <div class="spec-card">
+      <h4>
+        📐 Android 原生端实现映射与工程规范
+        <span style="font-family:Consolas,monospace;font-size:11px;color:var(--gold);font-weight:400">KeyphoneBrowserActivity.kt × res/layout/keyphone_browser.xml</span>
+      </h4>
+      <div class="kv-grid">
+        <div class="kv">
+          <b>布局挂载点</b>
+          <span><code>keyphone_browser.xml</code> 中原有的 <code>#keyphone_progress</code>（位于地址栏与 <code>#keyphone_content_frame</code> 之间）。</span>
+        </div>
+        <div class="kv">
+          <b>高度规格</b>
+          <span>标准 <code>2dp</code>（在 240×320 屏上仅占 2 个物理像素，既清晰可见又完全不遮挡网页顶部 Header）。</span>
+        </div>
+        <div class="kv">
+          <b>原生渲染方案</b>
+          <span>
+            自定义 <code>KeyphoneRainbowProgressBar</code> 或 <code>LinearGradient</code> + <code>Matrix.setTranslate()</code> 动态着色；
+            或通过 <code>ClipDrawable</code> 配合 GPU 硬件加速的着色器，<b>无额外 View 树层级</b>，低配机满帧 60fps 丝滑。
+          </span>
+        </div>
+        <div class="kv">
+          <b>事件契约</b>
+          <span>接管 <code>WebChromeClient.onProgressChanged(view, newProgress)</code>，在 1~99 之间驱动平滑插值，100 时触发淡出动画。</span>
+        </div>
+      </div>
+      <div class="rule-box">
+        💡 <b>按键机红线提醒：</b>
+        在按键机中，按 <code>0</code> 键切换到主页（书签宫格）时，进度条必须立即 <code>INVISIBLE</code>，仅在活跃的网页标签页中加载时显示；
+        切换到后台后台标签页时暂停流光动画，节约电池与 GPU 功耗。
+      </div>
+    </div>
+
+  </section>
+
+</main>
+
+<footer>
+  Lightning Browser × KeydroidX 适配工程 · 顶部炫彩加载进度条原型 · 240×320 / 320×480 纯原生 UI 演进
+</footer>
+
+<!-- ══════════════ 交互逻辑脚本 ══════════════ -->
+<script>
+(function() {
+  // DOM 元素
+  const progressBar = document.getElementById('liveProgressBar');
+  const progressRail = document.getElementById('liveProgressRail');
+  const progressSpark = document.getElementById('liveProgressSpark');
+  const manualSlider = document.getElementById('manualSlider');
+  const sliderVal = document.getElementById('sliderVal');
+  const factStateText = document.getElementById('factStateText');
+  const factHeightText = document.getElementById('factHeightText');
+  const factThemeText = document.getElementById('factThemeText');
+  const skeletonView = document.getElementById('skeletonView');
+  const loadedContentView = document.getElementById('loadedContentView');
+  const liveScreen = document.getElementById('liveScreen');
+  const liveRefreshIcon = document.getElementById('liveRefreshIcon');
+
+  // 状态变量
+  let currentProgress = 0;
+  let animTimer = null;
+  let isGlowOn = true;
+  let isSparkOn = true;
+
+  // 主题渐变字典
+  const THEMES = {
+    aurora: {
+      name: '极光霓虹 (Aurora)',
+      grad: 'linear-gradient(90deg, #00f2fe, #4facfe, #7f00ff, #ff007f, #00f2fe)',
+      glow: '0 0 6px rgba(0, 242, 254, 0.75), 0 0 10px rgba(255, 0, 127, 0.45)',
+      spark: '#00F2FE'
+    },
+    rainbow: {
+      name: '经典七色流彩 (Rainbow)',
+      grad: 'linear-gradient(90deg, #ff3366, #ff7a00, #ffd200, #00e676, #00e5ff, #7f00ff, #ff3366)',
+      glow: '0 0 6px rgba(255, 122, 0, 0.75), 0 0 10px rgba(0, 229, 255, 0.45)',
+      spark: '#FFD200'
+    },
+    sunset: {
+      name: '赛博朋克霞光 (Sunset)',
+      grad: 'linear-gradient(90deg, #ff0844, #ffb199, #f12711, #f5af19, #00e5ff, #ff0844)',
+      glow: '0 0 6px rgba(255, 8, 68, 0.75), 0 0 10px rgba(245, 175, 25, 0.45)',
+      spark: '#FF7300'
+    },
+    goldcyan: {
+      name: 'UC 极速蓝金 (Gold-Cyan)',
+      grad: 'linear-gradient(90deg, #ffb300, #76ff03, #00e5ff, #2979ff, #d500f9, #ffb300)',
+      glow: '0 0 6px rgba(255, 179, 0, 0.75), 0 0 10px rgba(0, 229, 255, 0.45)',
+      spark: '#FFB300'
+    }
+  };
+  let currentThemeKey = 'aurora';
+
+  // 设置进度 (0 ~ 100)
+  function setProgress(val, finishCallback) {
+    currentProgress = Math.max(0, Math.min(100, Math.round(val)));
+    manualSlider.value = currentProgress;
+    sliderVal.textContent = currentProgress + '%';
+
+    if (currentProgress === 0) {
+      progressRail.classList.add('hidden');
+      progressBar.style.width = '0%';
+      progressBar.classList.remove('completing');
+      factStateText.textContent = '空闲 (0%)';
+      skeletonView.style.opacity = '0';
+      loadedContentView.classList.add('show');
+      return;
+    }
+
+    // 显示轨道
+    progressRail.classList.remove('hidden');
+    progressBar.classList.remove('completing');
+    progressBar.style.width = currentProgress + '%';
+
+    if (currentProgress < 100) {
+      factStateText.textContent = `加载中 (${currentProgress}%)`;
+      // 加载中显示骨架
+      skeletonView.style.opacity = '1';
+      loadedContentView.classList.remove('show');
+    } else {
+      // 达到 100%
+      factStateText.textContent = '加载完毕 (100%)';
+      progressBar.classList.add('completing');
+      
+      // 网页骨架隐去，内容显现
+      skeletonView.style.opacity = '0';
+      loadedContentView.classList.add('show');
+
+      setTimeout(() => {
+        progressRail.classList.add('hidden');
+        progressBar.style.width = '0%';
+        progressBar.classList.remove('completing');
+        factStateText.textContent = '就绪 (已完成)';
+        if (finishCallback) finishCallback();
+      }, 550);
+    }
+  }
+
+  // 停止现有模拟
+  function stopSimulation() {
+    if (animTimer) {
+      clearInterval(animTimer);
+      clearTimeout(animTimer);
+      animTimer = null;
+    }
+  }
+
+  // 模拟：正常网速 (1.8s)
+  function runNormalSimulation() {
+    stopSimulation();
+    setProgress(5);
+    const steps = [
+      { p: 18, delay: 180 },
+      { p: 35, delay: 380 },
+      { p: 62, delay: 750 },
+      { p: 85, delay: 1200 },
+      { p: 94, delay: 1500 },
+      { p: 100, delay: 1850 }
+    ];
+    steps.forEach(step => {
+      setTimeout(() => {
+        if (animTimer !== -1) setProgress(step.p);
+      }, step.delay);
+    });
+  }
+
+  // 模拟：弱网慢载 (4.5s)
+  function runSlowSimulation() {
+    stopSimulation();
+    setProgress(8);
+    const steps = [
+      { p: 20, delay: 400 },
+      { p: 38, delay: 1100 },
+      { p: 55, delay: 1900 },
+      { p: 72, delay: 2700 }, // 停顿观察流光
+      { p: 82, delay: 3600 },
+      { p: 93, delay: 4100 },
+      { p: 100, delay: 4600 }
+    ];
+    steps.forEach(step => {
+      setTimeout(() => {
+        if (animTimer !== -1) setProgress(step.p);
+      }, step.delay);
+    });
+  }
+
+  // 模拟：瞬间秒开 (350ms)
+  function runFastSimulation() {
+    stopSimulation();
+    setProgress(30);
+    setTimeout(() => {
+      setProgress(100);
+    }, 280);
+  }
+
+  // 模拟：卡顿在 80% (观察持续流光)
+  function runStallSimulation() {
+    stopSimulation();
+    setProgress(15);
+    setTimeout(() => setProgress(45), 300);
+    setTimeout(() => {
+      setProgress(80);
+      factStateText.textContent = '慢速停顿 (80% · 持续流光提示活跃)';
+    }, 800);
+  }
+
+  // 切换主题渐变
+  function applyTheme(themeKey) {
+    const t = THEMES[themeKey];
+    if (!t) return;
+    currentThemeKey = themeKey;
+    document.documentElement.style.setProperty('--cur-grad', t.grad);
+    document.documentElement.style.setProperty('--cur-glow', isGlowOn ? t.glow : 'none');
+    document.documentElement.style.setProperty('--cur-spark', t.spark);
+    factThemeText.textContent = t.name;
+
+    document.querySelectorAll('.theme-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.theme === themeKey);
+    });
+  }
+
+  // 事件绑定：模拟按钮
+  document.getElementById('btnSimNormal').addEventListener('click', runNormalSimulation);
+  document.getElementById('btnSimSlow').addEventListener('click', runSlowSimulation);
+  document.getElementById('btnSimFast').addEventListener('click', runFastSimulation);
+  document.getElementById('btnSimStall').addEventListener('click', runStallSimulation);
+  document.getElementById('btnReset').addEventListener('click', () => {
+    stopSimulation();
+    setProgress(0);
+  });
+  liveRefreshIcon.addEventListener('click', runNormalSimulation);
+
+  // 主题按钮
+  document.querySelectorAll('.theme-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      applyTheme(btn.dataset.theme);
+    });
+  });
+
+  // 线条粗细按钮
+  document.querySelectorAll('.size-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const size = btn.dataset.size;
+      document.documentElement.style.setProperty('--bar-height', size + 'px');
+      factHeightText.textContent = size + 'px';
+      document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    });
+  });
+
+  // 发光开关
+  const btnToggleGlow = document.getElementById('btnToggleGlow');
+  btnToggleGlow.addEventListener('click', () => {
+    isGlowOn = !isGlowOn;
+    btnToggleGlow.classList.toggle('active', isGlowOn);
+    btnToggleGlow.textContent = isGlowOn ? '✨ 外发光: 开' : '✨ 外发光: 关';
+    const t = THEMES[currentThemeKey];
+    document.documentElement.style.setProperty('--cur-glow', isGlowOn ? t.glow : 'none');
+  });
+
+  // 顶端光斑开关
+  const btnToggleSpark = document.getElementById('btnToggleSpark');
+  btnToggleSpark.addEventListener('click', () => {
+    isSparkOn = !isSparkOn;
+    btnToggleSpark.classList.toggle('active', isSparkOn);
+    btnToggleSpark.textContent = isSparkOn ? '💫 顶端光斑: 开' : '💫 顶端光斑: 关';
+    progressSpark.style.display = isSparkOn ? 'block' : 'none';
+  });
+
+  // 分辨率切换
+  document.querySelectorAll('.res-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const res = btn.dataset.res;
+      document.querySelectorAll('.res-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      if (res === 'hvga') {
+        liveScreen.classList.add('hvga');
+      } else {
+        liveScreen.classList.remove('hvga');
+      }
+    });
+  });
+
+  // 手动滑块
+  manualSlider.addEventListener('input', (e) => {
+    stopSimulation();
+    setProgress(parseInt(e.target.value, 10));
+  });
+
+  // 页面初始演示一次加载动画
+  setTimeout(() => {
+    runNormalSimulation();
+  }, 450);
+
+})();
+</script>
+
+</body>
+</html>

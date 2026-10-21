@@ -138,7 +138,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     /** 顶栏地址栏容器与输入框 */
     private var addressBarContainer: LinearLayout? = null
     private var addressInput: EditText? = null
-    private var progressBar: View? = null
+    private var progressBar: KeyphoneRainbowProgressBar? = null
 
     /** 主页容器与列表焦点助手 */
     private var homeScroll: ScrollView? = null
@@ -366,7 +366,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         findQueryText = findViewById(R.id.keyphone_find_query_text)
         findCountText = findViewById(R.id.keyphone_find_count_text)
 
-        progressBar = findViewById<View>(R.id.keyphone_progress)?.apply { pivotX = 0f }
+        progressBar = findViewById(R.id.keyphone_progress)
         pageLoading = findViewById(R.id.keyphone_page_loading)
         pageLoadingText = findViewById(R.id.keyphone_page_loading_text)
 
@@ -591,7 +591,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             browserFrameHost?.visibility = View.GONE
             addressBarContainer?.visibility = View.GONE
             findBarContainer?.visibility = View.GONE
-            progressBar?.visibility = View.INVISIBLE
+            progressBar?.reset()
             if (activeMenuType == QuickMenuType.NONE) {
                 updateHomeSoftKeys()
             }
@@ -3759,11 +3759,10 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     private fun applyProgress(progress: Int) {
         val bar = progressBar ?: return
-        if (progress in 1..99 && !isHomeSelected) {
-            bar.visibility = View.VISIBLE
-            bar.scaleX = progress / 100f
+        if (isHomeSelected) {
+            bar.reset()
         } else {
-            bar.visibility = View.INVISIBLE
+            bar.setProgress(progress)
         }
     }
 

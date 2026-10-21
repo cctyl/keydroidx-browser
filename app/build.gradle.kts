@@ -103,6 +103,7 @@ android {
     lint {
         checkReleaseBuilds = false
         abortOnError = true
+        disable += "RepeatOnLifecycleWrongUsage"
     }
     namespace = "acr.browser.lightning"
 

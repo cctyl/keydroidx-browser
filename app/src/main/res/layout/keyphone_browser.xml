@@ -89,12 +89,11 @@
             android:textStyle="bold" />
     </LinearLayout>
 
-    <!-- 2dp 加载进度线（按百分比横向拉伸，idle 时 INVISIBLE） -->
-    <View
+    <!-- 2dp 极细炫彩动态加载进度条（流光推进，idle/主页时 INVISIBLE） -->
+    <acr.browser.lightning.keyphone.KeyphoneRainbowProgressBar
         android:id="@+id/keyphone_progress"
         android:layout_width="match_parent"
         android:layout_height="2dp"
-        android:background="@color/keydroidx_bottom_text"
         android:visibility="invisible" />
 
     <!-- 主内容区：主页、Web 页面宿主与快捷菜单浮层；shellOverlay（独立 Surface 光标/菜单）也挂在这里，
