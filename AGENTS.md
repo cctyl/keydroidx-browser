@@ -9,12 +9,12 @@
 - 包名 `acr.browser.lightning`，单模块（`app/`），单变体，minSdk 24 / compileSdk 37 / JDK 21。
 - **真正生效的 UI 全部在 `acr.browser.lightning.keyphone` 包**：原生 View + keydroidx SDK，无 Compose。
 - 上游 MVP 内核**被复用**：`BrowserPresenter`（事件入口 `onEvent(BrowserUiEvent)` + `state: StateFlow<BrowserViewState>`）、`BrowserContract`、`browser/tab/` 标签页内核、`database/`、`preference/`。
-- 上游 Compose 渲染层**基本被绕过**，但有 **2 个漏口仍会打开触屏 Compose 界面**，属于已知未适配项：
+- 上游 Compose 渲染层**基本被绕过**，原先有 2 个漏口会打开触屏 Compose 界面，现外部链接已收口：
 
 | 漏口 | 触发方式 | 现状 |
 |---|---|---|
-| **隐身模式** | `KeyphoneOptionsActivity.kt:216` → `IncognitoBrowserActivity.launch()`，而该类继承 `BrowserActivity`（Compose 宿主） | 打开后是触屏 Compose 浏览器，方向键基本不可用 |
-| **外部链接** | 其他 App 发 `VIEW` / `WEB_SEARCH` → Manifest 里 `DefaultBrowserActivity`（同样是 `BrowserActivity` 子类） | 同上 |
+| **隐身模式** | `KeyphoneOptionsActivity.kt:216` → `IncognitoBrowserActivity.launch()`，而该类继承 `BrowserActivity`（Compose 宿主） | 打开后是触屏 Compose 浏览器，方向键基本不可用（待适配） |
+| **外部链接** | 其他 App 发 `VIEW` / `WEB_SEARCH` | **已适配**：Intent Filter 移至 `KeyphoneBrowserActivity`；`DefaultBrowserActivity` 亦改为转发代理，全部无缝进入按键机界面 |
 
 > 动这两个入口之前先想清楚：它们是「补适配」的候选，而不是可以忽略的死代码。
 
@@ -342,7 +342,7 @@ activity-alias (Orange 默认 / Blue 备用)
 | 新增偏好项 | `preference/UserPreferencesDataStore.kt`（唯一声明处） |
 | 新增设置项（Compose 设置页） | `settings/screens/*Screen.kt` |
 | 新增依赖 | `app/build.gradle.kts` + `app/gradle.lockfile`（`--write-locks`） |
-| 补适配缺口 | 隐身模式 `IncognitoBrowserActivity`、外部链接 `DefaultBrowserActivity`（都还是 Compose） |
+| 补适配缺口 | 隐身模式 `IncognitoBrowserActivity`（Compose，待适配） |
 
 ---
 
