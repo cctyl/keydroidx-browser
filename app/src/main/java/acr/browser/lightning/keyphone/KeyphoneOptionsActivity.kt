@@ -343,7 +343,7 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
             relay(ACTION_HISTORY)
         },
         OptionEntry.Option(KeydroidxIcons.ICON_DOWNLOAD, R.string.keyphone_opt_downloads) {
-            relay(ACTION_DOWNLOADS)
+            launchDownloadsPage()
         },
 
         OptionEntry.Divider,
@@ -395,7 +395,9 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
         OptionEntry.Option(KeydroidxIcons.ICON_HISTORY, R.string.keyphone_opt_history) {
             launchHistoryPage()
         },
-        OptionEntry.Option(KeydroidxIcons.ICON_DOWNLOAD, R.string.keyphone_opt_downloads) { todo() },
+        OptionEntry.Option(KeydroidxIcons.ICON_DOWNLOAD, R.string.keyphone_opt_downloads) {
+            launchDownloadsPage()
+        },
 
         OptionEntry.Divider,
         OptionEntry.Section(R.string.keyphone_section_system),
@@ -436,6 +438,17 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
             startActivity(Intent(this, KeyphoneHistoryActivity::class.java))
         } catch (t: Throwable) {
             KeydroidxLog.e(TAG, "打开历史记录失败", t)
+        }
+    }
+
+    /**
+     * 下载记录页（独立 Activity，自带标题栏）。
+     */
+    private fun launchDownloadsPage() {
+        try {
+            startActivity(Intent(this, KeyphoneDownloadsActivity::class.java))
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "打开下载记录页失败", t)
         }
     }
 
@@ -498,10 +511,6 @@ class KeyphoneOptionsActivity : KeydroidxBaseActivity() {
     /** 「页面」组条目：作用对象是当前网页，首页进入时无网页可操作。 */
     private fun requirePage() {
         Toast.makeText(this, R.string.keyphone_need_page, Toast.LENGTH_SHORT).show()
-    }
-
-    private fun todo() {
-        Toast.makeText(this, R.string.keyphone_todo, Toast.LENGTH_SHORT).show()
     }
 
     private fun confirmClearTabsFromHome() {

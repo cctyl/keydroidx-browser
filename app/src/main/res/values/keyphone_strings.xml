@@ -184,7 +184,6 @@
 
     <!-- 历史记录页（竖向一行一条：标题 + 网址） -->
     <string name="keyphone_history_title">历史记录</string>
-
     <string name="keyphone_history_empty">暂无历史记录</string>
     <string name="keyphone_history_today">今天</string>
     <string name="keyphone_history_yesterday">昨天</string>
@@ -195,6 +194,20 @@
     <string name="keyphone_clear_history_title">清空历史记录</string>
     <string name="keyphone_clear_history_message">确定要清空全部历史记录吗？</string>
     <string name="keyphone_history_cleared">已清空历史记录</string>
+
+    <!-- 下载记录页（竖向一行一条：文件名 + 大小/状态） -->
+    <string name="keyphone_downloads_title">下载</string>
+    <string name="keyphone_downloads_empty">暂无下载内容</string>
+    <string name="keyphone_downloads_file_lost">文件已失效</string>
+    <string name="keyphone_downloads_load_failed">下载记录读取失败</string>
+    <string name="keyphone_delete_download_title">删除记录</string>
+    <string name="keyphone_delete_download_message">确定要删除该条下载记录吗？</string>
+    <string name="keyphone_downloads_deleted">已删除下载记录</string>
+    <string name="keyphone_clear_downloads_title">清空下载记录</string>
+    <string name="keyphone_clear_downloads_message">确定要清空全部下载记录吗？</string>
+    <string name="keyphone_downloads_cleared">已清空下载记录</string>
+    <string name="keyphone_downloads_file_not_found">文件不存在或已被删除</string>
+    <string name="keyphone_downloads_open_failed">未找到可打开此文件的应用</string>
 
     <!-- 浏览页选项：标签页列表入口（直接放选项里，不再藏进设置页） -->
     <string name="keyphone_opt_tabs">标签页列表</string>

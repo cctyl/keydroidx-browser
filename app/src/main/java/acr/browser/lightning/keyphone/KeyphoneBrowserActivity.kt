@@ -4066,6 +4066,19 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         }
     }
 
+    /**
+     * 打开按键机「下载记录」页。
+     *
+     * 独立 Activity（[KeyphoneDownloadsActivity]，自带标题栏）。
+     */
+    private fun showDownloadsPage() {
+        try {
+            startActivity(Intent(this, KeyphoneDownloadsActivity::class.java))
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "打开下载记录页失败", t)
+        }
+    }
+
     internal fun tabsSnapshot(): List<TabViewState> = presenter.state.value.tabs
 
     internal fun tabsFlow(): Flow<List<Int>> = presenter.state
@@ -5562,7 +5575,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             KeyphoneOptionsActivity.ACTION_COPY_LINK -> menuClick(MenuSelection.COPY_LINK)
             KeyphoneOptionsActivity.ACTION_ADD_HOME -> addCurrentPageToHome()
             KeyphoneOptionsActivity.ACTION_HISTORY -> showHistoryPage()
-            KeyphoneOptionsActivity.ACTION_DOWNLOADS -> menuClick(MenuSelection.DOWNLOADS)
+            KeyphoneOptionsActivity.ACTION_DOWNLOADS -> showDownloadsPage()
             KeyphoneOptionsActivity.ACTION_SHOW_TABS -> showTabsPage()
             KeyphoneOptionsActivity.ACTION_CLEAR_TABS -> confirmClearAllTabs()
             KeyphoneOptionsActivity.ACTION_SETTINGS -> menuClick(MenuSelection.SETTINGS)

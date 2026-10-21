@@ -95,6 +95,7 @@ activity-alias (Orange 默认 / Blue 备用)
 | Activity | `BrowserHomeActivity.kt` | 启动代理，转发后 `finish()` |
 | Activity | `KeyphoneOptionsActivity.kt` | 全屏选项页（标签/页面/收藏与记录/系统四组）；`EXTRA_PAGE_MODE=true` 时只回传 `EXTRA_ACTION` |
 | Activity | `KeyphoneHistoryActivity.kt` | 历史页（上下移动、确认打开、左键删、LSK 清空） |
+| Activity | `KeyphoneDownloadsActivity.kt` | 下载页（上下移动、确认打开文件、左键删单条与文件、LSK 清空） |
 | Activity | `KeyphoneGuardListActivity.kt` | 拦截规则管理（协议跳转 / 站内跳转 / 下载站点 / 中转规则） |
 | Activity | `KeyphoneHelpActivity.kt` / `KeyphoneHelpDetailActivity.kt` | 帮助列表 / 正文（方向键整屏翻页，步长 0.85 屏高） |
 | Fragment | `KeyphoneTabsFragment.kt` | 标签列表，继承 `KeydroidxListPageFragment`，push 在浏览页内 |
@@ -114,9 +115,9 @@ activity-alias (Orange 默认 / Blue 备用)
 ### 3.3 SDK 与资源
 
 - 依赖 `io.github.cctyl.nokia:keydroidx-key-core:1.0.0`，来自 `../keydroidx-core` 的 `publishToMavenLocal`（**必须同时发布 `:keydroidx-common` 和 `:keydroidx-key-core`**；core 的 AGP 版本不同，不能用 composite build）。`settings.gradle.kts` 仓库首位是 `mavenLocal()`。
-- 常用 SDK 类：`KeydroidxBaseActivity`（7 个 Activity 基类）、`KeydroidxListPageFragment`、`KeydroidxListFocusHelper`（列表循环导航）、`KeydroidxConfirmDialog`、`KeydroidxTextInputFragment`、`KeydroidxKeyAction`（UP/DOWN/LEFT/RIGHT/SELECT）、`KeydroidxIcons`（字体图标）、`KeydroidxTheme`、`KeydroidxFontManager`、`KeydroidxDimens`、`KeydroidxLog`。
+- 常用 SDK 类：`KeydroidxBaseActivity`（8 个 Activity 基类）、`KeydroidxListPageFragment`、`KeydroidxListFocusHelper`（列表循环导航）、`KeydroidxConfirmDialog`、`KeydroidxTextInputFragment`、`KeydroidxKeyAction`（UP/DOWN/LEFT/RIGHT/SELECT）、`KeydroidxIcons`（字体图标）、`KeydroidxTheme`、`KeydroidxFontManager`、`KeydroidxDimens`、`KeydroidxLog`。
 - 纯逻辑、不依赖 SDK：`KeyphoneCursorView`、`KeyphoneShellOverlay`、`KeyphoneMouseController`、`KeyphoneSiteKeyStore`、`KeyphoneUrls`、`KeyphoneReadingBridge`。
-- **只有 2 个布局**：`keyphone_browser.xml`（仅主界面）、`keyphone_list.xml`（其余 6 个列表页共用，行由 `KeyphoneViews` 动态构建）。
+- **只有 2 个布局**：`keyphone_browser.xml`（仅主界面）、`keyphone_list.xml`（其余 7 个列表页共用，行由 `KeyphoneViews` 动态构建）。
 - 文案全部在 `res/values/keyphone_strings.xml`。
 
 ### 3.4 主页红线

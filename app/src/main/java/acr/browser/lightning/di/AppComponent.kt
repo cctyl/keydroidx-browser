@@ -35,6 +35,9 @@ interface AppComponent {
     /** 按键机历史记录页（独立 Activity）注入历史仓库 */
     fun inject(activity: acr.browser.lightning.keyphone.KeyphoneHistoryActivity)
 
+    /** 按键机下载管理页（独立 Activity）注入下载仓库 */
+    fun inject(activity: acr.browser.lightning.keyphone.KeyphoneDownloadsActivity)
+
     fun browserComponentBuilder(): BrowserComponent.Builder
 
     fun settingsComponentBuilder(): SettingsComponent.Builder
