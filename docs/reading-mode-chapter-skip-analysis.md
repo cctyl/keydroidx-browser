@@ -89,7 +89,7 @@ m.qidian.com 章节页是 Vue 应用，用户滚动到本章底部时会**把下
 1. 起点该书复现路径全走一遍：第 1 章进入、第 3→4→5 连读、第 5 章直接进入、第 8 章进入，确认无跳章。
 2. 进入前先把章节页滚到底（触发自动追加）再进阅读模式——这是原 bug 的触发姿势，必须覆盖。
 3. 回归 `docs/reading-mode-render-isolation-plan.md` M1.5 的用例，并修正其中「14→16 是站点自身跳号」的误判记录。
-4. `.\gradlew.bat :app:lintLightningPlusDebug` + `:app:testLightningPlusDebugUnitTest`。
+4. `.\gradlew.bat :app:lintDebug` + `:app:testDebugUnitTest`。
 
 ## 6. 已实现的改动（`app/src/main/js/KeyphoneReadingMode.js`）
 
@@ -130,9 +130,9 @@ jsdom 加载**真实** `KeyphoneReadingMode.js`，用 curl 下来的**真实起�
 | SSR 自检失败（网络错误）| 回落活体值，阅读不中断 |
 | SSR 自检期间按键翻页 | 返回 `busy`，`pump` 每 800ms 重试，自检完成后自动续拼 |
 
-构建门禁：`:app:lintLightningPlusDebug` + `:app:assembleLightningPlusDebug` **BUILD SUCCESSFUL**（Mezzanine 已把新脚本编进 `_MezzanineReader_828439026` 的 class/dex）。
+构建门禁：`:app:lintDebug` + `:app:assembleDebug` **BUILD SUCCESSFUL**（Mezzanine 已把新脚本编进 `_MezzanineReader_828439026` 的 class/dex）。
 
-单测 `:app:testLightningPlusDebugUnitTest` 为 58 tests / 12 failed，**在未改动的干净树上同样是 58/12**，失败全在 `preference/datastore`（Windows 下 DataStore `Unable to rename *.tmp` 的既有环境性 flake），与本次改动无关。
+单测 `:app:testDebugUnitTest` 为 58 tests / 12 failed，**在未改动的干净树上同样是 58/12**，失败全在 `preference/datastore`（Windows 下 DataStore `Unable to rename *.tmp` 的既有环境性 flake），与本次改动无关。
 
 ## 8. 残留风险
 

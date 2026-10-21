@@ -69,7 +69,7 @@ Select-String -Path 20261020.log -Pattern "阅读现场|加载遮罩|阅读视�
 
 ## 五、已验证
 
-- `assembleLightningPlusDebug` / `lintLightningPlusDebug` 均通过；
+- `assembleDebug` / `lintDebug` 均通过；
 - 装机后启动即生成 `/sdcard/Android/data/acr.browser.lightning/files/log/20261020.log`，
   内容含 `加载遮罩 隐藏` / `state:` / `updateTabMode` 等阅读排查关键行；
 - 该文件可直接 `adb pull` 导出（已实测，样本见 `logs/device-log-verify/`）。

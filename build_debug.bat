@@ -4,15 +4,13 @@ setlocal
 REM ============================================================
 REM  Build debug APK.
 REM
-REM  Variant: lightningPlus (default) -> app\build\outputs\apk\lightningPlus\debug\
-REM           for the Lite flavor change the two lines below to
-REM           :app:assembleLightningLiteDebug and ...\lightningLite\debug
+REM  Output: app\build\outputs\apk\debug\
 REM
 REM  Usage: build_debug.bat
 REM ============================================================
 
 set "ROOT=%~dp0"
-set "TASK=:app:assembleLightningPlusDebug"
+set "TASK=:app:assembleDebug"
 
 echo Building debug APK (%TASK%) ...
 call "%ROOT%gradlew.bat" %TASK%
@@ -22,6 +20,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo Done. APK at: app\build\outputs\apk\lightningPlus\debug\
+echo Done. APK at: app\build\outputs\apk\debug\
 endlocal
 pause

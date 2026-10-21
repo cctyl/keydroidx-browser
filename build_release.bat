@@ -15,16 +15,10 @@ REM     :app:lint<Variant> is invoked explicitly here. For a real
 REM     false positive, suppress it AT THE CALL SITE with
 REM     @SuppressLint / @RequiresApi and explain why.)
 REM
-REM  NOTE: this project has two flavors, so the plain task names
-REM  `lintRelease` / `assembleRelease` are AMBIGUOUS (Gradle fails
-REM  with "task ... is ambiguous"). Variant-specific names are
-REM  required.
-REM  Default is lightningPlus; for the Lite flavor replace the two
-REM  lines below with
-REM    :app:lintLightningLiteRelease :app:assembleLightningLiteRelease
-REM    app\build\outputs\apk\lightningLite\release
+REM  NOTE: there is only one flavor now, so the plain task names
+REM  `lintRelease` / `assembleRelease` are unambiguous again.
 REM
-REM  Output: app\build\outputs\apk\lightningPlus\release\
+REM  Output: app\build\outputs\apk\release\
 REM
 REM  Usage: build_release.bat
 REM
@@ -35,10 +29,10 @@ REM  command. Put any Chinese explanation in CODEBUDDY.md instead.
 REM ============================================================
 
 set "ROOT=%~dp0"
-set "OUTDIR=%ROOT%app\build\outputs\apk\lightningPlus\release"
+set "OUTDIR=%ROOT%app\build\outputs\apk\release"
 
 echo [1/2] Lint (NewApi must pass) + build release APK (may take a while) ...
-call "%ROOT%gradlew.bat" :app:lintLightningPlusRelease :app:assembleLightningPlusRelease
+call "%ROOT%gradlew.bat" :app:lintRelease :app:assembleRelease
 if errorlevel 1 (
     echo [ERROR] Lint or build failed. See log above.
     pause

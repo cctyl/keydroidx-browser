@@ -1,144 +1,282 @@
-# CODEBUDDY.md This file provides guidance to CodeBuddy when working with code in this repository.
+# AGENTS.md
 
-## 项目定位
+本项目是从 Lightning Browser 上游 fork 出来的，但**工作重心只有一个：把浏览器适配到诺基亚功能机（240×320 / 320×480）的按键操作上**。上游触屏 / Compose 相关的实现只在必要处提及，不作为开发目标。
 
-Lightning Browser（`acr.browser.lightning`）的上游 fork，位于 keydroidx 生态（`d:/project/keydroidx_ecosystem/`）内，目标平台是诺基亚功能机 / 低分辨率 Android（240×320、320×480）。
+---
 
-当前工作区在上游基础上已接入按键机适配层（`acr.browser.lightning.keyphone` 包）：复用上游 MVP 内核（`BrowserPresenter` / `BrowserUiEvent`），但完全绕过 Compose 的 `BrowserScreen`，改用原生 View + keydroidx SDK UI。所有 `keyphone/` 及相关改动必须遵守：
+## 1. 项目定位与现实边界
+
+- 包名 `acr.browser.lightning`，单模块（`app/`），单变体，minSdk 24 / compileSdk 37 / JDK 21。
+- **真正生效的 UI 全部在 `acr.browser.lightning.keyphone` 包**：原生 View + keydroidx SDK，无 Compose。
+- 上游 MVP 内核**被复用**：`BrowserPresenter`（事件入口 `onEvent(BrowserUiEvent)` + `state: StateFlow<BrowserViewState>`）、`BrowserContract`、`browser/tab/` 标签页内核、`database/`、`preference/`。
+- 上游 Compose 渲染层**基本被绕过**，但有 **2 个漏口仍会打开触屏 Compose 界面**，属于已知未适配项：
+
+| 漏口 | 触发方式 | 现状 |
+|---|---|---|
+| **隐身模式** | `KeyphoneOptionsActivity.kt:216` → `IncognitoBrowserActivity.launch()`，而该类继承 `BrowserActivity`（Compose 宿主） | 打开后是触屏 Compose 浏览器，方向键基本不可用 |
+| **外部链接** | 其他 App 发 `VIEW` / `WEB_SEARCH` → Manifest 里 `DefaultBrowserActivity`（同样是 `BrowserActivity` 子类） | 同上 |
+
+> 动这两个入口之前先想清楚：它们是「补适配」的候选，而不是可以忽略的死代码。
+
+**改 `keyphone/` 相关代码前必读**（生态硬规范，位于同级仓库）：
 
 - `../keydroidx-core/docs/NOKIA_DEVELOPMENT_RULES.md`（按键处理、catch 必打日志、图标规范、排版硬规则）
 - `../keydroidx-core/docs/spec/typography-and-font-spec.md`、`../keydroidx-core/docs/spec/responsive-layout-spec.md`（字号 / 分辨率唯一事实源）
+- 代码注释常以「红线 #8/#9/#13」「规范 §6.3」引用这些文档。
 
-工作区状态注意：相对上游删除了 `LICENSE`、`CHANGELOG.md`、`CONTRIBUTING.md`、`.github/workflows/action.yml`、`launcher_icon*.png`（git status 标为 deleted，磁盘上已不存在），因此 `.github` 目录不存在（**无 CI 工作流**），`README.md` 中的徽章/图标链接已失效。没有 `androidTest`，只有单元测试。
+---
 
-## 常用命令
+## 2. 常用命令
 
-Windows PowerShell，在包含 `gradlew.bat` 的项目根目录执行。
+在含 `gradlew.bat` 的项目根执行（Windows PowerShell）。
 
-构建（变体名 = 两个 flavor × 两个 buildType，任务名必须带变体前缀）：
+```powershell
+.\gradlew.bat :app:assembleDebug          # Debug APK -> app\build\outputs\apk\debug\app-debug.apk
+.\gradlew.bat :app:lintDebug              # 只跑 Lint，改完涉及 API 调用的代码后必跑
+.\gradlew.bat :app:lintRelease :app:assembleRelease   # Release（先 Lint 再 R8）
+.\gradlew.bat :app:testDebugUnitTest      # 全部单测
+.\gradlew.bat build                       # 全量构建 + 单测 + Lint
+```
 
-- `.\gradlew.bat assembleLightningPlusDebug` — Debug APK，Plus 变体（`acr.browser.lightning`）。Lite 为 `assembleLightningLiteDebug`（`acr.browser.barebones`）。`assembleDebug` 不会触发 Lint。
-- `.\gradlew.bat :app:lintLightningPlusDebug` — 只跑 Lint。改完涉及 API 调用的代码后必跑。
-- `.\gradlew.bat :app:lintLightningPlusRelease :app:assembleLightningPlusRelease` — Release 打包（先全量 Lint，再 R8 混淆 + 资源压缩 + test.jks 签名）。**禁止加 `-x lint`**：生态内 minSdk 低（本项目 minSdk=24），越级 API 在旧机上是运行时闪退，Lint 的 `NewApi` 是唯一静态防线。注意**不存在**不带变体的 `lintRelease` / `assembleRelease`（两个 flavor 会让任务名歧义，Gradle 直接报 ambiguous）。
-- `.\gradlew.bat build` — 全量构建 + 单测 + Lint（首次构建 / 提交前建议跑）。
-- `.\gradlew.bat buildHealth` — dependency-analysis 插件的依赖健康检查（冗余/未声明依赖）。
-- `.\gradlew.bat sortDependencies` — square sort-dependencies 插件，按字母序重排依赖块。
-- `.\gradlew.bat :app:licenseeAndroidLightningPlusDebug` — licensee 校验依赖许可证白名单（Apache-2.0 / BSD-3-Clause / jsoup）。没有不带变体的 `licensee` 任务；每次 assemble 也会自动跑它，报告随后拷进 APK assets。
+**Lint 是硬要求，不可绕过**：
 
-一键脚本（从 `../keydroidx-foucs` 移植，双击或 `.\xxx.bat`；都以 `pause` 收尾，脚本/CI 调用时记得喂 stdin）。通用模板已抽到 `../android-build-scripts/`（一套脚本 + `_config.bat` 一个配置文件），本项目若要迁移，删除根目录这 5 个脚本、把模板整个文件夹复制进来、确认 `_config.bat` 的 5 个值即可：
+- **禁止 `-x lint`**。minSdk=24 而 compileSdk=37，越级 API 编译期静默、只在旧真机上 `NoSuchMethodError` 闪退，`NewApi` 是唯一静态防线。
+- `app/build.gradle.kts` 里 `lint { checkReleaseBuilds = false }`，所以 `assembleRelease` **不会**自动跑 `lintVitalRelease`，必须显式先跑 `:app:lintRelease`。
+- 项目**没有 CI**（`.github` 已删除），不会有任何自动化兜底。
 
-- `build_debug.bat` — 构建 Debug APK（lightningPlus），输出 `app\build\outputs\apk\lightningPlus\debug\`。
-- `build_install_debug.bat` [serial] — 构建 + adb 安装 + 启动。无参 = 对所有已连接设备并行安装；`install_debug.py` 自动挑 `app\build\outputs\apk\<flavor>\debug\` 下最新的 APK。
-- `build_release.bat` — `:app:lintLightningPlusRelease` + `:app:assembleLightningPlusRelease`，成功后打开输出目录。
-- `install_debug.bat` [serial] — 只安装不构建。
-- 切 Lite 变体：把脚本里的任务名、输出目录、启动组件（`acr.browser.barebones` / `DefaultBrowserActivityBlue`）一起改。
+一键脚本（均为 `pause` 收尾，脚本调用需喂 stdin）：
 
-启动与调试（adb）：
+- `build_debug.bat` — 出 Debug 包
+- `build_install_debug.bat [serial]` — 构建 + 装到所有已连设备（并行）+ 启动
+- `build_release.bat` — lintRelease + assembleRelease，成功后打开输出目录
+- `install_debug.bat [serial]` — 只装不构建（`install_debug.py` 挑 `apk\debug\` 下最新 APK）
 
-- **启动应用必须显式指定 activity-alias**，命令如下（这是唯一可靠的启动方式）：
+**运行与调试**：
 
-  ```powershell
-  adb -s <serial> shell am start -n acr.browser.lightning/acr.browser.lightning.DefaultBrowserActivityOrange
-  ```
+```powershell
+# 必须显式指定 activity-alias，这是唯一可靠的启动方式
+adb -s <serial> shell am start -n acr.browser.lightning/acr.browser.lightning.DefaultBrowserActivityOrange
+```
 
-  - **不要用 `monkey -p acr.browser.lightning -c android.intent.category.LAUNCHER 1`**：debug 包的 LeakCanary 在同一包内也注册了 `LAUNCHER` 入口（`com.squareup.leakcanary.internal.LauncherActivity`），`monkey` 会随机命中它并弹出 LeakCanary 泄漏详情页（重装 APK 后它常自行 `startActivity` 拉起，`0 Distinct Leaks` 也照弹），既不是浏览器也不是设置页。
-  - 只能启 alias：alias 是 `exported="true"`；`keyphone.BrowserHomeActivity` / `keyphone.KeyphoneBrowserActivity` 均 **not exported**，`am start` 会报 `SecurityException: Permission Denial: ... not exported from uid ...`，别在这上面浪费时间。
-  - Lite 变体：`acr.browser.barebones/acr.browser.barebones.DefaultBrowserActivityBlue`。Blue alias 默认 `enabled="false"`，需先在应用内「更换应用图标」启用它，否则启动命令同样失败。
-- 安装：`adb -s <serial> install -r app\build\outputs\apk\lightningPlus\debug\app-lightningPlus-debug.apk`。重装后若停在 LeakCanary 页，先 `adb -s <serial> shell input keyevent KEYCODE_BACK` 退回。
-- 截图：**PowerShell 下 `adb exec-out screencap -p > x.png` 会按文本处理二进制流导致 PNG 损坏**，一律用 `adb -s <serial> shell screencap -p /sdcard/x.png` + `adb -s <serial> pull /sdcard/x.png .`，用完 `adb shell rm` 清掉。
-- 日志：`adb -s <serial> logcat -c` 先清空再复现（`updateTabMode` / `closeCurrentTabOrExit` 这类关键日志量大且会被冲掉）；`adb -s <serial> logcat -d -v time -s KeyphoneBrowser` 读按键与标签页日志。
+- **不要用 `monkey -p ... -c LAUNCHER 1`**：debug 包的 LeakCanary 也注册了 LAUNCHER 入口，`monkey` 会随机命中它弹出泄漏详情页。
+- `keyphone.BrowserHomeActivity` / `KeyphoneBrowserActivity` 均 **not exported**，直接 `am start` 会 `SecurityException`。
+- 蓝图标 alias（`.DefaultBrowserActivityBlue`）默认 `enabled="false"`，需先在应用内「更换应用图标」启用。
+- 截图：**不要用 `adb exec-out screencap -p > x.png`**（PowerShell 按文本处理二进制会损坏 PNG），改用 `shell screencap -p /sdcard/x.png` + `pull`，用完 `rm`。
+- 日志：`adb logcat -c` 先清空；`adb logcat -d -v time -s KeyphoneBrowser` 读按键与标签页日志（`updateTabMode` 等日志量大易被冲掉）。
 
-打包与签名（已按 `../android-gradle-build/SKILL.md` 配好）：
+**测试约定**：JUnit4 + Robolectric（`@RunWith(RobolectricTestRunner::class)` + `@Config(application = TestApplication::class, sdk = [SDK_VERSION])`，且**无 androidTest**）；断言 AssertJ，Flow 用 Turbine，协程用 `FakeCoroutineDispatchers`；**mock 用 Mockingbird（编译期生成，不是 Mockito）**；手写替身命名 `Fake*`。
 
-- `app/test.jks` 是生态统一测试密钥（来源 `../android-gradle-build/test.jks`），已被 `.gitignore` 的 `*.jks` 规则排除，**不要提交**。
-- 签名凭据只从**环境变量**（优先）或**根目录 `local.properties`**（同样被 `.gitignore` 忽略）读取，键名 `RELEASE_STORE_FILE` / `RELEASE_STORE_PASSWORD` / `RELEASE_KEY_ALIAS` / `RELEASE_KEY_PASSWORD`，由 `app/build.gradle.kts` 顶部的 `signingProperty()` 读取。**严禁把口令写进任何会被 git 跟踪的文件**。凭据缺失时只有 release 打包会失败，debug 不受影响。
-- `gradle.properties` 固定了代理（Clash 默认 7897，**代理没开时必须注释掉这四行**）和 `org.gradle.java.home`（JDK 21，配合 `jvmToolchain(21)` + AGP 9.4.1，避免 Gradle 再去下载 toolchain）。
-- Gradle 发行版本体走腾讯云镜像（见 `gradle/wrapper/gradle-wrapper.properties`）。
-- 仓库顺序是**官方源在前、腾讯/阿里镜像在后兜底**，不要为了提速把镜像移到前面：镜像存在「有 POM 但没有 jar」的残缺条目（实测 `dev.zacsweers.moshix:moshi-sealed-runtime:0.37.0` 在腾讯云镜像上只有 POM），而 Gradle 一旦在某个仓库拿到模块元数据，就只用该仓库取 jar、**不会回落到后面的仓库**，镜像前置会直接导致构建失败。
-- 该 SKILL 还是 Gradle 卡住 / 依赖下不动时的排查清单（镜像、代理、wrapper 镜像、JDK 选 OpenJDK/Temurin/JBR 而非 GraalVM）。
+---
 
-测试（JUnit4 + Robolectric，无 androidTest）：
+## 3. 按键机适配层全景（`keyphone/`，20 个文件）
 
-- `.\gradlew.bat :app:testLightningPlusDebugUnitTest` — 跑某变体的全部单测（共 4 个变体，任务名带后缀）。
-- 单个测试类：`.\gradlew.bat :app:testLightningPlusDebugUnitTest --tests "acr.browser.lightning.adblock.HostsFileParserTest"`
-- 单个测试方法：`... --tests "acr.browser.lightning.search.suggestions.GoogleSuggestionsModelTest"`
+### 3.1 入口链
 
-测试约定：Robolectric 用 `@RunWith(RobolectricTestRunner::class)` + `@Config(application = TestApplication::class, sdk = [SDK_VERSION])`（`SDK_VERSION` 见 `app/src/test/.../Constants.kt`）；断言用 AssertJ，Flow 断言用 Turbine，协程用 `kotlinx-coroutines-test` + `FakeCoroutineDispatchers`；**mock 用 Mockingbird（`com.anthonycr.mockingbird.core.fake` / `verify`，由 Gradle 插件在编译期生成，不是 Mockito）**。手写替身命名 `Fake*`。`app/src/test/.../TestUtils.kt` 的 `unimplemented()` 用于占位未实现方法。
+```
+activity-alias (Orange 默认 / Blue 备用)
+  → KeyphoneBrowserActivity? 否，先经 BrowserHomeActivity（立即转发并 finish）
+  → KeyphoneBrowserActivity（singleTop，实际浏览主页）
+```
 
-## 架构
+`BrowserHomeActivity` 继承 `KeydroidxBaseActivity`、`getContentLayoutRes() = 0`，只做 Intent 转发（带 action/data/extras + `FLAG_ACTIVITY_FORWARD_RESULT`）。
 
-### 按键机适配层（`keyphone/`，实际生效的入口）
+`KeyphoneBrowserActivity` **不继承** `BrowserActivity`，而是继承 SDK 的 `KeydroidxBaseActivity`，同时实现 `BrowserContract.View`、注入同一个 `BrowserPresenter`——即「绕开 Compose 渲染，保留 MVP 事件通道」。**必须先完成 Dagger 注入再 `super.onCreate()`**。
 
-入口链：activity-alias（LAUNCHER，Orange/Blue 换图标双别名）→ `keyphone.BrowserHomeActivity`（立即转发后 `finish()`）→ `keyphone.KeyphoneBrowserActivity`（`singleTop`，实际浏览主页）。上游 `DefaultBrowserActivity` 只保留 VIEW/WEB_SEARCH intent-filter，作为外部链接处理器，不再是启动入口。
+### 3.2 文件职责
 
-- `KeyphoneBrowserActivity`：**不继承**上游 `BrowserActivity`，而是继承 SDK 的 `io.github.cctyl.nokia.keycore.ui.KeydroidxBaseActivity`，但仍实现 `BrowserContract.View` 并注入同一个 `BrowserPresenter` —— 即「绕过 Compose 渲染层，保留 MVP Presenter + `BrowserUiEvent` 事件通道」（keyphone 代码大量直接派发 `SearchConfirmed` / `TabClose` / `BackClick` 等 UiEvent 给 presenter）。UI 为原生 View（`res/layout/keyphone_browser.xml`）：UC 风格顶部横向标签栏 + 地址栏 + 原生九宫格书签主页 + WebView 宿主 + 数字快捷菜单浮层（1 键页面菜单 / # 键全局菜单，弹出期间 `dispatchKeyEvent` 全模态消费按键并拦截 UP 防穿透）。
-- **主页红线**：主页是纯原生 View（搜索栏 + 九宫格书签 + 历史），严禁让 WebView `loadUrl("about:home")` 之类伪协议（会被 Chromium 重定向为 chrome:// 报错）；主页窗口下底层 WebView 保持空白。
-- 其余文件：`KeyphoneOptionsActivity`（LSK 弹出的全屏选项页，经 `setResult` 回传动作）、`KeyphoneTabsFragment`（继承 SDK `KeydroidxListPageFragment`，push 在浏览页内而非独立 Activity）、`KeyphoneViews.kt`（列表行/宫格卡片 View 工厂，统一 KeydroidxTheme/Icons/FontManager）、`KeyphoneUrls.kt`（地址栏归一化与搜索引擎识别）。
-- SDK 依赖：`io.github.cctyl.nokia:keydroidx-key-core:1.0.0`（`app/build.gradle.kts`），来自 `../keydroidx-core` 的 `publishToMavenLocal` —— 必须同时发布 `:keydroidx-common` 和 `:keydroidx-key-core` 两个模块；core 的 AGP 版本与本项目不同，不能用 composite build。`settings.gradle.kts` 仓库第一位是 `mavenLocal()`，另有 JitPack 供传递依赖 `com.github.getActivity:XXPermissions`。
-- 代码注释以规范条目编号引用 keydroidx-core 规范（如「红线 #8/#9/#13」「规范 §6.3」），文档本体在 `../keydroidx-core/docs/`。
+| 分类 | 文件 | 作用 |
+|---|---|---|
+| Activity | **`KeyphoneBrowserActivity.kt`（约 5.2k 行）** | 核心巨类：UC 标签栏 + 原生主页 + WebView 宿主 + 光标 + 菜单浮层 + 阅读模式 + 按键分发 |
+| Activity | `BrowserHomeActivity.kt` | 启动代理，转发后 `finish()` |
+| Activity | `KeyphoneOptionsActivity.kt` | 全屏选项页（标签/页面/收藏与记录/系统四组）；`EXTRA_PAGE_MODE=true` 时只回传 `EXTRA_ACTION` |
+| Activity | `KeyphoneHistoryActivity.kt` | 历史页（上下移动、确认打开、左键删、LSK 清空） |
+| Activity | `KeyphoneGuardListActivity.kt` | 拦截规则管理（协议跳转 / 站内跳转 / 下载站点 / 中转规则） |
+| Activity | `KeyphoneHelpActivity.kt` / `KeyphoneHelpDetailActivity.kt` | 帮助列表 / 正文（方向键整屏翻页，步长 0.85 屏高） |
+| Fragment | `KeyphoneTabsFragment.kt` | 标签列表，继承 `KeydroidxListPageFragment`，push 在浏览页内 |
+| View | `KeyphoneCursorView.kt` | 40dp 虚拟光标，`translationX/Y` 位移（0 重绘），贴边变箭头 |
+| View | `KeyphoneShellOverlay.kt` | WebView 上层全透明覆盖层，自绘快捷菜单卡片 |
+| 弹窗 | `KeyphoneOptionSheetDialog.kt` | 通用底部选项卡（纯代码 UI），1~9 数字直选 |
+| 控制 | `KeyphoneMouseController.kt` | 鼠标模式引擎：方向键移光标（短边×0.015，140ms 后连发，800ms 加速 6.5x）、贴边滚动（滚**光标下元素**而非文档根）、1~9 热区跳转 |
+| 桥接 | `KeyphoneJsDialogs.kt` | 接管 `alert/confirm/prompt/beforeunload`，禁止系统模态框钉死页面 |
+| 桥接 | `KeyphoneUrlGuard.kt` | 拦截判定引擎（`PROCEED/BLOCK/ASK`）：外部协议、站内跳转、下载审批 |
+| 桥接 | `KeyphoneReadingBridge.kt` | 阅读模式 JS 桥，持 `WeakReference` 防池化泄漏 |
+| 存储 | `KeyphoneGuardStore.kt` | 拦截规则（SP），域名归一化为 eTLD+1 |
+| 存储 | `KeyphoneSiteKeyStore.kt` | 1~9 键自定义光标落点，存**比例坐标 0~1**（适配分辨率与旋屏） |
+| 存储 | `KeyphoneReadingPrefs.kt` | 阅读模式外观（背景 5 档 / 字号 14~40px），落盘 `keyphone_reading` |
+| 工具 | `KeyphoneUrls.kt` | 地址归一化：`about:` 内页不回填、空串→主页、其余走 `smartUrlFilter` |
+| 工具 | `KeyphoneViews.kt` | **所有列表行 / 宫格卡 View 工厂**（`iconRow/searchRow/addressBar/tabRow/bookmarkGrid/quickMenuItem/ucTabCell`），强制走 SDK 字号 Token + 字体图标 + 主题色 |
 
-### 整体：MVP + Compose 混合（上游触屏 UI，keyphone 模式下被绕过）
+### 3.3 SDK 与资源
 
-`browser/BrowserActivity.kt` 是抽象基类，实现 `BrowserContract.View`。`onCreate` 里先 new 出两个 `FrameLayout`（browserFrame / customFrame），用 `injector.browserComponentBuilder()` 构建**每个 Activity 独立的 Dagger 子组件**并 `inject(this)`，然后 `setContent {}` 全量 Compose 渲染。
+- 依赖 `io.github.cctyl.nokia:keydroidx-key-core:1.0.0`，来自 `../keydroidx-core` 的 `publishToMavenLocal`（**必须同时发布 `:keydroidx-common` 和 `:keydroidx-key-core`**；core 的 AGP 版本不同，不能用 composite build）。`settings.gradle.kts` 仓库首位是 `mavenLocal()`。
+- 常用 SDK 类：`KeydroidxBaseActivity`（7 个 Activity 基类）、`KeydroidxListPageFragment`、`KeydroidxListFocusHelper`（列表循环导航）、`KeydroidxConfirmDialog`、`KeydroidxTextInputFragment`、`KeydroidxKeyAction`（UP/DOWN/LEFT/RIGHT/SELECT）、`KeydroidxIcons`（字体图标）、`KeydroidxTheme`、`KeydroidxFontManager`、`KeydroidxDimens`、`KeydroidxLog`。
+- 纯逻辑、不依赖 SDK：`KeyphoneCursorView`、`KeyphoneShellOverlay`、`KeyphoneMouseController`、`KeyphoneSiteKeyStore`、`KeyphoneUrls`、`KeyphoneReadingBridge`。
+- **只有 2 个布局**：`keyphone_browser.xml`（仅主界面）、`keyphone_list.xml`（其余 6 个列表页共用，行由 `KeyphoneViews` 动态构建）。
+- 文案全部在 `res/values/keyphone_strings.xml`。
 
-状态流：`BrowserPresenter.state: StateFlow<BrowserViewState>` → Activity 内的 `collectAsMutableState` 扩展把每个字段转成独立 `mutableStateOf`（`BrowserComposeState`，`@Stable`，逐字段更新以减少重组）→ `BrowserScreen(...)`。`BrowserScreen` 按 `TabConfiguration` 分派到 `DesktopTabs` / `DrawerTabs` / `BottomTabs`；WebView 属于 View 体系，通过 `AndroidView` 宿主那两个 `FrameLayout` 嵌入 Compose。
+### 3.4 主页红线
 
-反向事件：UI 产出密封接口 `BrowserUiEvent`（`acr/browser/lightning/BrowserUiEvent.kt`）→ `presenter.onEvent(...)`。导航由 `BrowserNavigator`（实现 `BrowserContract.Navigator`）负责。`BrowserContract.kt` 里还集中定义了 `View`/`Model`/`Navigator` 接口、各种枚举与 `Action`。入口 Activity：`DefaultBrowserActivity`、`IncognitoBrowserActivity`（后者跑在独立 `:incognito` 进程）。
+主页是**纯原生 View**（搜索栏 + 九宫格书签 + 历史），严禁 `loadUrl("about:home")` 之类伪协议（会被 Chromium 重定向成 `chrome://` 报错）；主页状态下底层 WebView 保持空白。
 
-### DI（Dagger）
+---
 
-- `di/AppComponent.kt`：`@Singleton`，Builder 绑定 `Application` / `BuildInfo` / `@FullIncognitoMode`；含 `AppModule`（提供 OkHttp 多客户端、Dispatcher、AdBlocker、Mezzanine 生成的各 Reader 等）+ `AppBindsModule`（绑定各 Repository 接口）。
-- 子组件：`BrowserComponent`（`@BrowserScope`，`BrowserModule` + `BrowserBindsModule`，BindsInstance 传入 activity / browserFrame / customFrame / intent / `@IncognitoMode`）、`SettingsComponent`（`@SettingsScope`）。
-- `DiExtensions.kt`：`Context.injector` 即 `(applicationContext as BrowserApp).applicationComponent`，这是取注入器的唯一入口。`BrowserApp.onCreate` 里构建 `applicationComponent`。
+## 4. 按键交互与编码红线（改 keyphone 必看）
 
-### 数据层
+- `catch` 分支**必须落日志**（`KeydroidxLog.e`），严禁空 catch。
+- 菜单 / 弹窗按键必须用 `KeydroidxKeyAction` 枚举匹配，**禁止硬编码 keyCode**。
+- 消费了 DOWN 就必须消费同键 UP/REPEAT；执行类动作要过滤 key repeat。
+- 字号只能用 `keydroidx_font_*` 语义 Token，禁止裸 sp。
+- 含 TextView 的动态列表行用 `WRAP_CONTENT` + `setMinimumHeight()`，**不要固定行高**（大字号会裁字）。
+- 确认 / 取消弹窗统一 `KeydroidxConfirmDialog`；列表焦点导航统一 `KeydroidxListFocusHelper`。
+- 快捷菜单弹出期间 `dispatchKeyEvent` 全模态消费按键并拦截 UP，防止穿透到 WebView。
+- WebView **必须**经 `WebViewFactory` + `pool/` 获取，不要直接 `new WebView()`；`ImeBlockableWebView` 是鼠标模式专用（可彻底屏蔽系统输入法）。
 
-- `database/`：**手写 `SQLiteOpenHelper`，不是 Room / Realm**，`databaseDelegate()` 缓存实例；分表为 Bookmark / History / Downloads / Hosts / AdBlockAllowList。
-- `preference/`：**DataStore Preferences**（`PreferenceDataStoreFactory` + `SharedPreferencesMigration` 迁移旧 SP）。`UserPreferencesDataStore.kt` 是所有偏好项的唯一声明处，类型化封装 `PreferenceStore<T>`（`NonNull` / `Nullable` / `Enum`，枚举走 `IntEnum`，无反射）。
-- tab 与池化：`browser/tab/` 的 `TabModel` / `TabAdapter` / `TabFactory` / `TabsRepository`（实现 `BrowserContract.Model`）；`pool/` 的 `ObjectPool` 池化复用 WebView，WebView 一律经 `WebViewFactory` 创建，不要直接 `new`。
-- `search/`：`SearchEngineProvider` + 各引擎 + OkHttp 网络建议 + `SuggestionsModel`（书签 : 历史 : 建议 = 2:2:1 合并排序）。
+---
 
-### 引擎与注入资源层
+## 5. 目录地图（全量，每个目录一句话作用）
 
-- `browser/view/`：触摸 / 长按手势封装；`browser/webrtc/`：`WebRtcPermissionsModel` / `View`（权限与资源授予流程）；`adblock/`：`BloomFilterAdBlocker` + `HostsFileParser` + BloomFilter + allowlist（`adblock/allowlist/`）；`ssl/`、`useragent/`、`favicon/`、`icon/`、`graphics/`、`device/`、`shortcuts/`、`migration/Cleanup`（启动时清理）。
-- `html/` + `js/`：用 **Mezzanine**（`@FileStream` 注解 + KSP）把 `src/main/html/*.html`、`src/main/js/*.js` 在编译期生成为 Kotlin Reader；各 `*PageFactory` 再结合 jsoup 动态拼出 `about:bookmarks` / `list` / `history` / `download` / `homepage` 页面。**改 html/js 后必须重新构建才生效**；`@GeneratedHtmlDir` 限定符在 `AppModule` 中提供生成目录的 `ThreadSafeFileProvider`，这些页面靠它落临时文件。
+路径简写：`…/lightning/` = `app/src/main/java/acr/browser/lightning/`。
 
-### Compose 与设置页
+### 5.1 事件总入口与上游浏览内核 `browser/`（76 文件）
 
-- `compose/`：`Theme.kt`（Material3 `BrowserTheme` / `ColorScheme`）与 `Color` / `StatusBar` / `Transitions`。
-- `browser/compose/`：全部浏览器界面（搜索栏、状态栏、溢出菜单、弹窗、查找、进度条、三种 tab 布局）与 `sheets/`（页面工具、长按、书签、SSL 信息等底部面板）。
-- `settings/`：设置页同样 Compose 化 —— `framework/`（通用控件）+ `screens/`（各设置屏）+ `navigation/` + `SettingsScreenStateProvider`，宿主是 `settings/activity/SettingsActivity`。
+| 文件 / 子目录 | 作用 |
+|---|---|
+| `…/lightning/BrowserUiEvent.kt` | **全站事件总入口**（sealed interface），keyphone 大量直接派发 `TabClick` / `SearchConfirmed` / `BackClick` / `MenuClick` 等 |
+| `BrowserPresenter.kt`（60 KB） | MVP 中枢：唯一事件入口 `onEvent(BrowserUiEvent)` + `state: StateFlow<BrowserViewState>` |
+| `BrowserContract.kt` | `View` / `Model` / `Navigator` 契约 + `Action` + 各事件枚举 |
+| `BrowserNavigator.kt` | 开设置 / 分享 / 下载 / 关浏览器；**含 keyphone 分支**（keyphone 退出时跳过 `ExitCleanup`） |
+| `BrowserActivity.kt` | 上游 Compose 宿主（abstract），**keyphone 不继承它**；仅隐身与外部链接会走到 |
+| `BrowserScreen.kt` / `BrowserViewState.kt` | Compose 根组合与状态快照，keyphone 不用 |
+| `tab/`（13 + `bundle/` + `settings/`） | **标签页内核，全部复用**：`TabModel` / `TabAdapter` / `TabFactory` / `TabsRepository`（即 `BrowserContract.Model`）/ `TabPager`（WebView 挂载协调）/ `WebViewFactory` / `TabInitializer`（`Url`/`HomePage`/`BookmarkPage`/`HistoryPage`/`DownloadPage`/`Bundle`/`Freezable`/`NoOp`/`Permission`）/ `UrlHandler` / `TabWebViewClient` / `TabWebChromeClient` / `RecentTabModel`（撤销关闭栈）/ `ImeBlockableWebView`（可屏蔽系统输入法，鼠标模式专用）/ `TabViewState` |
+| `tab/settings/` | `TabSettings`（19 项偏好快照）、`RenderingMode`、`TextSize` |
+| `tab/bundle/`（+`storage/`） | 标签持久化：`DefaultBundleStore` 按 URL 还原 Initializer、`IncognitoBundleStore` 全丢弃、`BundleWriter` 原子落盘 |
+| `view/`（6） | WebView 交互：`CompositeTouchListener`、长按解析、滚动协调、`CustomViewCoordinator`（全屏视频） |
+| `search/`（3） | `IntentExtractor`（Intent→`Action`，keyphone 直接注入）、`SearchBoxModel`、`SearchBoxDisplayChoice` |
+| `history/`（3） | `HistoryRecord` + 默认实现 + 隐身 NoOp（由 DI 切换） |
+| `notification/`（4） | 标签数通知 `TabCountNotifier` + 空实现 + 隐身常驻通知 |
+| `webrtc/`（2） | 网页权限请求的 Model / View，`TabWebChromeClient` 直接依赖 |
+| `menu/`（1） | `MenuSelection` 枚举，主菜单全部可选项（keyphone 复用） |
+| `cleanup/`（4） | 退出清理命令，**keyphone 显式跳过** |
+| `keys/`（2） | `KeyCombo` + `KeyEventAdapter`，只服务 `BrowserActivity` |
+| `ui/`（1） | `TabConfiguration`（DESKTOP / DRAWER_SIDE / DRAWER_BOTTOM），按键机只剩偏好值 |
+| `compose/`（15）+ `compose/sheets/`（8） | 上游触屏 UI，keyphone 零引用 → 见 5.5 |
+| `color/`（1） | `ColorAnimator` —— 死代码 |
 
-### 变体（Flavor）
+### 5.2 数据层与 DI
 
-flavor 维度 `capabilities` 有两个，且**只覆盖 `AndroidManifest.xml`**：
+| 目录 | 作用 |
+|---|---|
+| `database/`（23，含 5 子包） | 手写 `SQLiteOpenHelper`（**非 Room**），「Repository + Database」成对：`bookmark/`（+`BookmarkExporter`）、`history/`、`downloads/`、`allowlist/`、`adblock/`（+`InMemoryHostsRepository`）；领域模型根 `WebPage.kt`（派生 `HistoryEntry` / `Bookmark.Entry` / `Bookmark.Folder` / `SearchSuggestion`）；`DatabaseDelegate.kt` 缓存并按需重开 DB |
+| `preference/`（7） | DataStore 设置中心：`UserPreferencesDataStore.kt`（43+ 个 `PreferenceStore`，**所有偏好项唯一声明处**）、`datastore/PreferenceStore.kt`（NonNull / Nullable / Enum 三种实现）、`IntEnum.kt`、`datastore/Migrations.kt`；另有 `DeveloperPreferenceStore`、`CleanupPreferencesDataStore` |
+| `di/`（13） | Dagger 图：`AppComponent`（`@Singleton`，额外注入 `BrowserHomeActivity` / `KeyphoneHistoryActivity`）+ `AppModule`（445 行：OkHttp ×3、目录限定符、Mezzanine Reader、`AdBlocker`、`Cleanup.Action` 列表）+ `AppBindsModule`；子组件 `BrowserComponent`（**同时注入触屏与 keyphone 两个 Activity**）、`SettingsComponent`；`RendererBusyProvider`（渲染进程繁忙预判，切/关标签时降级防主线程冻住）；`DiExtensions.kt`（`Context.injector`） |
+| `search/`（27：`engine/`11 + `suggestions/`9） | `SearchEngineProvider`（11 种引擎）、`SuggestionsModel`（书签 : 历史 : 建议 = 2:2:1，上限 5）、`engine/BaseSearchEngine` + 11 实现、`suggestions/BaseSuggestionsModel` + 5 实现 + `NoOpSuggestionsRepository` |
+| `download/`（5） | `DelegatingFileDownloader` 按前缀分派：`data:` → `DataImageFileDownloader`，其余 → `DefaultFileDownloader`（HEAD 补元信息 → `DownloadManager` → 落库） |
+| `bookmark/`（3） | 书签**导入**（导出在 `database/bookmark/`）：Netscape 格式（jsoup）、本浏览器按行 JSON |
 
-- `lightningPlus` → `src/LightningPlus/`，`acr.browser.lightning`，`FULL_VERSION = true`，橙图标。
-- `lightningLite` → `src/LightningLite/`，`acr.browser.barebones`，`FULL_VERSION = false`，蓝图标。
-- 启动图标是 `<activity-alias>`（Orange enabled / Blue disabled，「更换应用图标」靠切换 alias 的 enabled 实现）。
-- `FULL_VERSION` 只被 `BrowserApp.kt`（`createBuildInfo()` → `BuildInfo.isPlus`）与 `AdBlockSettingsScreen.kt` 读取。`src/debug/`、`src/release/` 仅覆盖 `LeakCanaryUtils.kt`。
+### 5.3 支撑包（按需查阅，一般不直接改）
 
-### Gradle 机制（改依赖前必看）
+| 目录 | 作用 |
+|---|---|
+| `adblock/`（26） | `BloomFilterAdBlocker` / `NoOpAdBlocker`；`parser/HostsFileParser`；`source/`（Assets / File / Url 三种 hosts 源 + Provider）；`allowlist/`（会话级白名单）；`util/`（BloomFilter、`hash/MurmurHash.java`、`object/JvmObjectStore` 落盘） |
+| `pool/`（2） | `ObjectPool` + `LimitedObjectPool`，WebView 池化复用（**必经**） |
+| `concurrency/`（3） | `CoroutineDispatchers`（DB 调度器 `limitedParallelism(1)` 保证 SQLite 串行）+ `App/Browser/Tab` 三个语义作用域 + `combineMultiple` |
+| `connectivity/`（1） | `ConnectivityProvider.hasInternetAccess: MutableStateFlow<Boolean>` |
+| `favicon/`（3） | `FaviconModel`（磁盘缓存 + `LetterImagePainter` 首字母占位）、`FaviconCleanup`、`UriExtensions` |
+| `preview/`（2） | 标签缩略图缓存 `PreviewModel` + Coil3 `TopCropTransformation` |
+| `graphics/`（1） | `LetterImagePainter`：带首字母的圆角方块位图 |
+| `utils/`（9） | `UrlUtils.smartUrlFilter`、`IntentUtils.startActivityForUrl`（交外部 App）、`WebUtils`（清缓存）、`ThreadSafeFileProvider`（异步建目录）、`FileUtils`、`DeviceUtils` + 3 个遗留 Java（`Utils` / `ThemeUtils` / `DrawableUtils`） |
+| `extensions/`（10） | 按接收者归类：`ContextExtensions`、`CursorExtensions`（游标→列表）、`CloseableExtensions`（`safeUse`）、`StringBuilderExtensions`、`PermissionRequestExtensions` 等 |
+| `ssl/`（4） | `SslState` + `SslWarningPreferences`（**仅内存，重启即忘**）+ `SslCertificateInfo` |
+| `useragent/`（2） | `DefaultUserAgentProvider`（DEFAULT / DESKTOP / MOBILE / CUSTOM） |
+| `icon/`（2） | `BrowserIcon`（ORANGE / BLUE）+ `BrowserIconSelector`（启停 alias 换桌面图标） |
+| `shortcuts/`（3） | `DefaultShortcutGenerator`（API 26+ `requestPinShortcut`）与 `LegacyShortcutGenerator` |
+| `migration/`（1） | `Cleanup.kt`：按 `fixedInVersionCode` 与 `lastInstalledVersion` 只跑新增的一次性 Action |
+| `device/`（2） | `BuildInfo`（包名 / BuildType / versionCode / isPlus）+ `ScreenSize.isTablet()` |
+| `log/`（3） | `Logger` + `AndroidLogger` / `NoOpLogger`（按 BuildType 选） |
+| `constant/`（1） | `Constants.kt`：硬编码 UA、URL scheme、`about:home` / `about:bookmarks` / `about:history` 等本地页 scheme |
+| `ids/`（1） | `ViewIdGenerator`（动态 View ID，`takenIds` 供预览裁剪） |
+| `resources/`（2） | `ResourceProvider` / `NumberFormatter` |
+| `theme/`（2） | `DefaultThemeProvider`（隐身恒 DARK，否则取 `useTheme`） |
+| `dialog/`（2） | 传统 View 对话框辅助：`BrowserDialog`、`DialogItem` |
 
-- 仓库只在 `settings.gradle.kts` 声明（`FAIL_ON_PROJECT_REPOS`，google / mavenCentral，无镜像）。
-- `gradle.properties` 开启了 configuration-cache、isolated-projects、parallel、KSP2、incremental → 构建慢或行为诡异时先怀疑这几项。
-- **依赖锁定**：`activateDependencyLocking()` + `app/gradle.lockfile`，新增 / 升级依赖必须同步更新 lockfile（`--write-locks`），否则构建失败。
-- `sort-dependencies`（依赖块字母序）、`dependency-analysis`（声明与使用一致）、`licensee`（许可证白名单）都会在构建期让不规范改动失败。
-- `jvmToolchain(21)`；`compileSdk` / `targetSdk` 37、`buildToolsVersion` 37.0.0、`minSdk 24`（为兼容旧机型下调过，不要再抬高）。
-- 单测 `jvmArgs` 里有大量 `--add-opens`（Robolectric + JDK 21 必需），不要删。
-- `org.gradle.unsafe.isolated-projects=true`：构建脚本里**禁止跨工程访问 Project API**（典型如 `rootProject.file(...)`、`project(":x")`），配置阶段会直接失败。要读工程外的文件就用 `java.io.File` 基于 `layout.projectDirectory` 自行拼路径。
-- 依赖锁定 + configuration-cache 已开启：改依赖后要用 `--write-locks` 更新 `app/gradle.lockfile`；遇到诡异的陈旧配置可先删 `build/reports/configuration-cache` 或加 `--no-configuration-cache` 复现。
+### 5.4 资源与测试
 
-### 启动流程
+| 目录 | 内容 |
+|---|---|
+| `res/layout/`（**仅 4 个**） | `keyphone_browser.xml`（主界面）、`keyphone_list.xml`（6 个列表页共用）、`dialog_auth_request.xml`、`dialog_ssl_warning.xml` |
+| `res/values/`（8） | `strings.xml`、**`keyphone_strings.xml`（按键机文案）**、`arrays` / `attr` / `colors` / `dimens` / `integers` / `styles` |
+| `res/values-*` | 21 种语言 + `values-v21/`（styles）+ `values-xlarge/`（dimens） |
+| `res/drawable/`（38）、`mipmap-anydpi-v26/` | 矢量图标与形状（`ic_action_*`、`ic_block`、`card_bg`、`tab_background*`）；`ic_launcher_orange/blue` 自适应图标 |
+| `res/xml/`、`raw/`、`anim/`、`color/` | `filepaths.xml`（FileProvider）；`default_bookmarks.dat`（首启书签）；5 个转场动画；图标着色 selector |
+| `assets/`（10） | `hosts.txt`（1.69 MB 内置广告域名库）+ 9 个搜索引擎 logo |
+| `src/test/`（28） | 包名镜像 `main`，**无 `androidTest`**；`Constants.kt`（`SDK_VERSION = 36`）、`TestApplication`、`TestUtils.unimplemented()`；覆盖 adblock / 搜索建议 / PreferenceStore / TabViewState / WebRTC 等 |
 
-Manifest 的 activity-alias → `keyphone.BrowserHomeActivity` → 转发 → `keyphone.KeyphoneBrowserActivity`（见上文按键机适配层）；上游 Compose 版 `BrowserActivity.onCreate` 仅在触屏入口（`DefaultBrowserActivity` 处理外部链接）时走到。`BrowserApp.onCreate` 顺序：StrictMode（debug）→ 判定 `:incognito` 进程并 `setDataDirectorySuffix("incognito")` → 安装全局异常处理器（debug 写崩栈）→ 构建 `DaggerAppComponent` → `injector.inject(this)` → 协程跑 `Cleanup` 与首次书签导入 → debug 下装 LeakCanary 与 WebView 调试。
+### 5.5 明确不用看 / 不要往这里加东西
 
-## 关键约定与坑
+| 目录 | 说明 |
+|---|---|
+| `browser/compose/`（15）+ `compose/sheets/`（8） | 上游触屏 UI（三套 tab 外壳、搜索框、溢出菜单、查找）。keyphone 内零引用 |
+| `browser/color/ColorAnimator.kt` | 死代码 |
+| `browser/keys/KeyEventAdapter.kt` | 只服务 `BrowserActivity`，keyphone 自己处理按键 |
+| `browser/cleanup/` | keyphone 退出时被显式跳过 |
+| `browser/ui/TabConfiguration` | 只剩偏好值，按键机不走三套外壳分支 |
+| `compose/`（4） | Material3 主题基建，仅供设置页使用 |
+| `settings/`（24） | **仍在用**（见 5.4），但它是 Compose，不是适配目标 |
+| 其余小包（`ssl/`、`useragent/`、`icon/`、`shortcuts/`、`migration/`、`constants/`、`extensions/`、`dialog/`、`log/`、`ids/`、`resources/`、`theme/`、`device/`、`bookmark/`、`download/`） | 上游支撑设施，按键机开发一般不直接改；需要时按包名定位即可 |
 
-- `.bat` 脚本必须**纯 ASCII**：cmd.exe 按 OEM 代码页（中文系统 936/GBK）逐字节解析 .bat，UTF-8 中文注释会被误解码、行尾被当成命令执行（实测 `build_release.bat` 踩过；`../keydroidx-foucs/build_release.bat` 也带同样的坑）。中文说明写进本文件，不要写进 .bat。
-- `gradle.properties` / `local.properties` / `~/.gradle/gradle.properties` 里的 Windows 绝对路径（`org.gradle.java.home` 等）会触发 Lint `PropertyEscape`，且该规则对 Windows 绝对路径**不可满足**（源码行与其建议写法完全一致仍报错，`\` 与 `:` 不可能同时满足）。已用 `app/lint.xml` 对 `gradle.properties` 做按文件豁免并写明理由；不要顺手放开其它检查，更不要在 `app/build.gradle.kts` 里全局 disable。
-- Lint 的分析结果会因 `org.gradle.caching=true` 从构建缓存恢复，且 `lintAnalyze` 的输入不含 `gradle.properties` 内容 —— 改了 gradle.properties 后 Lint 仍报旧错时，先删 `app\build\intermediates\lint*`、`app\build\reports\lint*` 再跑（必要时加 `--no-build-cache`）。
-- WebView 必须经 `WebViewFactory` + `pool/` 池化获取；新 UI 优先写 Compose，需要嵌 View 时才用 `AndroidView`。
-- 改 `keyphone/` 适配代码时：`catch` 分支必须落日志（`KeydroidxLog.e`，严禁空 catch）；菜单/弹窗按键必须用 `KeydroidxKeyAction` 枚举匹配（禁止硬编码 keyCode）；消费了 DOWN 就必须消费同键 UP/REPEAT；执行类动作要过滤 key repeat；字号只能用 `keydroidx_font_*` 语义 Token；Java 动态构建的含 TextView 列表行用 `WRAP_CONTENT` + `setMinimumHeight()` 而非固定行高（大字号会裁字）；确认/取消弹窗统一走 `KeydroidxConfirmDialog`；列表焦点导航用 `KeydroidxListFocusHelper`。
-- 上游无 CI；`.github` 已被删除。不要重新引入 `-x lint` 的构建方式。
-- 未经用户明确许可，不要执行 `git commit`。
+### 5.6 html / js（Mezzanine，改完必须重新构建）
+
+`interface` + `@FileStream("src/main/xxx")` + `provideJs()/provideHtml()`，KSP 在**编译期**把 `src/main/js/*.js`、`src/main/html/*.html` 内联为字符串常量；清单在 `app/build.gradle.kts` 的 `mezzanine { files = ... }`。
+
+按键机专用脚本：
+
+- `js/KeyphoneScroll.js`（10.7 KB）— 把贴边滚动对象从文档根改成**光标下元素**
+- `js/KeyphoneReadingMode.js`（66 KB）— 阅读模式：正文提纯、下一页识别、自动拼页、页数裁剪；**必须保持纯 ASCII**（中文用 `\uXXXX`），事件经 `window.__keyphoneReadingBridge__` 回传
+
+### 5.7 设置页（唯一残留的 Compose 界面）
+
+- 入口：首页模式 `KeyphoneOptionsActivity.kt:165` → `startActivity(SettingsActivity)`；页面模式 `relay(ACTION_SETTINGS)` → `KeyphoneBrowserActivity.kt:5201` → `menuClick(MenuSelection.SETTINGS)` → `BrowserNavigator.openSettings()`。
+- 结构：`settings/activity/SettingsActivity`（宿主）+ `settings/framework/`（声明式设置项：`ToggleState` / `ClickableState` + `ClickableOnClick` 11 种动作）+ `settings/screens/`（9 个屏，每屏只 `createSettingsFrameworkState()`）+ `settings/navigation/`（自研路由，非 Jetpack Navigation）。
+- 加一个设置项 = `settings/screens/*Screen.kt` 加声明 + `preference/UserPreferencesDataStore.kt` 加字段。
+- 它是**触屏控件**（开关、底部单选栏、字号滑杆）。若要彻底按键机化，这是最后一块待改造界面。
+
+---
+
+## 6. 构建与工具链坑
+
+- `.bat` 必须**纯 ASCII**：cmd.exe 按 OEM 代码页（中文系统 936/GBK）逐字节解析，UTF-8 中文注释会被误解码、行尾当命令执行。中文说明写进本文件。
+- **依赖锁定**：`activateDependencyLocking()` + `app/gradle.lockfile`。改依赖后必须 `--write-locks`；**若需要清掉已废弃的配置名，`--write-locks` 只会追加不会删除，必须先删 lockfile 再生成**。
+- `gradle.properties` 开了 configuration-cache / isolated-projects / parallel / KSP2 / incremental。**`--no-configuration-cache` 与 isolated-projects 冲突，不能一起用**。
+- `isolated-projects=true`：构建脚本**禁止跨工程访问 Project API**（`rootProject.file(...)`、`project(":x")`），要用 `java.io.File` + `layout.projectDirectory` 自行拼路径。
+- `gradle.properties` / `local.properties` 里的 Windows 绝对路径会触发 Lint `PropertyEscape`，该规则对 Windows 路径**不可满足**；已用 `app/lint.xml` 做按文件豁免，不要放开其它检查或在 `build.gradle.kts` 里全局 disable。
+- Lint 结果会从构建缓存恢复：改了 `gradle.properties` 仍报旧错时，先删 `app\build\intermediates\lint*`、`app\build\reports\lint*` 再跑。
+- **本工程没有 licensee 插件**，不存在 `licensee*` 任务（历史文档里出现过，是误记）。
+- 单测 `jvmArgs` 里大量 `--add-opens` 是 Robolectric + JDK 21 必需，不要删。
+- 未经用户明确许可，**不要执行 `git commit`**。
+
+---
+
+## 7. 「要改 X 该去哪」速查
+
+| 需求 | 位置 |
+|---|---|
+| 按键机主页 / 标签栏 / 菜单 / 按键分发 | `keyphone/KeyphoneBrowserActivity.kt` |
+| 列表行、宫格卡外观 | `keyphone/KeyphoneViews.kt` |
+| 光标 / 鼠标模式 / 热区跳转 | `KeyphoneMouseController.kt`、`KeyphoneCursorView.kt`、`js/KeyphoneScroll.js` |
+| 阅读模式 | `js/KeyphoneReadingMode.js` + `KeyphoneReadingBridge.kt` + `KeyphoneReadingPrefs.kt` + `docs/reading-mode-*.md` |
+| 网页弹窗 / 跳转拦截 / 下载审批 | `KeyphoneJsDialogs.kt`、`KeyphoneUrlGuard.kt`、`KeyphoneGuardStore.kt`（另需同步看 `browser/tab/TabWebViewClient`、`TabWebChromeClient`、`TabAdapter` 三处调用点） |
+| 1~9 键光标落点 | `KeyphoneSiteKeyStore.kt` |
+| 标签页行为 / WebView 创建 | `browser/tab/`（**必须经 `WebViewFactory` + `pool/`**） |
+| 地址栏归一化 / 搜索引擎识别 | `KeyphoneUrls.kt` + `utils/UrlUtils.kt` + `search/` |
+| 新增偏好项 | `preference/UserPreferencesDataStore.kt`（唯一声明处） |
+| 新增设置项（Compose 设置页） | `settings/screens/*Screen.kt` |
+| 新增依赖 | `app/build.gradle.kts` + `app/gradle.lockfile`（`--write-locks`） |
+| 补适配缺口 | 隐身模式 `IncognitoBrowserActivity`、外部链接 `DefaultBrowserActivity`（都还是 Compose） |
+
+---
+
+## 8. 参考资料
+
+- `docs/`（8 份中文文档）：九宫格热区鼠标跳转、网页输入劫持、阅读模式（黑屏诊断 / 分章跳读 / 日志持久化 / 渲染隔离）、页面冻结多窗口方案。**动阅读模式 / 光标 / 滚动前先翻这里**。
+- `prototype/`：2 个 HTML 原型（按键机 UI、跳转拦截），不参与编译。
+- 工作区相对上游已删除 `LICENSE`、`CHANGELOG.md`、`CONTRIBUTING.md`、`.github/`、`launcher_icon*.png`，因此**无 CI**，`README.md` 徽章链接已失效。

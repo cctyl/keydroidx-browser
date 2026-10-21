@@ -8,19 +8,13 @@ REM  build output directory -- no stale /dist cache involved.
 REM  After install, the launcher activity is started on every
 REM  targeted device.
 REM
-REM  Variant (change these three lines together when switching flavor):
-REM    lightningPlus -> :app:assembleLightningPlusDebug
-REM                     acr.browser.lightning / DefaultBrowserActivityOrange
-REM    lightningLite -> :app:assembleLightningLiteDebug
-REM                     acr.browser.barebones / DefaultBrowserActivityBlue
-REM
 REM  Usage:
 REM    build_install_debug.bat            (build + install + launch on ALL devices)
 REM    build_install_debug.bat <serial>   (build + install + launch only on given device)
 REM ============================================================
 
 set "ROOT=%~dp0"
-set "TASK=:app:assembleLightningPlusDebug"
+set "TASK=:app:assembleDebug"
 set "COMPONENT=acr.browser.lightning/acr.browser.lightning.DefaultBrowserActivityOrange"
 
 echo [1/4] Building debug APK (%TASK%) ...

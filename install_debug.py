@@ -3,10 +3,8 @@
 Install the latest debug APK from the build output directory to one or all
 connected adb devices.
 
-APK is read directly from app/build/outputs/apk/<flavor>/debug/ -- no stale
-cache involved. Both flavors (lightningPlus / lightningLite) are searched and
-the most recently built APK wins, so the script works no matter which flavor
-was built last.
+APK is read directly from app/build/outputs/apk/debug/ -- no stale cache
+involved.
 
 - No serial arg  -> enumerate every connected adb device and install in
   parallel (non-blocking). One device failing does NOT affect the others.
@@ -24,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 def find_latest_apk(apk_root):
     """Return the path of the most recently built .apk under apk_root."""
-    candidates = glob.glob(os.path.join(apk_root, "*", "debug", "*.apk"))
+    candidates = glob.glob(os.path.join(apk_root, "debug", "*.apk"))
     if not candidates:
         return None
     candidates.sort(key=os.path.getmtime, reverse=True)
@@ -73,14 +71,13 @@ def main():
 
     if not apk_path:
         print(
-            f"[ERROR] No APK found under {apk_root}\\<flavor>\\debug. "
-            "Run `gradlew assembleLightningPlusDebug` first."
+            f"[ERROR] No APK found under {apk_root}\\debug. "
+            "Run `gradlew assembleDebug` first."
         )
         return 1
 
-    # path shape: <root>/app/build/outputs/apk/<flavor>/debug/<name>.apk
-    flavor = os.path.basename(os.path.dirname(os.path.dirname(apk_path)))
-    print(f"Installing APK ({flavor}): {apk_path}")
+    # path shape: <root>/app/build/outputs/apk/debug/<name>.apk
+    print(f"Installing APK: {apk_path}")
 
     serial_arg = sys.argv[1] if len(sys.argv) > 1 else None
 

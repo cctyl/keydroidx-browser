@@ -62,11 +62,7 @@
 ## 构建
 
 ```bash
-# 全功能版：acr.browser.lightning
-./gradlew assembleLightningPlusDebug
-
-# 精简版：acr.browser.barebones
-./gradlew assembleLightningLiteDebug
+./gradlew assembleDebug
 ```
 
 Windows 下用 `gradlew.bat`。产物位于 `app/build/outputs/apk/<flavor>/<buildType>/`。

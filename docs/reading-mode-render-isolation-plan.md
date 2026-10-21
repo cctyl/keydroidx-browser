@@ -644,4 +644,4 @@ M0（方案 C 宿主隔离）已落地，真机验证通过。改动三个文件
 | 自动追加 | `fetch#n` 预读 + `append … dom=2/3` + 桥事件 `turn` |
 | 退出（返回键） | 导航到 `lastUrl` 真实章节页，`reading=false` |
 | 标题正确性 | 追加章节标题与站点 `<h1>` 一致（14→16 是站点自身跳号，非丢章） |
-| lint | `:app:lintLightningPlusDebug` 通过 |
+| lint | `:app:lintDebug` 通过 |

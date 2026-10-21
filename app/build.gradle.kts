@@ -36,22 +36,16 @@ android {
 
     defaultConfig {
         buildToolsVersion = "37.0.0"
+        applicationId = "acr.browser.lightning"
         minSdk = 24
         targetSdk = 37
+        versionCode = 102
         versionName = "5.1.0"
+        buildConfigField("boolean", "FULL_VERSION", "true")
         vectorDrawables.useSupportLibrary = true
     }
 
     val isCi = System.getenv("CI") == "true"
-
-    sourceSets {
-        create("lightningPlus").apply {
-            setRoot("src/LightningPlus")
-        }
-        create("lightningLite").apply {
-            setRoot("src/LightningLite")
-        }
-    }
 
     buildFeatures {
         viewBinding = true
@@ -101,24 +95,6 @@ android {
         }
     }
 
-    flavorDimensions.add("capabilities")
-
-    val commonVersionCode = 102
-
-    productFlavors {
-        create("lightningPlus") {
-            dimension = "capabilities"
-            buildConfigField("boolean", "FULL_VERSION", "Boolean.parseBoolean(\"true\")")
-            applicationId = "acr.browser.lightning"
-            versionCode = commonVersionCode
-        }
-        create("lightningLite") {
-            dimension = "capabilities"
-            buildConfigField("boolean", "FULL_VERSION", "Boolean.parseBoolean(\"false\")")
-            applicationId = "acr.browser.barebones"
-            versionCode = commonVersionCode
-        }
-    }
     packaging {
         resources {
             excludes += listOf(".readme")
