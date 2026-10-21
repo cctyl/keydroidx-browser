@@ -49,6 +49,9 @@ class KeyphoneRainbowProgressBar @JvmOverloads constructor(
         /** 达到 100% 时的淡出动画时长 (ms) */
         private const val FADE_OUT_DURATION_MS = 240L
 
+        /** 未经终场裁决前的进度封顶上限（95%），在此处保持流光等待真实的 onPageFinished */
+        private const val CAPPED_PROGRESS = 95f
+
         /**
          * 炫彩渐变色环：青蓝 → 蔚蓝 → 紫罗兰 → 霓虹粉 → 琥珀金 → 翠绿 → 青蓝（首尾闭环无缝循环）
          */
@@ -72,6 +75,9 @@ class KeyphoneRainbowProgressBar @JvmOverloads constructor(
 
     /** 目标进度 (0..100) */
     private var targetProgress = 0
+
+    /** 是否处于真实的页面加载会话中（收到 1..99 或显式 startLoading 时置 true） */
+    private var isPageLoading = false
 
     /** 底轨背景画笔（极弱半透明底轨，提升微小屏幕上的对比度） */
     private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -166,12 +172,39 @@ class KeyphoneRainbowProgressBar @JvmOverloads constructor(
     }
 
     /**
+     * 显式开启页面加载（例如点击打开链接或刷新时立即触发起步反馈）。
+     *
+     * @param initialProgress 初始起步进度（默认 12%），提供即时的流光视觉反馈
+     */
+    fun startLoading(initialProgress: Int = 12) {
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[ProgressBar.startLoading] initial=$initialProgress current=$currentProgress isPageLoading=$isPageLoading vis=$visibility"
+        )
+        isPageLoading = true
+        cancelFadeOut()
+        if (visibility != VISIBLE) {
+            visibility = VISIBLE
+        }
+        alpha = 1f
+        startShimmerIfNeed()
+        val target = initialProgress.coerceIn(5, 50).toFloat()
+        if (currentProgress < target) {
+            animateProgressTo(target, PROGRESS_SMOOTH_DURATION_MS)
+        }
+    }
+
+    /**
      * 更新当前加载进度 (0..100)。
      *
      * @param progress 0~100 整数
      */
     fun setProgress(progress: Int) {
         val clamped = progress.coerceIn(0, 100)
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[ProgressBar.setProgress] input=$progress clamped=$clamped current=$currentProgress isPageLoading=$isPageLoading vis=$visibility"
+        )
         targetProgress = clamped
 
         if (clamped <= 0) {
@@ -179,23 +212,38 @@ class KeyphoneRainbowProgressBar @JvmOverloads constructor(
             return
         }
 
-        if (clamped in 1..99) {
-            // 确保可见度与透明度
-            cancelFadeOut()
-            if (visibility != VISIBLE) {
-                visibility = VISIBLE
-            }
-            alpha = 1f
-            startShimmerIfNeed()
+        // 确保进入真实加载态、可见度与透明度
+        isPageLoading = true
+        cancelFadeOut()
+        if (visibility != VISIBLE) {
+            visibility = VISIBLE
+        }
+        alpha = 1f
+        startShimmerIfNeed()
 
-            // 平滑推进当前进度
-            animateProgressTo(clamped.toFloat(), PROGRESS_SMOOTH_DURATION_MS)
-        } else {
-            // 达到 100%：先快速冲顶，然后优雅淡出
+        // 关键防护：在未经 Activity 终场裁决（complete）前，任何进度上报最高只能推进到
+        // CAPPED_PROGRESS (95%)，保持在顶栏积极流光，绝不允许在此处误触冲顶与淡出。
+        val target = clamped.toFloat().coerceAtMost(CAPPED_PROGRESS)
+        animateProgressTo(target, PROGRESS_SMOOTH_DURATION_MS)
+    }
+
+    /**
+     * 终场裁决完成：当且仅当 onPageFinished 且底层真实 progress == 100 时由 UI 裁决层调用。
+     * 触发平滑冲顶至 100% 并优雅淡出。
+     */
+    fun complete() {
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[ProgressBar.complete] current=$currentProgress isPageLoading=$isPageLoading vis=$visibility"
+        )
+        if (isPageLoading && visibility == VISIBLE && currentProgress > 0f) {
+            isPageLoading = false
             startShimmerIfNeed()
             animateProgressTo(100f, 100L) {
                 startFadeOut()
             }
+        } else {
+            reset()
         }
     }
 
@@ -203,6 +251,11 @@ class KeyphoneRainbowProgressBar @JvmOverloads constructor(
      * 立即重置并隐藏进度条。
      */
     fun reset() {
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[ProgressBar.reset] target=$targetProgress current=$currentProgress"
+        )
+        isPageLoading = false
         targetProgress = 0
         currentProgress = 0f
         cancelAllAnimators()

@@ -198,6 +198,11 @@ class TabWebChromeClient @AssistedInject constructor(
         super.onJsBeforeUnload(view, url, message, result)
 
     override fun onProgressChanged(view: WebView, newProgress: Int) {
+        val wvId = System.identityHashCode(view)
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[ChromeClient.onProgressChanged] wv#$wvId progress=$newProgress (wv.progress=${view.progress}) url=${view.url}"
+        )
         tabCoroutineScope.launch {
             progressSharedFlow.emit(newProgress)
         }

@@ -12,10 +12,12 @@ import acr.browser.lightning.browser.tab.DownloadPageInitializer
 import acr.browser.lightning.browser.tab.HistoryPageInitializer
 import acr.browser.lightning.browser.tab.HomePageInitializer
 import acr.browser.lightning.browser.tab.NoOpInitializer
+import acr.browser.lightning.browser.tab.PAGE_LOAD_START_PROGRESS
 import acr.browser.lightning.browser.tab.TabInitializer
 import acr.browser.lightning.browser.tab.TabModel
 import acr.browser.lightning.browser.tab.TabViewState
 import acr.browser.lightning.browser.tab.UrlInitializer
+import io.github.cctyl.nokia.common.log.KeydroidxLog
 import acr.browser.lightning.browser.ui.TabConfiguration
 import acr.browser.lightning.browser.view.LongPress
 import acr.browser.lightning.concurrency.BrowserCoroutineScope
@@ -127,6 +129,7 @@ class BrowserPresenter @Inject constructor(
             isRefresh = true,
             sslState = SslState.None,
             progress = 0,
+            isPageFinished = false,
             enableFullMenu = true,
             themeColor = null,
             isSearchBarExpanded = false,
@@ -387,6 +390,7 @@ class BrowserPresenter @Inject constructor(
                     isBackEnabled = false,
                     sslState = SslState.None,
                     progress = 100,
+                    isPageFinished = false,
                     findInPage = null,
                     tabs = tabs.map { it.copy(isSelected = false) }
                 )
@@ -420,11 +424,16 @@ class BrowserPresenter @Inject constructor(
             tab.urlChanges().onStart { emit(tab.url) }.map(String::isSpecialUrl),
             tab.themeColorChanges().onStart { emit(tab.themeColor) }
         ) { sslState, title, url, progress, canGoBack, canGoForward, isBookmark, isSpecialUrl, themeColor ->
+            KeydroidxLog.i(
+                "KeyphoneProgress",
+                "[Presenter.combine] tab#${tab.id} progress=$progress url=$url isRefresh=${progress == 100}"
+            )
             val displayContent = searchBoxModel.getDisplayContent(
                 url = url,
                 title = title,
                 isLoading = progress < 100
             )
+            val isPageFinishedNow = if (progress < 100) false else state.value.isPageFinished
             state.updateSelf {
                 copy(
                     displayUrl = displayContent,
@@ -437,12 +446,23 @@ class BrowserPresenter @Inject constructor(
                     isBackEnabled = canGoBack,
                     sslState = sslState,
                     progress = progress,
+                    isPageFinished = isPageFinishedNow,
                     isBookmarked = isBookmark,
                     isBookmarkEnabled = !isSpecialUrl,
                     findInPage = tab.findQuery
                 )
             }
         }.launchIn(browserCoroutineScope)
+
+        tabJobs += browserCoroutineScope.launch {
+            tab.pageFinishedChanges().collect {
+                KeydroidxLog.i(
+                    "KeyphoneProgress",
+                    "[Presenter] tab#${tab.id} pageFinishedChanges received -> isPageFinished=true"
+                )
+                state.updateSelf { copy(isPageFinished = true) }
+            }
+        }
 
         tabJobs += browserCoroutineScope.launch {
             tab.downloadRequests().collectLatest {
@@ -917,15 +937,29 @@ class BrowserPresenter @Inject constructor(
         }
         currentTab?.stopLoading()
         val url = searchEngineProvider.provideSearchEngine().search(query)
+        val tab = currentTab
+        // 关键顺序：地址栏更新必须与「进度复位」在同一次 state 发射里完成。
+        // 之前只更新 displayUrl、进度还是上一页的 100，UI 会先收到「新地址 + 100%」
+        // 并在 WebView 真正开始导航前错误地播放完成动画。
+        val nextProgress = if (tab != null) PAGE_LOAD_START_PROGRESS else state.value.progress
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[Presenter.onSearch] query=$query url=$url tab#${tab?.id} nextProgress=$nextProgress"
+        )
         val displayContent = searchBoxModel.getDisplayContent(
             url = url,
-            title = currentTab?.title,
-            isLoading = (currentTab?.loadingProgress ?: 0) < 100
+            title = tab?.title,
+            isLoading = nextProgress < 100
         )
         state.updateSelf {
-            copy(displayUrl = displayContent)
+            copy(
+                displayUrl = displayContent,
+                progress = nextProgress,
+                isPageFinished = false,
+                isRefresh = nextProgress == 100
+            )
         }
-        currentTab?.loadUrl(url)
+        tab?.loadUrl(url)
     }
 
     private suspend fun onSearchBarExpandedOrCollapsed(expanded: Boolean) {

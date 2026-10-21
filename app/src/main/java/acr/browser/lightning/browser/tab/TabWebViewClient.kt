@@ -149,6 +149,7 @@ class TabWebViewClient @AssistedInject constructor(
      * Emit when the tab has finished rendering its content.
      */
     val finishedSharedFlow = MutableSharedFlow<Unit>()
+    val pageFinishedSharedFlow = MutableSharedFlow<Unit>()
 
     /**
      * The latest search query entered by the user, or the latest loaded URL, whichever event
@@ -342,6 +343,11 @@ class TabWebViewClient @AssistedInject constructor(
     override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
         navigationStartedAt = SystemClock.elapsedRealtime()
+        val wvId = System.identityHashCode(view)
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[WebViewClient.onPageStarted] wv#$wvId url=$url wv.progress=${view.progress}"
+        )
         // 上游注入的 Logger 在 release 构建下是 NoOpLogger（完全不输出），导航现场因此只剩
         // logcat——而本机型 logcat 只有 256 KiB，十几分钟就被系统日志冲掉。故这里同时走
         // 生态标准 KeydroidxLog（落盘见 BrowserApp.onCreate 的 init）。
@@ -408,12 +414,18 @@ class TabWebViewClient @AssistedInject constructor(
         navigationStartedAt = 0L
         lastFinishedAt = now
         lastFinishedUrl = url
+        val wvId = System.identityHashCode(view)
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[WebViewClient.onPageFinished] wv#$wvId url=$url wv.progress=${view.progress} elapsed=${if (startedAt == 0L) "-" else "${now - startedAt}ms"}"
+        )
         KeydroidxLog.d(
             TAG,
             "onPageFinished: url=$url elapsed=${if (startedAt == 0L) "-" else "${now - startedAt}ms"}" +
                 " progress=${view.progress}"
         )
         tabCoroutineScope.launch {
+            pageFinishedSharedFlow.emit(Unit)
             urlSharedFlow.emit(url)
             goBackSharedFlow.emit(view.canGoBack())
             goForwardSharedFlow.emit(view.canGoForward())

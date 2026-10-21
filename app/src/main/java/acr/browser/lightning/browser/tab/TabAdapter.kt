@@ -64,6 +64,15 @@ import kotlin.time.Duration.Companion.milliseconds
 private const val PROGRESS_UI_STEP = 5
 
 /**
+ * 一次真实导航开始时的进度起步值。
+ *
+ * 不能继续沿用 [TabAdapter] 的默认值 100：新标签页 / 刷新 / 页面内跳转在 Chromium 真正
+ * 上报 onProgressChanged 之前，UI 会读到旧的 100 并把「还没开始加载」误判成「已经完成」。
+ * 用 10 明确表示「导航已发起，正在等首个真实进度」。
+ */
+internal const val PAGE_LOAD_START_PROGRESS = 10
+
+/**
  * 渲染进程死亡后重载的「是否真的出帧」验证延时（见 verifyReloadedPageRenders）。
  * 取 6 秒：本机型首屏实测 1.5s+，重载后还要重建渲染进程，留足余量避免误报。
  */
@@ -361,7 +370,23 @@ class TabAdapter @AssistedInject constructor(
 
     private val urlStateFlow = MutableStateFlow("")
 
-    private val progressStateFlow = MutableStateFlow(100)
+    /**
+     * 初始进度：只有「本来就什么都不加载」的标签才可以是 100。
+     *
+     * UrlInitializer / HtmlPageFactoryInitializer / HomePageInitializer 等会发起导航，
+     * 初始必须是 [PAGE_LOAD_START_PROGRESS]；否则 selectTab 的
+     * `onStart { emit(tab.loadingProgress) }` 会先把假的 100 推给 UI。
+     */
+    private val progressStateFlow = MutableStateFlow(
+        when (tabInitializer) {
+            is NoOpInitializer,
+            is PermissionInitializer,
+            is BundleInitializer,
+            is FreezableInitializer -> 100
+
+            else -> PAGE_LOAD_START_PROGRESS
+        }
+    )
 
     private val previewStateFlow = MutableStateFlow<TabModel.Preview>(TabModel.Preview.None)
 
@@ -416,6 +441,17 @@ class TabAdapter @AssistedInject constructor(
             }
         }
         tabCoroutineScope.launch {
+            // 页内点击链接 / JS 跳转 / 重定向 / 前进后退都可能绕过 TabAdapter.loadUrl()，
+            // 必须在 onPageStarted 时也把进度拉回起步值，避免沿用上一页的 100。
+            tabWebViewClient.startedSharedFlow.collect {
+                KeydroidxLog.i(
+                    "KeyphoneProgress",
+                    "[TabAdapter.startedSharedFlow] tab#$id url=$url -> emit PAGE_LOAD_START_PROGRESS($PAGE_LOAD_START_PROGRESS)"
+                )
+                progressStateFlow.emit(PAGE_LOAD_START_PROGRESS)
+            }
+        }
+        tabCoroutineScope.launch {
             // 进度量化节流：Chromium 在资源密集页（如起点目录）的 onProgressChanged 可达
             // 每秒上百次，全部透传会让主线程上的 combine/collector 每秒重算上百遍 UI。
             // 按 PROGRESS_UI_STEP 量化 + 去重，终点 100 永远透传（停止/刷新切换、
@@ -429,6 +465,10 @@ class TabAdapter @AssistedInject constructor(
                 }
                 if (quantized != lastEmitted) {
                     lastEmitted = quantized
+                    KeydroidxLog.i(
+                        "KeyphoneProgress",
+                        "[TabAdapter.progressSharedFlow] tab#$id raw=$raw quantized=$quantized"
+                    )
                     progressStateFlow.emit(quantized)
                 }
             }
@@ -436,6 +476,11 @@ class TabAdapter @AssistedInject constructor(
     }
 
     override suspend fun loadUrl(url: String) {
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[TabAdapter.loadUrl] tab#$id url=$url -> emit PAGE_LOAD_START_PROGRESS($PAGE_LOAD_START_PROGRESS)"
+        )
+        progressStateFlow.emit(PAGE_LOAD_START_PROGRESS)
         // 按键机提交兜底拦截：用户主动输入/选择的地址放行一次
         tabWebViewClient.allowExplicitNavigation(url)
         val wv = webView()
@@ -452,6 +497,11 @@ class TabAdapter @AssistedInject constructor(
     }
 
     override suspend fun goBack() {
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[TabAdapter.goBack] tab#$id -> emit PAGE_LOAD_START_PROGRESS($PAGE_LOAD_START_PROGRESS)"
+        )
+        progressStateFlow.emit(PAGE_LOAD_START_PROGRESS)
         tabWebViewClient.allowExplicitNavigation(null)
         webView().goBack()
     }
@@ -461,6 +511,11 @@ class TabAdapter @AssistedInject constructor(
     override fun canGoBackChanges(): Flow<Boolean> = tabWebViewClient.goBackSharedFlow
 
     override suspend fun goForward() {
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[TabAdapter.goForward] tab#$id -> emit PAGE_LOAD_START_PROGRESS($PAGE_LOAD_START_PROGRESS)"
+        )
+        progressStateFlow.emit(PAGE_LOAD_START_PROGRESS)
         tabWebViewClient.allowExplicitNavigation(null)
         webView().goForward()
     }
@@ -480,6 +535,11 @@ class TabAdapter @AssistedInject constructor(
     }
 
     override suspend fun reload() {
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[TabAdapter.reload] tab#$id -> emit PAGE_LOAD_START_PROGRESS($PAGE_LOAD_START_PROGRESS)"
+        )
+        progressStateFlow.emit(PAGE_LOAD_START_PROGRESS)
         webView().reload()
     }
 
@@ -569,6 +629,8 @@ class TabAdapter @AssistedInject constructor(
         get() = progressStateFlow.value
 
     override fun loadingProgress(): Flow<Int> = progressStateFlow
+
+    override fun pageFinishedChanges(): Flow<Unit> = tabWebViewClient.pageFinishedSharedFlow
 
     override fun downloadRequests(): Flow<PendingDownload> = downloadsShareFlow
 

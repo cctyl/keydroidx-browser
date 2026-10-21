@@ -564,6 +564,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         val action = intentExtractor.extractUrlFromIntent(intent)
         if (action != null) {
             isHomeSelected = false
+            progressBar?.startLoading(12)
             presenter.onEvent(BrowserUiEvent.NewAction(action))
             updateTabMode()
         } else if (intent.getBooleanExtra(EXTRA_SHOW_HOME, false)) {
@@ -884,6 +885,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     /** 打开网址：若当前标签是主页空白页直接在当前标签加载，否则新建标签页加载 */
     internal fun openUrlInNewTab(url: String) {
+        KeydroidxLog.i("KeyphoneProgress", "[Activity.openUrlInNewTab] url=$url")
         KeydroidxLog.d(TAG, "openUrlInNewTab: $url")
         if (isFindMode) {
             exitFindMode()
@@ -903,6 +905,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         isScrolledToBottom = false
         showPageLoadingNow()
         armPendingOpenWatchdog()
+        progressBar?.startLoading(12)
 
         lifecycleScope.launch {
             try {
@@ -1191,7 +1194,14 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             Toast.makeText(this, R.string.keyphone_need_page, Toast.LENGTH_SHORT).show()
             return
         }
+        val wvId = System.identityHashCode(webView)
+        val stateProgress = presenter.state.value.progress
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[Activity.enterReadingMode] wv#$wvId url=$url wv.progress=${webView.progress} state.progress=$stateProgress"
+        )
         if (webView.progress < 100) {
+            progressBar?.startLoading(webView.progress.coerceAtLeast(12))
             Toast.makeText(this, R.string.keyphone_reading_loading, Toast.LENGTH_SHORT).show()
             return
         }
@@ -2518,7 +2528,18 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             exitReadingMode()
         } else {
             clearReadingModeOnNavigation()
-            presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
+            val realProgress = currentWebView()?.progress ?: presenter.state.value.progress
+            KeydroidxLog.i(
+                "KeyphoneProgress",
+                "[Activity.refreshCurrentPage] realProgress=$realProgress state.progress=${presenter.state.value.progress}"
+            )
+            if (realProgress < 100) {
+                // 正在加载时点刷新等价于「停止」，不能把进度条重新拉回起步位
+                presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
+            } else {
+                progressBar?.startLoading(12)
+                presenter.onEvent(BrowserUiEvent.RefreshOrStopClick)
+            }
         }
     }
 
@@ -3500,6 +3521,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     private var lastObservedTabs: List<TabViewState>? = null
     private var lastObservedDisplayUrl: String? = null
     private var lastObservedProgress: Int = -1
+    private var lastObservedIsPageFinished: Boolean = false
 
     /**
      * tabs 列表的语义比较：只看会影响 [updateTabMode] 的字段（id/标题/选中态/URL），
@@ -3559,17 +3581,19 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 val tabsChanged = tabsMeaningfullyChanged(lastObservedTabs, state.tabs)
                 val displayUrlChanged = state.displayUrl != lastObservedDisplayUrl
                 val progressChanged = state.progress != lastObservedProgress
+                val pageFinishedChanged = state.isPageFinished != lastObservedIsPageFinished
                 val pendingConsumed = hadPendingOpenUrl && pendingOpenUrl == null
                 logReadingStatePulse(state, tabsChanged, displayUrlChanged, progressChanged)
                 lastObservedTabs = state.tabs
                 lastObservedDisplayUrl = state.displayUrl
                 lastObservedProgress = state.progress
+                lastObservedIsPageFinished = state.isPageFinished
 
                 if (tabsChanged) {
                     updateTabMode()
-                    applyProgress(state.progress)
-                } else if (progressChanged || displayUrlChanged || pendingConsumed) {
-                    applyProgress(state.progress)
+                    applyProgress(state.progress, state.isPageFinished)
+                } else if (progressChanged || pageFinishedChanged || displayUrlChanged || pendingConsumed) {
+                    applyProgress(state.progress, state.isPageFinished)
                     updatePageLoading(currentWebView())
                 }
                 if (!isHomeSelected && (displayUrlChanged || tabsChanged)) {
@@ -3978,10 +4002,25 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     // endregion
 
-    private fun applyProgress(progress: Int) {
+    private fun applyProgress(progress: Int, isPageFinished: Boolean) {
         val bar = progressBar ?: return
         if (isHomeSelected) {
             bar.reset()
+            return
+        }
+        val currentWv = currentWebView()
+        val wvId = System.identityHashCode(currentWv)
+        val realWvProgress = currentWv?.progress ?: 0
+        KeydroidxLog.i(
+            "KeyphoneProgress",
+            "[Activity.applyProgress] state.progress=$progress isFinished=$isPageFinished wv#$wvId wv.progress=$realWvProgress url=${currentWv?.url}"
+        )
+
+        // 双闸门终场裁决：
+        // 闸门 A：页面加载完成事件 (onPageFinished) 已触发并经 Presenter 上报
+        // 闸门 B：底层 WebView 当前真实 progress == 100（与阅读模式准入条件物理同源）
+        if (isPageFinished && realWvProgress >= 100) {
+            bar.complete()
         } else {
             bar.setProgress(progress)
         }

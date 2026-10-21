@@ -199,6 +199,11 @@ interface TabModel {
      */
     fun loadingProgress(): Flow<Int>
 
+    /**
+     * Emits when the current webpage has finished loading (triggered by onPageFinished).
+     */
+    fun pageFinishedChanges(): Flow<Unit>
+
     // Lifecycle
 
     /**

@@ -57,6 +57,7 @@ data class BrowserViewState(
     val sslState: SslState,
     val isRefresh: Boolean,
     val progress: Int,
+    val isPageFinished: Boolean = false,
     val enableFullMenu: Boolean,
     val themeColor: Int?,
     val isSearchBarExpanded: Boolean,

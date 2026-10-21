@@ -68,6 +68,11 @@ adb -s <serial> shell am start -n acr.browser.lightning/acr.browser.lightning.De
 
 ---
 
+
+## 日志要积极打
+符合规范的打日志，非常有助于排查bug。
+
+
 ## 3. 按键机适配层全景（`keyphone/`，20 个文件）
 
 ### 3.1 入口链
