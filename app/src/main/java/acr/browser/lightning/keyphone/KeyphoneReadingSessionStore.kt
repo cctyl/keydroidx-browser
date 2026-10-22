@@ -6,17 +6,17 @@ import io.github.cctyl.nokia.common.log.KeydroidxLog
 /**
  * 阅读会话的落盘快照（阅读态随 Activity 重建 / 进程被杀而丢失时的兜底）。
  *
- * 背景：阅读模式把「进入时那一章 → 后面拼进来的每一章」渲染在同一个 data 外壳里，
- * 而浏览内核记录的标签 URL 只会停在**入口章**（外壳的 baseUrl）。一旦 Activity 被重建
+ * 背景：阅读模式的正文在原生 `KeyphoneReaderView` 上（内存态），WebView 只停在
+ * 取章外壳上，而浏览内核记录的标签 URL 只会停在**外壳的 baseUrl**。一旦 Activity 被重建
  * （按挂机键回桌面后 Activity 被系统回收、或进程被杀），内存里的
- * `readingModeTabs` 随 Activity 一起消失，标签按 URL 重新加载的结果就是**回到入口章**
+ * `readingModeTabs` 与章节队列一起消失，标签按 URL 重新加载的结果就是**回到入口章**
  * ——用户视角为「阅读模式没了，而且章节错了」（已读到第 59 章，回到第 1 章）。
  *
  * 这里只记最小恢复信息：入口章 URL（作为标签 URL 的匹配键）、最后读到的章节 URL、
  * 已读章数。恢复动作见 `KeyphoneBrowserActivity.maybeRestoreReadingSession`：
  * 导航回最后读到的章节，再自动重进阅读模式（重新提取一次正文即可，不丢章节）。
  *
- * 刻意**不**落盘正文 / 拼页 DOM：那些体积大且由 JS 侧重建，重进阅读模式会自然拼回来。
+ * 刻意**不**落盘正文：体积大且重新提取一次就能拿回来，落盘收益远小于代价。
  */
 object KeyphoneReadingSessionStore {
 

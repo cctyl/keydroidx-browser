@@ -7,11 +7,12 @@ import io.github.cctyl.nokia.common.log.KeydroidxLog
  * 阅读模式外观偏好：背景主题与正文字号。
  *
  * - 按键机专属，单独落盘在 `keyphone_reading`，不污染上游 UserPreferencesDataStore；
- * - 写入时机：JS 侧按键（1 减小 / 3 增大 / 7 轮换背景）执行后经 JS 桥回传 `font` / `theme` 事件；
- * - 读取时机：进入阅读模式前，作为 `window.__keyphone_rm_init__` 与脚本同批注入，
- *   保证换章、刷新、重进阅读模式后外观保持一致（脚本每次注入都会重置为默认值）。
+ * - 写入时机：按键 1 / 3 / 7 由**原生**阅读视图直接改属性后立即落盘
+ *   （见 `KeyphoneReaderView.changeFont` / `cycleTheme`），不再经过 JS；
+ * - 读取时机：进入阅读模式前，投喂给 `KeyphoneReaderView.applyPreferences`，
+ *   保证换章、重进阅读模式后外观保持一致。
  *
- * 主题序号与字号档位必须与 KeyphoneReadingMode.js 内的 THEMES / FONT_SIZES 表对应。
+ * 主题序号与字号档位必须与 [KeyphoneReaderThemes.THEMES] / [KeyphoneReaderThemes.FONT_SIZES] 对应。
  */
 object KeyphoneReadingPrefs {
 

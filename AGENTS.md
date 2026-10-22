@@ -101,14 +101,17 @@ activity-alias (Orange 默认 / Blue 备用)
 | Fragment | `KeyphoneTabsFragment.kt` | 标签列表，继承 `KeydroidxListPageFragment`，push 在浏览页内 |
 | View | `KeyphoneCursorView.kt` | 40dp 虚拟光标，`translationX/Y` 位移（0 重绘），贴边变箭头 |
 | View | `KeyphoneShellOverlay.kt` | WebView 上层全透明覆盖层，自绘快捷菜单卡片 |
+| View | `KeyphoneReaderView.kt` | **阅读显示层**：单 TextView + 分页游标（StaticLayout 二分测量），正文完全不经过 WebView |
+| 分页 | `KeyphoneReaderPager.kt` | 阅读分页引擎（**纯逻辑无 Android 依赖**，含单测）：章队列 / 页游标 / 换字号 / 上下一页；页边界表**只增不改**，回翻查表不重算（整章遍历会 ANR，见 `docs/reading-mode-anr-fix-20261022.md`） |
+| 常量 | `KeyphoneReaderThemes.kt` | 阅读外观唯一事实源：5 档背景主题 + 字号档位 14~40px + 行高 1.8 |
 | 弹窗 | `KeyphoneOptionSheetDialog.kt` | 通用底部选项卡（纯代码 UI），1~9 数字直选 |
 | 控制 | `KeyphoneMouseController.kt` | 鼠标模式引擎：方向键移光标（短边×0.015，140ms 后连发，800ms 加速 6.5x）、贴边滚动（滚**光标下元素**而非文档根）、1~9 热区跳转 |
 | 桥接 | `KeyphoneJsDialogs.kt` | 接管 `alert/confirm/prompt/beforeunload`，禁止系统模态框钉死页面 |
 | 桥接 | `KeyphoneUrlGuard.kt` | 拦截判定引擎（`PROCEED/BLOCK/ASK`）：外部协议、站内跳转、下载审批 |
-| 桥接 | `KeyphoneReadingBridge.kt` | 阅读模式 JS 桥，持 `WeakReference` 防池化泄漏 |
+| 桥接 | `KeyphoneReadingBridge.kt` | 阅读模式 JS 桥（`chapter`/`fail`/`end`），持 `WeakReference` 防池化泄漏；**本机常不生效，取章主通道是 `evaluateJavascript` 返回值** |
 | 存储 | `KeyphoneGuardStore.kt` | 拦截规则（SP），域名归一化为 eTLD+1 |
 | 存储 | `KeyphoneSiteKeyStore.kt` | 1~9 键自定义光标落点，存**比例坐标 0~1**（适配分辨率与旋屏） |
-| 存储 | `KeyphoneReadingPrefs.kt` | 阅读模式外观（背景 5 档 / 字号 14~40px），落盘 `keyphone_reading` |
+| 存储 | `KeyphoneReadingPrefs.kt` | 阅读模式外观（背景 5 档 / 字号 14~40px），落盘 `keyphone_reading`；按键直写，不经 JS |
 | 工具 | `KeyphoneUrls.kt` | 地址归一化：`about:` 内页不回填、空串→主页、其余走 `smartUrlFilter` |
 | 工具 | `KeyphoneViews.kt` | **所有列表行 / 宫格卡 View 工厂**（`iconRow/searchRow/addressBar/tabRow/bookmarkGrid/quickMenuItem/ucTabCell`），强制走 SDK 字号 Token + 字体图标 + 主题色 |
 
@@ -116,7 +119,7 @@ activity-alias (Orange 默认 / Blue 备用)
 
 - 依赖 `io.github.cctyl.nokia:keydroidx-key-core:1.0.0`，来自 `../keydroidx-core` 的 `publishToMavenLocal`（**必须同时发布 `:keydroidx-common` 和 `:keydroidx-key-core`**；core 的 AGP 版本不同，不能用 composite build）。`settings.gradle.kts` 仓库首位是 `mavenLocal()`。
 - 常用 SDK 类：`KeydroidxBaseActivity`（8 个 Activity 基类）、`KeydroidxListPageFragment`、`KeydroidxListFocusHelper`（列表循环导航）、`KeydroidxConfirmDialog`、`KeydroidxTextInputFragment`、`KeydroidxKeyAction`（UP/DOWN/LEFT/RIGHT/SELECT）、`KeydroidxIcons`（字体图标）、`KeydroidxTheme`、`KeydroidxFontManager`、`KeydroidxDimens`、`KeydroidxLog`。
-- 纯逻辑、不依赖 SDK：`KeyphoneCursorView`、`KeyphoneShellOverlay`、`KeyphoneMouseController`、`KeyphoneSiteKeyStore`、`KeyphoneUrls`、`KeyphoneReadingBridge`。
+- 纯逻辑、不依赖 SDK：`KeyphoneCursorView`、`KeyphoneShellOverlay`、`KeyphoneMouseController`、`KeyphoneSiteKeyStore`、`KeyphoneUrls`、`KeyphoneReadingBridge`、`KeyphoneReaderPager`、`KeyphoneReaderThemes`。
 - **只有 2 个布局**：`keyphone_browser.xml`（仅主界面）、`keyphone_list.xml`（其余 7 个列表页共用，行由 `KeyphoneViews` 动态构建）。
 - 文案全部在 `res/values/keyphone_strings.xml`。
 
@@ -185,7 +188,7 @@ activity-alias (Orange 默认 / Blue 备用)
 
 | 模式 | 按键行为 |
 |---|---|
-| **阅读模式** | `↑` / `2` 上翻一屏；`↓` / `8` 下翻一屏（长按连翻）；`1` 减小字号；`3` 增大字号；`7` 轮换背景（米白 → 护眼黄 → 护眼绿 → 夜间灰 → 夜间纯黑）；左右方向键、确认键、其余数字直接消费（光标层隐藏，热区无意义）；`*`、`#`、软键、返回仍放行 |
+| **阅读模式** | 分页模型（正文在原生 `KeyphoneReaderView`，不是 WebView）：`↓` / `→` / `6` / 确认键下一页（长按连翻）；`↑` / `←` / `4` 上一页；`1` 减小字号；`3` 增大字号；`7` 轮换背景（米白 → 护眼黄 → 护眼绿 → 夜间灰 → 夜间纯黑）；`2` / `8` 取消（消费掉）；其余数字直接消费（光标层隐藏，热区无意义）；`*`、`#`、软键、返回仍放行（返回 = 退出阅读） |
 | **页内查找** | `↑` / `←` / 左软键 = 上一个；`↓` / `→` / 确认键 = 下一个；右软键 = 退出查找 |
 | **自由复制** | 方向键移动复制光标；确认键 = 开始选择 / 执行复制 |
 | **地址栏聚焦** | 数字 / 字母正常输入；确认键 = 提交；右软键 = 取消焦点；左软键 = 选项页 |
@@ -303,7 +306,7 @@ activity-alias (Orange 默认 / Blue 备用)
 按键机专用脚本：
 
 - `js/KeyphoneScroll.js`（10.7 KB）— 把贴边滚动对象从文档根改成**光标下元素**
-- `js/KeyphoneReadingMode.js`（66 KB）— 阅读模式：正文提纯、下一页识别、自动拼页、页数裁剪；**必须保持纯 ASCII**（中文用 `\uXXXX`），事件经 `window.__keyphoneReadingBridge__` 回传
+- `js/KeyphoneReadingMode.js`（约 30 KB）— 阅读模式**只做取章**：源页面只读提取 `extract()` + 取章外壳里的同步 XHR `fetchNext()`；**必须保持纯 ASCII**（中文用 `\uXXXX`）。显示 / 翻页 / 字号 / 主题全在原生 `KeyphoneReaderView`，脚本里**不允许**再出现 `setInterval` / rAF / 心跳（那是长读被杀进程的根因）
 
 ### 5.7 设置页（唯一残留的 Compose 界面）
 
@@ -335,7 +338,8 @@ activity-alias (Orange 默认 / Blue 备用)
 | 按键机主页 / 标签栏 / 菜单 / 按键分发 | `keyphone/KeyphoneBrowserActivity.kt` |
 | 列表行、宫格卡外观 | `keyphone/KeyphoneViews.kt` |
 | 光标 / 鼠标模式 / 热区跳转 | `KeyphoneMouseController.kt`、`KeyphoneCursorView.kt`、`js/KeyphoneScroll.js` |
-| 阅读模式 | `js/KeyphoneReadingMode.js` + `KeyphoneReadingBridge.kt` + `KeyphoneReadingPrefs.kt` + `docs/reading-mode-*.md` |
+| 阅读模式（显示 / 分页 / 字号 / 背景） | `KeyphoneReaderView.kt` + `KeyphoneReaderPager.kt` + `KeyphoneReaderThemes.kt` + `KeyphoneReadingPrefs.kt` |
+| 阅读模式（提取 / 取章） | `js/KeyphoneReadingMode.js` + `KeyphoneReadingBridge.kt` + `KeyphoneBrowserActivity` 的「阅读模式取章」region + `docs/reading-mode-*.md` |
 | 网页弹窗 / 跳转拦截 / 下载审批 | `KeyphoneJsDialogs.kt`、`KeyphoneUrlGuard.kt`、`KeyphoneGuardStore.kt`（另需同步看 `browser/tab/TabWebViewClient`、`TabWebChromeClient`、`TabAdapter` 三处调用点） |
 | 1~9 键光标落点 | `KeyphoneSiteKeyStore.kt` |
 | 标签页行为 / WebView 创建 | `browser/tab/`（**必须经 `WebViewFactory` + `pool/`**） |
@@ -349,6 +353,6 @@ activity-alias (Orange 默认 / Blue 备用)
 
 ## 8. 参考资料
 
-- `docs/`（8 份中文文档）：九宫格热区鼠标跳转、网页输入劫持、阅读模式（黑屏诊断 / 分章跳读 / 日志持久化 / 渲染隔离）、页面冻结多窗口方案。**动阅读模式 / 光标 / 滚动前先翻这里**。
+- `docs/`（10 份中文文档）：九宫格热区鼠标跳转、网页输入劫持、阅读模式（黑屏诊断 / 分章跳读 / 日志持久化 / 渲染隔离 / **excessive cpu 根因** / **原生 TextView 方案**）、页面冻结多窗口方案。**动阅读模式 / 光标 / 滚动前先翻这里**；阅读模式当前架构以 `reading-mode-native-textview-plan.md` 为准（显示层是原生 TextView，WebView 只当取章工具）。
 - `prototype/`：2 个 HTML 原型（按键机 UI、跳转拦截），不参与编译。
 - 工作区相对上游已删除 `LICENSE`、`CHANGELOG.md`、`CONTRIBUTING.md`、`.github/`、`launcher_icon*.png`，因此**无 CI**，`README.md` 徽章链接已失效。

@@ -142,8 +142,8 @@
     <string name="keyphone_scroll_top">已回到页首</string>
     <string name="keyphone_scroll_bottom">已滚动至页尾</string>
 
-    <!-- 阅读模式（按键 * 菜单 6）：正文提纯 + 下一页自动拼页 -->
-    <string name="keyphone_reading_enter">已进入阅读模式\n1/3 字号 · 7 背景 · 2/8 翻页</string>
+    <!-- 阅读模式（按键 * 菜单 6）：正文提纯 + 原生 TextView 分页 -->
+    <string name="keyphone_reading_enter">已进入阅读模式\n1/3 字号 · 7 背景 · ↑↓ 翻页</string>
     <string name="keyphone_reading_exit">已退出阅读模式</string>
     <!-- 读到多章后退出：按普通浏览导航到最后读到的那一章 -->
     <string name="keyphone_reading_exit_chapters">已退出阅读模式（共 %1$d 章）</string>
@@ -152,10 +152,16 @@
     <string name="keyphone_reading_no_content">未识别到正文内容</string>
     <string name="keyphone_reading_failed">进入阅读模式失败</string>
     <string name="keyphone_reading_page_failed">下一页加载失败</string>
+    <!-- 章节标题页：第一行「第 N 章」，第二行章节标题 -->
+    <string name="keyphone_reading_chapter_title">第 %1$d 章</string>
+    <!-- 分页模型下翻到队列末尾、下一章还在取时的提示 -->
+    <string name="keyphone_reading_wait_next">正在加载下一章…</string>
+    <!-- 页内查找 / 自由复制 / 页首页尾这些「操作 WebView」的功能在阅读态下没有对象 -->
+    <string name="keyphone_reading_need_exit">请先退出阅读模式</string>
 
     <!-- 阅读模式首次进入的按键引导（只在第一次进入时弹一次） -->
     <string name="keyphone_reading_guide_title">阅读模式按键</string>
-    <string name="keyphone_reading_guide_message">2 / 8 或上下方向键：整屏翻页\n1 / 3：减小 / 增大字号\n7：切换背景（米白·护眼黄·护眼绿·夜间灰·纯黑）\n读到章末自动拼接下一章\n* 菜单 6：退出（停在最后读到的那一章）\n随时可在 左软键菜单 → 帮助 里再看</string>
+    <string name="keyphone_reading_guide_message">↓ / → / 确认键：下一页\n↑ / ← / 4：上一页\n1 / 3：减小 / 增大字号\n7：切换背景（米白·护眼黄·护眼绿·夜间灰·纯黑）\n读到章末自动接下一章（先显示章节标题页）\n* 菜单 6：退出（停在最后读到的那一章）\n随时可在 左软键菜单 → 帮助 里再看</string>
     <string name="keyphone_reading_guide_ok">知道了</string>
     <string name="keyphone_reading_loading">页面加载中，请稍后再试</string>
 

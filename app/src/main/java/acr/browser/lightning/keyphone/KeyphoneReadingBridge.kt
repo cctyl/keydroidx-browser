@@ -6,7 +6,12 @@ import java.lang.ref.WeakReference
 /**
  * 阅读模式 JS 桥：`KeyphoneReadingMode.js` 运行期通过
  * `window.__keyphoneReadingBridge__.onEvent(type, payload)` 回传事件
- * （进入 / 拼接 / 结束 / 失败 / 正文内点击链接 / 退出）。
+ * （`chapter` / `fail` / `end`）。
+ *
+ * 注意：本机 WebView 对**已加载完成**的页面 `addJavascriptInterface` 往往不生效
+ * （`window.__keyphoneReadingBridge__` 为 undefined），所以取章的主通道是
+ * `evaluateJavascript` 的**返回值**（见 `KeyphoneBrowserActivity.requestNextChapter`）；
+ * 这个桥只作为「恰好可用时更快」的旁路，两条通道在宿主侧按 URL 去重。
  *
  * 实现要点：
  * - 必须是 **public 类 + public 方法**，`addJavascriptInterface` 才能通过反射找到

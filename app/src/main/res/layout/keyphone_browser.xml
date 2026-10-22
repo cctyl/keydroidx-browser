@@ -159,6 +159,15 @@
                 android:textSize="12sp"
                 android:textColor="#FFFFFF" />
         </LinearLayout>
+
+        <!-- 阅读模式显示层（原生 TextView 分页，非 WebView）。只有阅读态 VISIBLE：
+             正文显示完全脱离 WebView，渲染进程被系统杀掉也不会变成空屏
+             （背景见 docs/reading-mode-native-textview-plan.md）。 -->
+        <acr.browser.lightning.keyphone.KeyphoneReaderView
+            android:id="@+id/keyphone_reader"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
     </FrameLayout>
 
 </LinearLayout>
