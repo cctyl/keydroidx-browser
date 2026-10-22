@@ -1,13 +1,18 @@
 package acr.browser.lightning.keyphone
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Paint
+import android.os.BatteryManager
 import android.os.Build
 import android.os.SystemClock
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.TextUtils
+import android.text.format.DateFormat
 import android.util.AttributeSet
 import android.util.TypedValue
 import android.view.Gravity
@@ -16,6 +21,7 @@ import android.widget.TextView
 import acr.browser.lightning.R
 import io.github.cctyl.nokia.common.log.KeydroidxLog
 import io.github.cctyl.nokia.common.ui.KeydroidxFontManager
+import java.util.Date
 
 /**
  * 阅读模式显示层：**单 TextView + 分页游标**（无 ScrollView、无 RecyclerView）。
@@ -56,6 +62,32 @@ class KeyphoneReaderView @JvmOverloads constructor(
         typeface = KeydroidxFontManager.getTypeface(context)
     }
 
+    /**
+     * 页脚状态条（右下角：电量 + 当前时间）。
+     *
+     * 只占**一条内边距高度**的窄条，条高会从正文可用高度里扣掉（`updateSpec` 用
+     * `textView.paddingBottom` 算可用高），所以正文绝不会被它盖住 —— 宁可少排一行，
+     * 也不做「浮在字上」那种会吞字的叠加层。
+     */
+    private val statusView = TextView(context).apply {
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, STATUS_TEXT_SP)
+        includeFontPadding = false
+        isSingleLine = true
+        gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        isFocusable = false
+        isFocusableInTouchMode = false
+        typeface = KeydroidxFontManager.getTypeface(context)
+    }
+
+    /**
+     * 页脚条额外占用的高度（px）= 正文底部内边距 + 一点点。
+     *
+     * 页脚条本身用「底部内边距 + 这一点」当高度，正好落在正文区下方那条空隙里，
+     * 所以只从可用高里扣这几像素（14dp 全扣会白丢一行）。
+     */
+    private val statusReservePx: Int
+        get() = (STATUS_RESERVE_DP * resources.displayMetrics.density).toInt().coerceAtLeast(1)
+
     private val pager = KeyphoneReaderPager(StaticLayoutMeasurer())
 
     private var themeIndex = 0
@@ -67,9 +99,85 @@ class KeyphoneReaderView @JvmOverloads constructor(
     init {
         setBackgroundColor(KeyphoneReaderThemes.theme(themeIndex).bg)
         val padding = (KeyphoneReaderThemes.PADDING_DP * resources.displayMetrics.density).toInt()
-        textView.setPadding(padding, padding, padding, padding)
+        val reserve = statusReservePx
+        // 底部多留 reserve：页脚条画在「内边距 + reserve」这条带子里，正文不会压到它上面
+        textView.setPadding(padding, padding, padding, padding + reserve)
         addView(textView)
+        addView(
+            statusView,
+            LayoutParams(LayoutParams.MATCH_PARENT, padding + reserve, Gravity.BOTTOM).apply {
+                setMargins(padding, 0, padding, 0)
+            }
+        )
         applyAppearance()
+    }
+
+    /** 每整分钟由系统 `ACTION_TIME_TICK` 触发一次；不在页面可见时注销，静止阅读零开销 */
+    private val timeTickReceiver = object : BroadcastReceiver() {
+        override fun onReceive(receiverContext: Context?, intent: Intent?) {
+            updateStatus()
+        }
+    }
+
+    private var timeTickRegistered = false
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (!timeTickRegistered) {
+            val filter = IntentFilter(Intent.ACTION_TIME_TICK)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    context.registerReceiver(timeTickReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                } else {
+                    @Suppress("UnspecifiedRegisterReceiverFlag")
+                    context.registerReceiver(timeTickReceiver, filter)
+                }
+                timeTickRegistered = true
+            } catch (t: Throwable) {
+                KeydroidxLog.w(TAG, "页脚时间订阅失败（不影响阅读）", t)
+            }
+        }
+        updateStatus()
+    }
+
+    override fun onDetachedFromWindow() {
+        if (timeTickRegistered) {
+            try {
+                context.unregisterReceiver(timeTickReceiver)
+            } catch (t: Throwable) {
+                KeydroidxLog.w(TAG, "页脚时间退订失败", t)
+            }
+            timeTickRegistered = false
+        }
+        super.onDetachedFromWindow()
+    }
+
+    /**
+     * 刷新右下角的「电量 + 时间」。
+     *
+     * 电量直接查 [BatteryManager.BATTERY_PROPERTY_CAPACITY]（一次属性读取，无广播、无常驻订阅）；
+     * 时间用系统格式（跟随用户的 12/24 小时制设置）。
+     */
+    private fun updateStatus() {
+        val clock = DateFormat.getTimeFormat(context).format(Date())
+        val percent = batteryPercent()
+        statusView.text = if (percent >= 0) "$percent%  $clock" else clock
+        statusView.setTextColor(KeyphoneReaderThemes.theme(themeIndex).dim)
+    }
+
+    private fun batteryPercent(): Int {
+        val manager = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+        val capacity = manager?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+        if (capacity in 0..100) return capacity
+        // 个别机型属性不可用：退回 sticky 广播读一次（registerReceiver 传 null 不会注册接收器）
+        return try {
+            val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            if (level >= 0 && scale > 0) level * 100 / scale else -1
+        } catch (t: Throwable) {
+            -1
+        }
     }
 
     /** 正文默认字号（px），供宿主提示「字号 N」 */
@@ -207,6 +315,7 @@ class KeyphoneReaderView @JvmOverloads constructor(
         val theme = KeyphoneReaderThemes.theme(themeIndex)
         setBackgroundColor(theme.bg)
         textView.setTextColor(theme.text)
+        statusView.setTextColor(theme.dim)
     }
 
     /**
@@ -602,5 +711,17 @@ class KeyphoneReaderView @JvmOverloads constructor(
 
         /** 行距倍数的标定轮数（线性收敛，3 轮足够把误差压到 1px 内） */
         private const val CALIBRATE_ROUNDS = 3
+
+        /** 页脚「电量 + 时间」的字号（sp）；功能机上比正文小一半左右 */
+        private const val STATUS_TEXT_SP = 11f
+
+        /**
+         * 页脚条**额外**占用的高度（dp）。
+         *
+         * 页脚条整体高 = 正文底部内边距 + 这个值（10 + 4 = 14dp，正好放下 11sp 的数字），
+         * 而可用高只扣这 4dp —— 22px 字号下仍保住 9 行、20px 字号下保住 10 行。
+         * 若按整条 14dp 扣，会白丢一行正文。
+         */
+        private const val STATUS_RESERVE_DP = 4f
     }
 }
