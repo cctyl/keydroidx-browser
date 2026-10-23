@@ -16,6 +16,8 @@ import acr.browser.lightning.database.history.HistoryDatabase
 import acr.browser.lightning.database.history.HistoryRepository
 import acr.browser.lightning.download.DelegatingFileDownloader
 import acr.browser.lightning.download.FileDownloader
+import acr.browser.lightning.keyphone.reading.ReadingCookieProvider
+import acr.browser.lightning.keyphone.reading.WebViewCookieProvider
 import acr.browser.lightning.resources.DefaultNumberFormatter
 import acr.browser.lightning.resources.DefaultResourceProvider
 import acr.browser.lightning.resources.NumberFormatter
@@ -75,6 +77,9 @@ interface AppBindsModule {
 
     @Binds
     fun bindsUserAgentProvider(defaultUserAgentProvider: DefaultUserAgentProvider): UserAgentProvider
+
+    @Binds
+    fun bindsReadingCookieProvider(webViewCookieProvider: WebViewCookieProvider): ReadingCookieProvider
 
     @Binds
     fun bindsSettingsNavigator(defaultSettingsNavigator: DefaultSettingsNavigator): SettingsNavigator

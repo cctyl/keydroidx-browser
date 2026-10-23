@@ -572,6 +572,42 @@ CJK 字形走回退字体，`fallbackLineSpacing` 一开，行高按**回退字�
   `BatteryManager.BATTERY_PROPERTY_CAPACITY` 读一次属性（不可用时回退 sticky 广播）。
   没有 Handler 轮询、没有 Service。
 
+#### 12.7.4 误报「没有下一章了」（2026-10-22 四次反馈，已修）
+
+现象：阅读到章末，提示「已到最后一页」；退出阅读模式后同一页面明明还有「下一章」。
+
+> **真因（2026-10-22 20:01 真机文件日志实证）**：不是 JS 判错，是**取章通道没了**。
+> `[W][TabAdapter] 渲染进程死亡 tab=4 didCrash=false` → 重建 → `[E] 重载后仍无 WebView` →
+> 之后 5 分钟里 73 次 `[W][KeyphoneBrowser] 取章跳过：WebView 不可用`。
+> 阅读层照常翻页（正文在原生 View 上），但再也没有任何一章能被取回来 —— 用户看到的就是
+> 「没有下一章」。站点数据本身完全正常（183→184→185→186 链子齐全）。
+> 下面 §12.7.4 的 JS 侧加固是**另一条**真实隐患（一次误判同样会让会话终结），也需要，但不是本案主因。
+
+链路（JS 侧）：`fetchNext()` 解析不到「下一章」链接 → 回 `{ok:false,end:true}` →
+宿主把 `session.nextUrl` 置空并弹提示 → **整个会话再也取不到章**。
+链接解析会被这些情况打偏：站点页面变体（公告章）、反爬/半截 HTML、以及
+`chapterFrom()` 里那条「next 已在 visited 集合里就当结束」的兜底（一次重复取章就能触发）。
+
+修法（**一次误判不再永久失效**）：
+
+| 位置 | 处理 |
+|---|---|
+| `KeyphoneReadingMode.js` `fetchNext()` | `end` 时附带 `reason`（`no-next`）+ `current`，宿主能看清是「真没有」还是「没认出来」 |
+| `KeyphoneReadingMode.js` `chapterFrom()` | 只有 **self-loop**（next == 自己）才当结束；重复章交给宿主去重（`appendChapter` 本来就忽略重复） |
+| `KeyphoneBrowserActivity.handleChapterEnd()` | 第一次 `end` **不采信**：`rebootReaderFetch` 重建外壳让脚本按 SSR 页面重认一次链接，900ms 后自动重问；再回 `end` 才真提示「已到最后一页」。取到新章后 `endVerified` 复位 |
+| `handleChapterResult()` | 每次回调打一行 `取章回调 ok=… end=… reason=… url=… next=… 会话next=…`（不含 html），下次出问题一行就能定位 |
+
+#### 12.7.5 取章通道被渲染进程死亡带走（真因，已修）
+
+| 位置 | 处理 |
+|---|---|
+| `TabAdapter.verifyReloadedPageRenders()` | 重建后仍无 WebView 时**不再只记一条 ERROR**：按上限（3 次）重新 `loadUrl` 触发重建，仍失败才落「重建 WebView 次数用尽」 |
+| `KeyphoneBrowserActivity.requestNextChapter()` | `currentWebView() == null` 时**不再静默跳过**：第一次弹真实原因「页面进程被系统回收，暂时取不到下一章；退出重进阅读模式可继续」，后续只记日志（避免每翻一页弹一次）；通道恢复后 `channelLostReported` 复位 |
+
+教训：**排查先看应用自己的落盘日志** `/sdcard/Android/data/<包名>/files/log/YYYYMMDD.log`
+（`KeydroidxLog` 在 debug 构建下按 DEBUG 级写文件），比 logcat 环形缓冲可靠得多；
+logcat 默认只有 256 KiB，Chromium 的帧日志两分钟就能把现场冲掉。
+
 ### 12.8 回归清单（真机）
 
 1. 长读验证：连续翻几十页 / 读半小时，logcat 无 `excessive cpu` 杀进程，无空屏；

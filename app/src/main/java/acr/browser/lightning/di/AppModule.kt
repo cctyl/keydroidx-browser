@@ -23,6 +23,7 @@ import acr.browser.lightning.js.KeyphoneReadingMode
 import acr.browser.lightning.js.KeyphoneScroll
 import acr.browser.lightning.js.TextReflow
 import acr.browser.lightning.js.ThemeColor
+import acr.browser.lightning.keyphone.reading.ReadingSiteRules
 import acr.browser.lightning.log.AndroidLogger
 import acr.browser.lightning.log.Logger
 import acr.browser.lightning.log.NoOpLogger
@@ -173,6 +174,16 @@ class AppModule {
             .eventListener(eventListener)
             .build()
     }
+
+    /**
+     * 阅读模式站点取章规则表（按域名查选择器）。
+     *
+     * 用 `@Provides` 而不是 `@Inject` 构造：它的构造参数是一个域名归一化函数
+     * （单测要换成纯 JVM 实现，见 `ReadingSiteRulesTest`）。
+     */
+    @Singleton
+    @Provides
+    fun providesReadingSiteRules(): ReadingSiteRules = ReadingSiteRules()
 
     @Singleton
     @Provides

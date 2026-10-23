@@ -675,8 +675,10 @@
         } catch (e) {
             detected = null;
         }
-        if (detected && seen[normalizeUrl(detected)]) {
-            // the site's "next" loops back to an already visited chapter: treat as the end
+        if (detected && sameUrl(detected, url)) {
+            // only a self-loop is a real "end"; a next that happens to be already visited
+            // is left to the host, which ignores duplicate chapters (turning it into
+            // "end" here used to end the session on a single repeated chapter)
             detected = null;
         }
         return {
@@ -747,7 +749,15 @@
         }
         var target = resolveNext();
         if (!target) {
-            return JSON.stringify({ ok: false, end: true });
+            // Never claim "the novel is over" without saying why: the host logs `reason`
+            // and does one verification round before it believes us (a single blank
+            // extraction used to kill the whole reading session).
+            return JSON.stringify({
+                ok: false,
+                end: true,
+                reason: entryChecked ? 'no-next' : 'not-detected',
+                current: currentUrl || ''
+            });
         }
         if (asyncJob && sameUrl(asyncJob.url, target) && asyncJob.entry) {
             var cached = asyncJob.entry;

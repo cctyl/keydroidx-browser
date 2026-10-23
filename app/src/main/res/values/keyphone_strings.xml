@@ -152,6 +152,10 @@
     <string name="keyphone_reading_no_content">未识别到正文内容</string>
     <string name="keyphone_reading_failed">进入阅读模式失败</string>
     <string name="keyphone_reading_page_failed">下一页加载失败</string>
+    <!-- 取章通道不可用：A（原生 HTTP）失败且 B（专属取章 WebView）也建不起来 -->
+    <string name="keyphone_reading_channel_lost">取章暂时不可用，稍后再按一次试试</string>
+    <!-- 成环：站点把付费/受限章重定向回免费章，下一章又指回来（登录后可能恢复） -->
+    <string name="keyphone_reading_loop">这一章之后取不到新章节（可能需要登录或购买）</string>
     <!-- 章节标题页：第一行「第 N 章」，第二行章节标题 -->
     <string name="keyphone_reading_chapter_title">第 %1$d 章</string>
     <!-- 分页模型下翻到队列末尾、下一章还在取时的提示 -->

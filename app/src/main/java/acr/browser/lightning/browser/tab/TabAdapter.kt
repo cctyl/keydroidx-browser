@@ -79,6 +79,14 @@ internal const val PAGE_LOAD_START_PROGRESS = 10
 private const val RELOAD_VERIFY_DELAY_MS = 6000L
 
 /**
+ * 渲染进程死亡后重建 WebView 的最多尝试次数。
+ *
+ * 第一次重建会被 WebView 池的释放回调吞掉（真机日志「重载后仍无 WebView」），
+ * 再补两次基本都能拿回一个可用的 WebView；有上限，避免一直失败时无限重试。
+ */
+private const val MAX_RELOAD_REBUILD_ATTEMPTS = 3
+
+/**
  * Creates the adaptation between a [WebView] and the [TabModel] interface used by the browser.
  */
 @SuppressLint("ClickableViewAccessibility")
@@ -256,11 +264,24 @@ class TabAdapter @AssistedInject constructor(
      * 这里在重载后请求一次 `postVisualStateCallback`：回调不回来说明没出帧，落 ERROR；
      * 回调回来了再补一条成功日志，两种结果都能在文件里查到。
      */
-    private fun verifyReloadedPageRenders(url: String) {
+    private fun verifyReloadedPageRenders(url: String, attempt: Int = 1) {
         tabCoroutineScope.launch {
             kotlinx.coroutines.delay(RELOAD_VERIFY_DELAY_MS)
             val view = webViewIfInitialized() ?: run {
-                KeydroidxLog.e("TabAdapter", "重载后仍无 WebView tab=$id url=$url")
+                KeydroidxLog.e("TabAdapter", "重载后仍无 WebView tab=$id url=$url 第 $attempt 次")
+                // 首次重建可能被 WebView 池的释放回调吞掉（见 renderProcessGoneHandler 的注释）。
+                // 不再只记一条 ERROR 就收手：该标签会**永远**没有 WebView，表现在阅读模式上
+                // 就是「读到章末再也取不到下一章」（2026-10-22 20:01 真机现场）。
+                if (attempt < MAX_RELOAD_REBUILD_ATTEMPTS) {
+                    runCatching { loadUrl(url) }
+                        .onFailure { KeydroidxLog.e("TabAdapter", "重建 WebView 失败 tab=$id url=$url", it) }
+                    verifyReloadedPageRenders(url, attempt + 1)
+                } else {
+                    KeydroidxLog.e(
+                        "TabAdapter",
+                        "重建 WebView 次数用尽 tab=$id url=$url（该标签已无可用 WebView）"
+                    )
+                }
                 return@launch
             }
             var frameSeen = false

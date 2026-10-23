@@ -108,6 +108,10 @@ android {
     namespace = "acr.browser.lightning"
 
     testOptions {
+        // 纯 JVM 单测里 android.* 的桩方法默认抛 "not mocked"：阅读取章这类
+        // 「逻辑纯、只是顺手打日志」的代码会因此全线失败。返回默认值即可
+        // （需要真实 Android 行为的测试仍走 Robolectric）。
+        unitTests.isReturnDefaultValues = true
         unitTests.all {
             it.jvmArgs = listOf(
                 "--add-opens=java.base/java.lang=ALL-UNNAMED",

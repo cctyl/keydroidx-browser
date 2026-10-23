@@ -109,6 +109,13 @@ activity-alias (Orange 默认 / Blue 备用)
 | 桥接 | `KeyphoneJsDialogs.kt` | 接管 `alert/confirm/prompt/beforeunload`，禁止系统模态框钉死页面 |
 | 桥接 | `KeyphoneUrlGuard.kt` | 拦截判定引擎（`PROCEED/BLOCK/ASK`）：外部协议、站内跳转、下载审批 |
 | 桥接 | `KeyphoneReadingBridge.kt` | 阅读模式 JS 桥（`chapter`/`fail`/`end`），持 `WeakReference` 防池化泄漏；**本机常不生效，取章主通道是 `evaluateJavascript` 返回值** |
+| 取章 A | `reading/ReadingChapterFetcher.kt` | **方案 A：原生 HTTP 取章**（OkHttp + jsoup + Cookie），不碰任何 WebView；提空 / HTTP 错误分开报，供上层决定降级 |
+| 取章 A | `reading/ReadingSiteRule.kt` / `ReadingSiteRules.kt` | 站点规则表（按 eTLD+1 查）：正文 / 下一章 / 上一章 / 标题选择器 + `transport`；内置 uukan.org（`#content` / `#linkNext` / `#linkPrev` / `h1`） |
+| 取章 A | `reading/ReadingDomainVerdict.kt` | 域名 → SSR/JS 判定缓存（内存级）：A 提空后同域直接走 B |
+| 取章 B | `reading/KeyphoneFetchWebView.kt` | **方案 B：专属取章 WebView**（不进 `LimitedObjectPool`、无 `awaitRelease`、懒建懒重建）；`FetchWebViewState` 是纯状态机可单测 |
+| 取章 | `reading/ChapterFetchResult.kt` / `ReadingChapterRouter.kt` | 两条通道的统一结果（Ok/Empty/Error/End/NotReady）与 A/B 选择 + 判定回填（纯逻辑，含单测） |
+| 取章 | `reading/ReadingFetchShellBuilder.kt` | 取章外壳 HTML（boot 载荷 + 阅读脚本 + viewport），方案 B 自建自用 |
+| 取章 | `reading/ReadingCookieProvider.kt` | Cookie 来源抽象；生产实现走 `CookieManager`（**主线程**取），单测注入假的 |
 | 存储 | `KeyphoneGuardStore.kt` | 拦截规则（SP），域名归一化为 eTLD+1 |
 | 存储 | `KeyphoneSiteKeyStore.kt` | 1~9 键自定义光标落点，存**比例坐标 0~1**（适配分辨率与旋屏） |
 | 存储 | `KeyphoneReadingPrefs.kt` | 阅读模式外观（背景 5 档 / 字号 14~40px），落盘 `keyphone_reading`；按键直写，不经 JS |
@@ -339,7 +346,8 @@ activity-alias (Orange 默认 / Blue 备用)
 | 列表行、宫格卡外观 | `keyphone/KeyphoneViews.kt` |
 | 光标 / 鼠标模式 / 热区跳转 | `KeyphoneMouseController.kt`、`KeyphoneCursorView.kt`、`js/KeyphoneScroll.js` |
 | 阅读模式（显示 / 分页 / 字号 / 背景） | `KeyphoneReaderView.kt` + `KeyphoneReaderPager.kt` + `KeyphoneReaderThemes.kt` + `KeyphoneReadingPrefs.kt` |
-| 阅读模式（提取 / 取章） | `js/KeyphoneReadingMode.js` + `KeyphoneReadingBridge.kt` + `KeyphoneBrowserActivity` 的「阅读模式取章」region + `docs/reading-mode-*.md` |
+| 阅读模式（提取） | `js/KeyphoneReadingMode.js`（`extract()`）+ `KeyphoneReadingBridge.kt` + `KeyphoneBrowserActivity.enterReadingMode` |
+| 阅读模式（取章） | **A：`keyphone/reading/ReadingChapterFetcher`（OkHttp+jsoup+Cookie，不碰 WebView）；B：`reading/KeyphoneFetchWebView`（专属 WebView 兜底）；规则表 `reading/ReadingSiteRules`**；链路 `KeyphoneBrowserActivity.requestNextChapter → chooseAndFetch → routeFetchResult`；见 `docs/reading-mode-fetch-decouple-*.md` |
 | 网页弹窗 / 跳转拦截 / 下载审批 | `KeyphoneJsDialogs.kt`、`KeyphoneUrlGuard.kt`、`KeyphoneGuardStore.kt`（另需同步看 `browser/tab/TabWebViewClient`、`TabWebChromeClient`、`TabAdapter` 三处调用点） |
 | 1~9 键光标落点 | `KeyphoneSiteKeyStore.kt` |
 | 标签页行为 / WebView 创建 | `browser/tab/`（**必须经 `WebViewFactory` + `pool/`**） |

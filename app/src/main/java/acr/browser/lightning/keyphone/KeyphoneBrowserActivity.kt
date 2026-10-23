@@ -74,8 +74,16 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
-import org.json.JSONArray
+import kotlin.coroutines.resume
+import acr.browser.lightning.keyphone.reading.ChapterFetchResult
+import acr.browser.lightning.keyphone.reading.KeyphoneFetchWebView
+import acr.browser.lightning.keyphone.reading.ReadingChapterFetcher
+import acr.browser.lightning.keyphone.reading.ReadingChapterRouter
+import acr.browser.lightning.keyphone.reading.ReadingDomainVerdict
+import acr.browser.lightning.keyphone.reading.ReadingFetchShellBuilder
+import acr.browser.lightning.keyphone.reading.ReadingSiteRules
 import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -128,6 +136,22 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     @Inject
     internal lateinit var rendererBusyHolder: acr.browser.lightning.di.RendererBusyHolder
+
+    /** 方案 A：原生 HTTP 取章（OkHttp + jsoup + Cookie），完全不碰 WebView */
+    @Inject
+    internal lateinit var readingChapterFetcher: ReadingChapterFetcher
+
+    /** 站点取章规则表（按域名查选择器） */
+    @Inject
+    internal lateinit var readingSiteRules: ReadingSiteRules
+
+    /** 域名 SSR/JS 判定缓存（A 提空后不再白试） */
+    @Inject
+    internal lateinit var readingDomainVerdict: ReadingDomainVerdict
+
+    /** 取章外壳拼装（方案 B 用；纯字符串） */
+    @Inject
+    internal lateinit var readingFetchShellBuilder: ReadingFetchShellBuilder
 
     /** 顶部标签栏 */
     private var tabBarScroll: HorizontalScrollView? = null
@@ -1058,6 +1082,37 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
         /** 取章请求编号：超时兜底与迟到回调据此判断自己是否已经过期 */
         var fetchToken: Long = 0L
+
+        /**
+         * 已经做过一次「没有下一章」的复核。
+         *
+         * JS 只有解析不到「下一章」链接时才回 `end`，而链接解析受站点变体 / 反爬页影响，
+         * 一次误判就会让整个会话以为「全书读完」。所以第一次 `end` 不采信：重建外壳
+         * （让脚本按 SSR 页面重新认一次），复核仍然说结束时才真的收摊。
+         */
+        var endVerified: Boolean = false
+
+        /**
+         * 已经提示过「取章通道丢了」。
+         *
+         * 渲染进程被系统回收后 WebView 会被销毁，`currentWebView()` 从此为 null，
+         * 取章请求只能跳过。这时**必须告诉用户真实原因**（否则他会以为全书读完），
+         * 但只在第一次提示，别每翻一页弹一次。
+         */
+        var channelLostReported: Boolean = false
+
+        /**
+         * 上一次实际用的取章通道（仅用于日志 / 结束时决定要不要复核）。
+         *
+         * 每次取章仍按「规则表 + 域名判定缓存」重新决定，不做会话级固化：
+         * 站点改版（SSR → CSR）后缓存一失效就能自动切回来。
+         */
+        var transportChoice: TransportChoice = TransportChoice.UNDECIDED
+
+        /** 已经为哪个 URL 提示过「成环」——避免每次翻到章末都弹一遍同样的提示 */
+        var loopReportedFor: String? = null
+
+        enum class TransportChoice { UNDECIDED, A_NATIVE, B_WEBVIEW }
     }
 
     /**
@@ -1118,6 +1173,14 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
     /** 阅读显示层（原生 TextView 分页，见 [KeyphoneReaderView]） */
     private var readerView: KeyphoneReaderView? = null
+
+    /**
+     * 方案 B 的**专属**取章 WebView（懒创建，退出阅读模式即销毁）。
+     *
+     * 它不进 `LimitedObjectPool`，与浏览标签的 WebView 完全无关 —— 浏览标签的渲染进程
+     * 死活不再影响阅读模式取章。只有「无规则 / CSR / A 提空」的站点才会创建它。
+     */
+    private var fetchWebView: KeyphoneFetchWebView? = null
 
     /**
      * 用户在队列末尾按了「下一页」，下一章取回来之后要自动翻过去。
@@ -1322,13 +1385,14 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
      *
      * 显示层与取章层在这里分家：
      * - 正文直接进 [KeyphoneReaderView]（第一章 = 刚提取到的这一章），**不经过 WebView**；
-     * - WebView 被隐藏起来，只载入取章外壳，等着被问「下一章是什么」。
+     * - 取章通道**不预先启动**：A 通道用原生 HTTP，B 通道在第一次要取章时才懒建专属 WebView。
      */
     private fun openReaderPage(tabId: Int, entry: ReadingEntry) {
-        val webView = currentWebView()
+        // 注意：这里**不再**要求 currentWebView() 非空。取章已经与浏览标签解耦，
+        // 即便那个 WebView 已被渲染进程死亡带走，阅读模式照样能读、能取下一章。
         val reader = readerView
-        if (webView == null || reader == null) {
-            KeydroidxLog.w(TAG, "打开阅读页跳过：WebView/ReaderView 不可用 tabId=$tabId")
+        if (reader == null) {
+            KeydroidxLog.w(TAG, "打开阅读页跳过：ReaderView 不可用 tabId=$tabId")
             showReadingToast(getString(R.string.keyphone_reading_failed))
             return
         }
@@ -1359,58 +1423,12 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             "打开阅读页: 第 ${entry.url} 章 ${entry.describe()} " +
                 "plainLen=${reader.currentChapter?.plain?.length ?: 0} ${describeReadingTab()}"
         )
-        // WebView 转「取章工具」：隐藏 + 载入同源外壳
-        startReaderFetch(webView, entry.url, session)
+        // 取章通道**不在这里启动**：A 通道（原生 HTTP）根本不需要外壳，
+        // B 通道（专属取章 WebView）在第一次真正要取章时懒创建（见 ensureFetchWebView）。
+        // 浏览标签的 WebView 从此与阅读模式彻底无关。
         // 首次进入弹按键引导；弹了就不必再叠一个进模式提示
         if (!showReadingGuideIfNeeded()) {
             showReadingToast(getString(R.string.keyphone_reading_enter))
-        }
-    }
-
-    /**
-     * 把 WebView 切到「取章外壳」：同源（baseUrl = 章节 URL）+ 只有取章脚本，无站点脚本。
-     *
-     * 这也是**渲染进程被杀后的自动重建入口**（见 [rebootReaderFetch]）：外壳丢了不要紧，
-     * 正文在原生视图里，重建只是让「下一章」重新变得可取。
-     */
-    private fun startReaderFetch(webView: WebView, baseUrl: String, session: ReadingSession) {
-        session.currentUrl = baseUrl
-        shellNotReadyRetry = 0
-        val shell = buildReaderFetchShell(baseUrl, session)
-        KeydroidxLog.d(
-            TAG,
-            "载入取章外壳: baseUrl=$baseUrl shellChars=${shell.length}" +
-                " next=${session.nextUrl ?: "-"} seen=${session.trail.size}"
-        )
-        try {
-            webView.loadDataWithBaseURL(baseUrl, shell, "text/html", "utf-8", null)
-        } catch (t: Throwable) {
-            KeydroidxLog.e(TAG, "载入取章外壳失败 baseUrl=$baseUrl", t)
-        }
-    }
-
-    /**
-     * 取章外壳：只有一个 boot 载荷 + 阅读脚本，**不含正文、不含站点脚本**。
-     *
-     * 正文不再进 DOM（显示层是 TextView），外壳只回答「下一章是什么」，
-     * 所以这里连标题 / 样式都不需要。JSONObject 会把 `/` 转义成 `\/`，载荷里
-     * 即使出现 `</script>` 也不会截断脚本块。
-     */
-    private fun buildReaderFetchShell(baseUrl: String, session: ReadingSession): String {
-        val boot = JSONObject().apply {
-            put("url", baseUrl)
-            put("next", session.nextUrl.orEmpty())
-            put("seen", JSONArray(session.trail.map { it.url }))
-        }.toString()
-        return buildString {
-            append("<!DOCTYPE html><html><head><meta charset=\"utf-8\">")
-            append("<meta name=\"viewport\" content=\"")
-            append(READER_VIEWPORT)
-            append("\">")
-            append("</head><body><script>")
-            append("window.__keyphone_rm_boot__=").append(boot).append(";\n")
-            append(keyphoneReadingMode.provideJs())
-            append("</script></body></html>")
         }
     }
 
@@ -1434,11 +1452,6 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             return false
         }
         if (session.fetchInFlight) return false
-        val webView = currentWebView()
-        if (webView == null) {
-            KeydroidxLog.w(TAG, "取章跳过：WebView 不可用（等标签重建后再取）url=$next")
-            return false
-        }
         session.fetchInFlight = true
         val token = ++session.fetchToken
         if (showHint) showReadingToast(getString(R.string.keyphone_reading_wait_next))
@@ -1446,21 +1459,225 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             { onReaderFetchTimeout(session, token, next) },
             READER_FETCH_TIMEOUT_MS
         )
-        KeydroidxLog.d(TAG, "取章请求 #$token url=$next seen=${session.trail.size} ${describeReadingTab()}")
-        return try {
-            webView.evaluateJavascript(READER_JS_FETCH_NEXT) { raw ->
-                if (session.fetchToken != token) {
-                    KeydroidxLog.d(TAG, "取章回调已过期 #$token（当前 #${session.fetchToken}），丢弃")
-                    return@evaluateJavascript
-                }
-                session.fetchInFlight = false
-                handleChapterResult(tabId, session, decodeJsString(raw), webView)
+        KeydroidxLog.d(
+            TAG,
+            "取章请求 #$token url=$next seen=${session.trail.size} ${describeReadingTab()}"
+        )
+        lifecycleScope.launch {
+            val result = chooseAndFetch(session, next)
+            if (session.fetchToken != token) {
+                KeydroidxLog.d(TAG, "取章结果已过期 #$token（当前 #${session.fetchToken}），丢弃")
+                return@launch
             }
-            true
-        } catch (t: Throwable) {
+            if (readingModeTabs[tabId] !== session) {
+                KeydroidxLog.d(TAG, "取章结果已过期（会话已结束）tabId=$tabId")
+                return@launch
+            }
             session.fetchInFlight = false
-            KeydroidxLog.e(TAG, "取下一章失败 url=$next", t)
-            false
+            routeFetchResult(tabId, session, result, next)
+        }
+        return true
+    }
+
+    /**
+     * 选通道并取章（设计文档 §6.1）。
+     *
+     * - 无规则 / 声明 `JS_REQUIRED` / 该域缓存判定为 JS → 方案 B；
+     * - 其余先走方案 A（原生 HTTP，不碰 WebView）；
+     * - A **提空**才降级 B，并把该域记为 JS（以后不再白试 A）；
+     * - A 的网络 / HTTP 错误**不**降级、**不**写缓存 —— 偶发失败不该改变站点画像。
+     */
+    private suspend fun chooseAndFetch(
+        session: ReadingSession,
+        next: String
+    ): ChapterFetchResult {
+        val rule = readingSiteRules.forUrl(next)
+        val host = rule?.host
+        val verdict = host?.let { readingDomainVerdict.get(it) }
+        val channel = ReadingChapterRouter.channel(rule, verdict)
+        session.transportChoice = when (channel) {
+            ReadingChapterRouter.Channel.A_NATIVE -> ReadingSession.TransportChoice.A_NATIVE
+            ReadingChapterRouter.Channel.B_WEBVIEW -> ReadingSession.TransportChoice.B_WEBVIEW
+        }
+        if (channel == ReadingChapterRouter.Channel.B_WEBVIEW) {
+            KeydroidxLog.d(TAG, "取章通道=B（rule=${host ?: "-"} verdict=$verdict）url=$next")
+            return fetchViaB(session, next)
+        }
+        KeydroidxLog.d(TAG, "取章通道=A（rule=$host）url=$next")
+        val result = readingChapterFetcher.fetch(next, session.recorded)
+        ReadingChapterRouter.verdictAfterA(result)?.let { v ->
+            if (host != null) readingDomainVerdict.set(host, v)
+        }
+        if (result is ChapterFetchResult.Empty) {
+            KeydroidxLog.w(TAG, "A 提空，降级 B（域名 $host 记为 JS）url=$next")
+            session.transportChoice = ReadingSession.TransportChoice.B_WEBVIEW
+            return fetchViaB(session, next)
+        }
+        return result
+    }
+
+    /**
+     * 方案 B：让**专属**取章 WebView 跑一次同步 XHR。
+     *
+     * 外壳没就绪（首次创建 / 渲染进程刚死需要重建）时返回 [ChapterFetchResult.NotReady]，
+     * 由 [scheduleShellNotReadyRetry] 延时重试 —— 不是失败，更不是「没有下一章」。
+     */
+    private suspend fun fetchViaB(
+        session: ReadingSession,
+        next: String
+    ): ChapterFetchResult {
+        val view = ensureFetchWebView()
+            ?: return ChapterFetchResult.Error("fetch-webview-unavailable")
+        val baseUrl = session.currentUrl
+        val seen = session.trail.map { it.url }
+        return withTimeoutOrNull(READER_FETCH_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont ->
+                val dispatched = view.fetchNext(baseUrl, next, seen) { raw ->
+                    if (cont.isActive) cont.resume(chapterResultFromJson(raw))
+                }
+                if (!dispatched && cont.isActive) {
+                    cont.resume(ChapterFetchResult.NotReady)
+                }
+            }
+        } ?: ChapterFetchResult.Error("timeout")
+    }
+
+    /** 懒创建专属取章 WebView（不进池，见 [KeyphoneFetchWebView]） */
+    private fun ensureFetchWebView(): KeyphoneFetchWebView? {
+        fetchWebView?.let { return it }
+        return try {
+            KeyphoneFetchWebView(this, readingFetchShellBuilder).also {
+                fetchWebView = it
+                KeydroidxLog.d(TAG, "创建专属取章 WebView（方案 B）")
+            }
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "创建专属取章 WebView 失败", t)
+            null
+        }
+    }
+
+    /** 方案 B 的 JS 回传 JSON → 统一结果 */
+    private fun chapterResultFromJson(raw: String?): ChapterFetchResult {
+        if (raw.isNullOrBlank() || raw == "null") {
+            return ChapterFetchResult.Error("empty-js-result")
+        }
+        return try {
+            val obj = JSONObject(raw)
+            KeydroidxLog.d(
+                TAG,
+                "取章回调(B) ok=${obj.optBoolean("ok")} end=${obj.optBoolean("end")}" +
+                    " pending=${obj.optBoolean("pending")} notready=${obj.optBoolean("notready")}" +
+                    " missing=${obj.optBoolean("missing")} reason=${obj.optString("reason")}" +
+                    " url=${obj.optString("url").takeLast(24)}" +
+                    " next=${obj.optString("next").takeLast(24)}"
+            )
+            when {
+                obj.optBoolean("ok") -> {
+                    val url = obj.optString("url")
+                    val html = obj.optString("html")
+                    if (url.isBlank() || html.isBlank()) {
+                        ChapterFetchResult.Empty
+                    } else {
+                        ChapterFetchResult.Ok(
+                            url = url,
+                            title = obj.optString("title"),
+                            html = html,
+                            next = obj.optString("next")
+                        )
+                    }
+                }
+                obj.optBoolean("end") -> ChapterFetchResult.End
+                obj.optBoolean("notready") || obj.optBoolean("missing") -> ChapterFetchResult.NotReady
+                // 异步兜底在跑：下次按键再问一次即可（结果已缓存）
+                obj.optBoolean("pending") -> ChapterFetchResult.NotReady
+                else -> ChapterFetchResult.Error(obj.optString("error").ifBlank { "fetch-failed" })
+            }
+        } catch (t: Throwable) {
+            KeydroidxLog.e(TAG, "取章结果解析失败: ${raw.take(160)}", t)
+            ChapterFetchResult.Error("parse")
+        }
+    }
+
+    /**
+     * 统一分发结果。
+     *
+     * 关键不变量：**只有 [ChapterFetchResult.End] 才允许把 `nextUrl` 置空**。
+     * 失败（提空 / 网络错 / 通道未就绪）一律保留 `nextUrl`，用户再按一次就重试 ——
+     * 绝不会再出现「明明还有下一章却说没有」。
+     */
+    private fun routeFetchResult(
+        tabId: Int,
+        session: ReadingSession,
+        result: ChapterFetchResult,
+        next: String
+    ) {
+        when (result) {
+            is ChapterFetchResult.Ok -> {
+                session.channelLostReported = false
+                val appended = appendChapter(
+                    tabId,
+                    session,
+                    result.url,
+                    result.title,
+                    result.html,
+                    result.next
+                )
+                // 成环检测（两半）：
+                // ① 取回来的这一章其实已经读过（appendChapter 拒绝）= 站点把请求重定向回了旧章；
+                // ② next 落在已读列表里 = 下一章又指回旧章。
+                // 典型场景是起点/掌阅这类「VIP 章被重定向到最后一章免费章，免费章的下一章又指回来」。
+                // 这时绝不能继续取，也**不能假装「全书读完」**——保留 nextUrl，用户登录/购买后
+                // 再按一次就能继续。
+                val looped = !appended ||
+                    (result.next.isNotBlank() && session.trail.any { it.url == result.next })
+                if (looped) {
+                    autoTurnAfterFetch = false
+                    KeydroidxLog.w(
+                        TAG,
+                        "取章成环：next 已在已读列表（站点重定向/回环），暂停取章 url=${result.next}" +
+                            " 已读=${session.trail.size}章"
+                    )
+                    if (session.loopReportedFor != result.next) {
+                        session.loopReportedFor = result.next
+                        showReadingToast(getString(R.string.keyphone_reading_loop))
+                    }
+                    return
+                }
+                if (result.next.isBlank()) {
+                    // 这一页没有「下一章」链接 = 到末尾。A 是 jsoup 确定性解析，直接信；
+                    // B 走一次复核（JS 解析容易受半截 HTML / 页面变体影响）
+                    handleChapterEnd(
+                        tabId,
+                        session,
+                        reason = "no-next",
+                        verify = session.transportChoice == ReadingSession.TransportChoice.B_WEBVIEW
+                    )
+                }
+            }
+            is ChapterFetchResult.Empty -> {
+                autoTurnAfterFetch = false
+                KeydroidxLog.w(TAG, "取章失败：提空（两条通道都提不出正文）url=$next")
+                showReadingToast(getString(R.string.keyphone_reading_page_failed))
+            }
+            is ChapterFetchResult.Error -> {
+                autoTurnAfterFetch = false
+                KeydroidxLog.w(TAG, "取章失败: ${result.message} url=$next（再按一次可重试）")
+                // 通道建不起来（B 的 WebView 都没创建成功）跟「这一章取失败」是两回事，
+                // 提示要分开，否则用户会以为是这本书读完了
+                val message = if (result.message.startsWith("fetch-webview-unavailable")) {
+                    getString(R.string.keyphone_reading_channel_lost)
+                } else {
+                    getString(R.string.keyphone_reading_page_failed)
+                }
+                showReadingToast(message)
+            }
+            is ChapterFetchResult.NotReady -> scheduleShellNotReadyRetry(session)
+            is ChapterFetchResult.End -> handleChapterEnd(
+                tabId,
+                session,
+                reason = "end",
+                verify = session.transportChoice == ReadingSession.TransportChoice.B_WEBVIEW
+            )
         }
     }
 
@@ -1496,64 +1713,47 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
     }
 
     /**
-     * 解析取章结果（evaluateJavascript 返回值与 JS 桥事件**共用**同一个入口，按 URL 去重）。
+     * 判定「没有下一章了」。
      *
-     * 返回值约定见 `KeyphoneReadingMode.js` 的 `fetchNext()`：
-     * `{ok:true,...}` / `{ok:false,end:true}` / `{ok:false,pending:true}` / `{ok:false,error}`。
+     * 两条通道的可信度不同，复核策略也不同：
+     * - **A（原生 HTTP + jsoup）是确定性解析**：静态 HTML 里没有「下一章」链接就是真没有，
+     *   直接信，不浪费一次重取；
+     * - **B（JS 在 DOM 里找链接）容易被半截 HTML / 页面变体骗**：第一次不轻信，把专属
+     *   WebView 销毁重建（外壳会按 SSR 页面重新载入、脚本重新认一次链接），再问一次才收摊。
+     *
+     * 只有这里（以及 routeFetchResult 的 End 分支）才允许把 `nextUrl` 置空。
      */
-    private fun handleChapterResult(
+    private fun handleChapterEnd(
         tabId: Int,
         session: ReadingSession,
-        json: String,
-        webView: WebView
+        reason: String,
+        verify: Boolean
     ) {
-        if (readingModeTabs[tabId] !== session) {
-            KeydroidxLog.d(TAG, "取章结果已过期（会话已结束）tabId=$tabId")
+        KeydroidxLog.i(
+            TAG,
+            "取章判结束: reason=$reason 通道=${session.transportChoice}" +
+                " 已复核=${session.endVerified} 已读=${session.chapterCount}章" +
+                " next=${session.nextUrl?.takeLast(24)} tabId=$tabId"
+        )
+        if (verify && !session.endVerified) {
+            session.endVerified = true
+            // 销毁外壳：下一次取章会按 session.currentUrl 重新建一个干净的外壳再问一次
+            fetchWebView?.destroy()
+            fetchWebView = null
+            readerFetchHandler.postDelayed(
+                {
+                    if (readingModeTabs[tabId] === session) {
+                        requestNextChapter(showHint = false)
+                    }
+                },
+                END_VERIFY_DELAY_MS
+            )
             return
         }
-        if (json.isBlank() || json == "null") {
-            rebootReaderFetch(session, webView)
-            return
-        }
-        val obj = try {
-            JSONObject(json)
-        } catch (t: Throwable) {
-            KeydroidxLog.e(TAG, "取章结果解析失败: ${json.take(160)}", t)
-            return
-        }
-        if (obj.optBoolean("missing")) {
-            rebootReaderFetch(session, webView)
-            return
-        }
-        if (obj.optBoolean("notready")) {
-            scheduleShellNotReadyRetry(session)
-            return
-        }
-        if (obj.optBoolean("ok")) {
-            val url = obj.optString("url")
-            val html = obj.optString("html")
-            if (url.isBlank() || html.isBlank()) {
-                KeydroidxLog.w(TAG, "取章结果异常（空 url / html）: ${json.take(160)}")
-                return
-            }
-            appendChapter(tabId, session, url, obj.optString("title"), html, obj.optString("next"))
-            return
-        }
-        if (obj.optBoolean("end")) {
-            session.nextUrl = null
-            autoTurnAfterFetch = false
-            KeydroidxLog.i(TAG, "取章结束：没有下一章了 tabId=$tabId 已读 ${session.chapterCount} 章")
-            showReadingToast(getString(R.string.keyphone_reading_end))
-            return
-        }
-        if (obj.optBoolean("pending")) {
-            // JS 侧已经转异步兜底：不轮询、不重试，下一次翻页按键再问一次即可（结果已缓存）
-            KeydroidxLog.w(TAG, "取章异步兜底中: ${obj.optString("error")} url=${session.nextUrl}")
-            return
-        }
+        session.nextUrl = null
         autoTurnAfterFetch = false
-        KeydroidxLog.w(TAG, "取章失败: ${obj.optString("error")} url=${session.nextUrl}")
-        showReadingToast(getString(R.string.keyphone_reading_page_failed))
+        KeydroidxLog.i(TAG, "取章结束：没有下一章了 tabId=$tabId 已读 ${session.chapterCount} 章")
+        showReadingToast(getString(R.string.keyphone_reading_end))
     }
 
     /** 把取到的一章投喂给显示层，并记账（轨迹 / 历史 / 落盘） */
@@ -1564,21 +1764,23 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         title: String,
         html: String,
         next: String
-    ) {
-        val reader = readerView ?: return
+    ): Boolean {
+        val reader = readerView ?: return false
         val plain = htmlToPlainStatic(html)
         if (plain.isEmpty()) {
             KeydroidxLog.w(TAG, "取到的一章没有正文，忽略 url=$url")
-            return
+            return false
         }
-        if (readingModeTabs[tabId] !== session) return
+        if (readingModeTabs[tabId] !== session) return false
         val ordinal = session.trail.size + 1
         val chapter = KeyphoneReaderPager.ChapterText(url, title, ordinal, plain)
         if (!reader.appendChapter(chapter)) {
             KeydroidxLog.d(TAG, "章节已在队列中，忽略 url=$url")
-            return
+            return false
         }
         session.nextUrl = next.takeIf { it.isNotBlank() }
+        // 又取到新章 = 之前那次「结束」的复核结论作废，下次结束还要再复核一遍
+        session.endVerified = false
         session.trail = session.trail + ReadingPage(url, title.ifBlank { url })
         shellNotReadyRetry = 0
         session.chapterCount = maxOf(session.chapterCount, ordinal)
@@ -1596,20 +1798,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
                 KeydroidxLog.w(TAG, "取章后自动翻页失败（队列异常）ordinal=$ordinal")
             }
         }
-    }
-
-    /**
-     * 取章外壳不见了（渲染进程被杀后 WebView 被替换成真实页面 / 被重载）：重建外壳。
-     *
-     * 这是新架构下**唯一保留的恢复路径**，而且是事件驱动的：只在「该取章了却发现脚本不在」
-     * 时做一次，没有任何闹钟。显示层完全不受影响，用户最多晚一秒看到下一章。
-     */
-    private fun rebootReaderFetch(session: ReadingSession, webView: WebView) {
-        KeydroidxLog.w(
-            TAG,
-            "取章外壳已丢失（渲染进程被杀 / 页面被替换），重建 baseUrl=${session.currentUrl}"
-        )
-        startReaderFetch(webView, session.currentUrl, session)
+        return true
     }
 
     /** 章节入库（同一 URL 只写一次，历史记录顺序即阅读顺序） */
@@ -1823,6 +2012,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         readerView?.clear()
         readerView?.visibility = View.GONE
         autoTurnAfterFetch = false
+        // 方案 B 的专属取章 WebView 跟着阅读模式一起收摊，释放那个渲染进程
+        fetchWebView?.destroy()
+        fetchWebView = null
         if (session != null) {
             // 用户主动退出：落盘会话也必须清，否则下次重建 Activity 会被当成「未读完」自动重进
             clearPersistedReadingSession()
@@ -1875,6 +2067,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             readerView?.clear()
             readerView?.visibility = View.GONE
             autoTurnAfterFetch = false
+            // 阅读会话结束，专属取章 WebView 也要收摊（不留下一个白养的渲染进程）
+            fetchWebView?.destroy()
+            fetchWebView = null
             // 页面已被真实导航替换，落盘会话一并作废（否则重建后会自动重进）
             clearPersistedReadingSession()
             updateBackPressedEnabled()
@@ -1941,7 +2136,7 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
      *
      * 桥在本机不可靠（见 [KeyphoneReadingBridge]），取章的主通道是 evaluateJavascript 的
      * 返回值；这里接住 `chapter` 只是「如果桥恰好可用就更快一点」，两条通道走同一个
-     * [handleChapterResult]，按 URL 去重，重复投递无害。
+     * [routeFetchResult]，按 URL 去重，重复投递无害。
      */
     internal fun onReadingBridgeEvent(type: String, payload: String) {
         KeydroidxLog.d(TAG, "阅读桥事件: $type ${payload.take(120)}")
@@ -1949,9 +2144,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
             "chapter" -> {
                 val tabId = selectedTabId() ?: return
                 val session = readingModeTabs[tabId] ?: return
-                val webView = currentWebView() ?: return
                 session.fetchInFlight = false
-                handleChapterResult(tabId, session, payload, webView)
+                routeFetchResult(tabId, session, chapterResultFromJson(payload), session.nextUrl.orEmpty())
             }
             "fail" -> KeydroidxLog.w(TAG, "取章失败: $payload")
             "end" -> KeydroidxLog.d(TAG, "取章结束：已到最后一章")
@@ -5371,23 +5565,8 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
         fun readerExtractScript(readerJs: String): String =
             readerJs + "\n(function(){var r=window.__keyphone_rm__;return r&&r.extract?r.extract():null;})()"
 
-        /**
-         * 阅读模式：取下一章。
-         *
-         * 返回 JSON 字符串（`{ok:true,...}` / `{ok:false,end:true}` / `{ok:false,pending:true}`）；
-         * `missing:true` 表示取章外壳已经不在了（渲染进程被杀 / 页面被替换），宿主据此重建外壳。
-         */
-        private const val READER_JS_FETCH_NEXT =
-            "(function(){try{var r=window.__keyphone_rm__;" +
-                "if(!r||!r.fetchNext)return JSON.stringify({ok:false,missing:true});" +
-                "return r.fetchNext();}catch(e){return JSON.stringify({ok:false,error:String(e)});}})()"
-
-        /**
-         * 取章外壳的 viewport（须与 `KeyphoneReadingMode.js` 的约定一致）。
-         * 外壳只是取章工具，用户看不到它，但保持与真实页面一致的排版口径不会有害。
-         */
-        private const val READER_VIEWPORT =
-            "width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"
+        // 取章脚本与外壳 viewport 已下沉到 `reading/ReadingFetchShellBuilder`（方案 B 自建自用），
+        // 这里不再保留副本 —— 避免两处常量各写一遍、改一处忘一处。
 
         /**
          * 取章回调的超时兜底（一次性计时，非常驻心跳）。
@@ -5401,6 +5580,9 @@ class KeyphoneBrowserActivity : KeydroidxBaseActivity(), BrowserContract.View {
 
         /** 「取章外壳还没 boot」的最大重试次数（用完交给用户按键自然重试） */
         private const val SHELL_NOT_READY_MAX_RETRY = 3
+
+        /** 「没有下一章」复核：重建外壳后等它 boot 完再问一次（只需一次，非心跳） */
+        private const val END_VERIFY_DELAY_MS = 900L
 
         /** 阅读模式：退出后补写历史的最小间隔（避开导航刚开始那一瞬的 URL / 进度错位） */
         private const val READING_TRAIL_MIN_GAP_MS = 1000L
